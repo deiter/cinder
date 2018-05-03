@@ -86,8 +86,10 @@ class RESTCaller(object):
                 self.__proxy.session, self.__method)(url, **kwargs)
         except requests.exceptions.ConnectionError:
             LOG.warning(_LW("ConnectionError on call to NS: %(url)s"
-                            " %(method)s, data: %(data)s"),
-                        self.__proxy.url, self.__method, data)
+                            " %(method)s, data: %(data)s"), {
+                        'method': self.__proxy.url,
+                        'method': self.__method,
+                        'data': data})
             self.handle_failover()
             url = self.get_full_url(args[0])
             response = getattr(
@@ -98,8 +100,11 @@ class RESTCaller(object):
             if exc.kwargs['message']['code'] == 'ENOENT':
                 LOG.warning(_LW("NexentaException on call to NS:"
                                 " %(url)s %(method)s, data: %(data)s,"
-                                " returned message: %s"),
-                            url, self.__method, data, exc.kwargs['message'])
+                                " returned message: %(message)s"), {
+                            'url': url,
+                            'method': self.__method,
+                            'data': data,
+                            'message': exc.kwargs['message']})
                 self.handle_failover()
                 url = self.get_full_url(args[0])
                 response = getattr(
@@ -173,6 +178,8 @@ class RESTCaller(object):
                 if content:
                     for service in content['data']:
                         if service['serviceName'] == self.__proxy.pool:
+                            if len(service['vips']) == 0:
+                                continue
                             for mapping in service['vips'][0]['nodeMapping']:
                                 if (mapping['node'] == node_name and
                                         mapping['status'] == 'up'):
