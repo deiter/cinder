@@ -169,6 +169,8 @@ class RESTCaller(object):
                 if content:
                     for service in content['data']:
                         if service['serviceName'] == self.__proxy.pool:
+                            if len(service['vips']) == 0:
+                                continue
                             for mapping in service['vips'][0]['nodeMapping']:
                                 if (mapping['node'] == node_name and
                                         mapping['status'] == 'up'):
