@@ -252,6 +252,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         except exception.NexentaException:
             return
 
+    def snapshot_revert_use_temp_snapshot(self):
+        # Considering that NexentaStor based drivers use COW images
+        # for storing snapshots, having chains of such images,
+        # creating a backup snapshot when reverting one is not
+        # actually helpful.
+        return False
+
     def revert_to_snapshot(self, context, volume, snapshot):
         """Revert volume to snapshot."""
         volume_path = self._get_volume_path(volume)
