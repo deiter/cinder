@@ -336,7 +336,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         host_iqn = None
         host_groups = []
         volume_path = self._get_volume_path(volume)
-        if type(connector) == dict and 'initiator' in connector:
+        if isinstance(connector, dict) and 'initiator' in connector:
             host_iqn = connector.get('initiator')
             host_groups.append(options.DEFAULT_HOST_GROUP)
             host_group = self._get_host_group(host_iqn)
