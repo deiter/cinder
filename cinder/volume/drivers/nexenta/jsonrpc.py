@@ -29,8 +29,7 @@ NMS_PLUGINS = {
 }
 
 requests.packages.urllib3.disable_warnings(exceptions.InsecureRequestWarning)
-requests.packages.urllib3.disable_warnings(
-    exceptions.InsecurePlatformWarning)
+requests.packages.urllib3.disable_warnings(exceptions.InsecurePlatformWarning)
 
 class NexentaJSONProxy(object):
 
@@ -89,12 +88,14 @@ class NexentaJSONProxy(object):
             'params': args
         })
 
-        LOG.debug('Sending JSON data: %s', data)
+        LOG.debug('Sending JSON data: %(data)s',
+                  {'data': data})
         r = self.session.post(self.url, data=data, timeout=TIMEOUT,
                               verify=self.verify)
         response = r.json()
 
-        LOG.debug('Got response: %s', response)
+        LOG.debug('Got response: %(response)s',
+                  {'response': response})
         if response.get('error') is not None:
             message = response['error'].get('message', '')
             raise exception.NexentaException(message)
