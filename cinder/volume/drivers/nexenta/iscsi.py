@@ -164,14 +164,14 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             msg = (_('Volume %(volume)s does not exist '
                      'at NexentaStor appliance'),
                    {'volume': self.volume})
-            raise exception.VolumeDriverException(message=msg)
+            raise exception.NexentaException(msg)
         if self.folder:
             folder = '%s/%s' % (self.volume, self.folder)
             if not self.nms.folder.object_exists(folder):
                 msg = (_('Folder %(folder)s does not exist '
                          'at NexentaStor appliance'),
                        {'folder': folder})
-                raise exception.VolumeDriverException(message=msg)
+                raise exception.NexentaException(msg)
 
     def _get_zvol_name(self, volume_name):
         """Return zvol name that corresponds given volume name."""
@@ -352,6 +352,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         # when user will delete origin volume. But when cloned volume deleted
         # we check its origin property and delete source snapshot if needed.
         self.create_snapshot(snapshot)
+        LOG.debug('Create clone %(clone)s from '
+                  'temporary snapshot %(snapshot)s',
+                  {'clone': volume['name'],
+                   'snapshot': snapshot['name']})
         try:
             self.create_volume_from_snapshot(volume, snapshot)
         except exception.NexentaException as ex:
@@ -397,16 +401,16 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         false_ret = (False, None)
 
         if volume['status'] not in ('available', 'retyping'):
-            LOG.warning('Volume %(volume)s status must be available or '
-                        'retyping, current volume status is %(status)s',
-                        {'volume': volume['name'],
-                         'status': volume['status']})
+            LOG.error('Volume %(volume)s status must be available or '
+                      'retyping, current volume status is %(status)s',
+                      {'volume': volume['name'],
+                       'status': volume['status']})
             return false_ret
 
         if 'capabilities' not in host:
-            LOG.warning('Unsupported host %(host)s: '
-                        'no capabilities found',
-                        {'host': host})
+            LOG.error('Unsupported host %(host)s: '
+                      'no capabilities found',
+                      {'host': host})
             return false_ret
 
         capabilities = host['capabilities']
@@ -416,9 +420,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 'vendor_name' in capabilities and
                 'free_capacity_gb' in capabilities and
                 'nms_url' in capabilities):
-            LOG.warning('Unsupported host %(host)s: required iSCSI '
-                        'and NMS capabilities are not found',
-                        {'host': host})
+            LOG.error('Unsupported host %(host)s: required iSCSI '
+                      'and NMS capabilities are not found',
+                      {'host': host})
             return false_ret
 
         nms_url = capabilities['nms_url']
@@ -426,21 +430,21 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
         if not (capabilities['vendor_name'] == 'Nexenta' and
                 dst_parts[0] == self.__class__.__name__):
-            LOG.warning('Unsupported host %(host)s: incompatible '
-                        'vendor %(vendor)s or driver %(driver)s',
-                        {'host': host,
-                         'vendor': capabilities['vendor_name'],
-                         'driver': self.__class__.__name__})
+            LOG.error('Unsupported host %(host)s: incompatible '
+                      'vendor %(vendor)s or driver %(driver)s',
+                      {'host': host,
+                       'vendor': capabilities['vendor_name'],
+                       'driver': self.__class__.__name__})
             return false_ret
 
         if capabilities['free_capacity_gb'] < volume['size']:
-            LOG.warning('There is not enough space available on the '
-                        'host %(host)s to migrate volume %(volume), '
-                        'free space: %(free)d, required: %(size)d',
-                        {'host': host,
-                         'volume': volume['name'],
-                         'free': capabilities['free_capacity_gb'],
-                         'size': volume['size']})
+            LOG.error('There is not enough space available on the '
+                      'host %(host)s to migrate volume %(volume), '
+                      'free space: %(free)d, required: %(size)d',
+                      {'host': host,
+                       'volume': volume['name'],
+                       'free': capabilities['free_capacity_gb'],
+                       'size': volume['size']})
             return false_ret
 
         dst_host, dst_volume = dst_parts[1:]
@@ -452,9 +456,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 ssh_bound = True
                 break
         if not ssh_bound:
-            LOG.warning('Remote NexentaStor Appliance '
-                        '%(host)s should be SSH-bound',
-                        {'host': dst_host})
+            LOG.error('Remote NexentaStor Appliance '
+                      '%(host)s should be SSH-bound',
+                      {'host': dst_host})
             return false_ret
         # Create temporary snapshot of volume on NexentaStor Appliance.
         snapshot = {
@@ -473,11 +477,11 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         try:
             self.nms.appliance.execute(self._get_zfs_send_recv_cmd(src, dst))
         except exception.NexentaException as ex:
-            LOG.warning('Cannot send source snapshot %(src)s to '
-                        'destination %(dst)s, reason: %(error)s',
-                        {'src': src,
-                         'dst': dst,
-                         'error': six.text_type(ex)})
+            LOG.error('Cannot send source snapshot %(src)s to '
+                      'destination %(dst)s, reason: %(error)s',
+                      {'src': src,
+                       'dst': dst,
+                       'error': six.text_type(ex)})
             return false_ret
         finally:
             try:
@@ -538,12 +542,12 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         src_backend = self.__class__.__name__
         dst_backend = capabilities['location_info'].split(':')[0]
         if src_backend != dst_backend:
-            LOG.warning('Cannot retype volume %(volume)s from '
-                        'the %(src)s volume backend to the '
-                        'different %(dst)s volume backend',
-                        {'volume': volume['name'],
-                         'src': src_backend,
-                         'dst': dst_backend})
+            LOG.error('Cannot retype volume %(volume)s from '
+                      'the %(src)s volume backend to the '
+                      'different %(dst)s volume backend',
+                      {'volume': volume['name'],
+                       'src': src_backend,
+                       'dst': dst_backend})
             return False
 
         hosts = (volume['host'], host['host'])
