@@ -20,6 +20,7 @@ import six
 from eventlet import greenthread
 from cinder.openstack.common import log as logging
 from cinder.openstack.common import units
+from six.moves import urllib
 
 from cinder import context
 from cinder import db
