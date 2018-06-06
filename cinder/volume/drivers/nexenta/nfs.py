@@ -68,13 +68,13 @@ class NexentaNfsDriver(nfs.NfsDriver):  # pylint: disable=R0921
         super(NexentaNfsDriver, self).__init__(*args, **kwargs)
         if self.configuration:
             self.configuration.append_config_values(
-                options.NEXENTA_CONNECTION_OPTIONS)
+                options.NEXENTA_CONNECTION_OPTS)
             self.configuration.append_config_values(
-                options.NEXENTA_NFS_OPTIONS)
+                options.NEXENTA_NFS_OPTS)
             self.configuration.append_config_values(
-                options.NEXENTA_DATASET_OPTIONS)
+                options.NEXENTA_DATASET_OPTS)
             self.configuration.append_config_values(
-                options.NEXENTA_RRMGR_OPTIONS)
+                options.NEXENTA_RRMGR_OPTS)
 
         self.nms_cache_volroot = self.configuration.nexenta_nms_cache_volroot
         self.rrmgr_compression = self.configuration.nexenta_rrmgr_compression
