@@ -15,6 +15,7 @@
 
 import json
 import requests
+import six
 import time
 
 from oslo_log import log as logging
@@ -113,7 +114,7 @@ class RESTCaller(object):
                              'url': url,
                              'method': self.__method,
                              'data': data,
-                             'message': ex.kwargs['message']})
+                             'message': six.text_type(ex)})
                 self.handle_failover()
                 url = self.get_full_url(args[0])
                 response = getattr(
@@ -141,13 +142,13 @@ class RESTCaller(object):
                 except exception.NexentaException as ex:
                     if ex.kwargs['message']['code'] == 'ENOENT':
                         LOG.debug('Exception on call to %(appliance)s: '
-                                  '%(method)s %(url)s data: %(data)s '
+                                  '%(url)s %(method)s data: %(data)s '
                                   'returned message: %(message)s',
                                   {'appliance': APPLIANCE,
-                                   'method': self.__method,
                                    'url': url,
+                                   'method': self.__method,
                                    'data': data,
-                                   'message': ex.kwargs['message']})
+                                   'message': six.text_type(ex)})
                         self.handle_failover()
                         url = self.get_full_url(args[0])
                         response = getattr(
