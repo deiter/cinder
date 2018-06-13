@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import ast
 import hashlib
 import os
 import six
@@ -32,7 +33,7 @@ from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 from cinder.volume.drivers import nfs
 
-VERSION = '1.6.2'
+VERSION = '1.6.3'
 LOG = logging.getLogger(__name__)
 BLOCK_SIZE_MB = 1
 
@@ -55,6 +56,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 mounts on controller. Clean up mount folders on delete.
         1.6.1 - Fixed volume from image creation.
         1.6.2 - Removed redundant share mount from initialize_connection.
+        1.6.3 - Adapted NexentaException for the latest Cinder.
     """
 
     driver_prefix = 'nexenta'
@@ -165,7 +167,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self.nef.post(url, data)
         except exception.NexentaException as ex:
-            if 'EEXIST' in ex.args[0]:
+            err = ast.literal_eval(ex.msg)
+            if err['code'] == 'EEXIST':
                 LOG.debug('Filesystem %(filesystem)s already exists, '
                           'reuse existing filesystem',
                           {'filesystem': filesystem})
@@ -343,7 +346,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self.nef.post(url, data)
         except exception.NexentaException as ex:
-            if 'ENOENT' in ex.args[0] and len(nef_ips) > 1:
+            err = ast.literal_eval(ex.msg)
+            if err['code'] == 'ENOENT' and len(nef_ips) > 1:
                 data['remoteNode']['host'] = nef_ips[1]
                 self.nef.post(url, data)
             else:
@@ -425,7 +429,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self.nef.delete(url)
         except exception.NexentaException as ex:
-            if 'Failed to destroy snap' in ex.kwargs['message']['message']:
+            err = ast.literal_eval(ex.msg)
+            if 'Failed to destroy snap' in err['message']:
                 url = 'storage/snapshots?parent=%s' % '%2F'.join(
                     [pool, fs, volume['name']])
                 snap_map = {}
@@ -521,8 +526,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
             [pool, fs, volume['name']]), snapshot['name'])
         try:
             self.nef.delete(url)
-        except exception.NexentaException:
-            return
+        except exception.NexentaException as ex:
+            err = ast.literal_eval(ex.msg)
+            if (err['code'] == 'EBUSY' and
+                'Dependent datasets' in err['message']):
+                LOG.debug('Snapshot %(snapshot)s has dependent '
+                          'clones, it will be deleted later',
+                          {'snapshot': snapshot['name']})
+            else:
+                raise ex
 
     def snapshot_revert_use_temp_snapshot(self):
         # Considering that NexentaStor based drivers use COW images
