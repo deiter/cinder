@@ -32,9 +32,10 @@ from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 from cinder.volume.drivers import nfs
 
-VERSION = '1.6.1'
+VERSION = '1.6.2'
 LOG = logging.getLogger(__name__)
 BLOCK_SIZE_MB = 1
+
 
 @interface.volumedriver
 class NexentaNfsDriver(nfs.NfsDriver):
@@ -53,6 +54,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 Mount and umount shares on each operation to avoid mass
                 mounts on controller. Clean up mount folders on delete.
         1.6.1 - Fixed volume from image creation.
+        1.6.2 - Removed redundant share mount from initialize_connection.
     """
 
     driver_prefix = 'nexenta'
@@ -227,8 +229,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         if mount_path not in self._remotefsclient._read_mounts():
             LOG.debug('NFS share %(share)s is not mounted at %(path)s',
-                     {'share': nfs_share,
-                      'path': mount_path})
+                      {'share': nfs_share,
+                       'path': mount_path})
             return
 
         for attempt in range(num_attempts):
@@ -394,8 +396,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         url = 'hpr/activate'
         data = {'datasetName': '/'.join([self.share, volume['name']])}
         self.nef.post(url, data)
-        self._ensure_share_mounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
         data = {'export': volume['provider_location'], 'name': 'volume'}
         return {
             'driver_volume_type': self.driver_volume_type,
@@ -479,9 +479,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           run_as_root=True)
         else:
             seek = (volume['size'] * units.Gi //
-                (BLOCK_SIZE_MB * units.Mi))
+                    (BLOCK_SIZE_MB * units.Mi))
             count = ((new_size - volume['size']) * units.Gi //
-                (BLOCK_SIZE_MB * units.Mi))
+                     (BLOCK_SIZE_MB * units.Mi))
             self._execute(
                 'dd', 'if=/dev/zero',
                 'seek=%d' % seek,
