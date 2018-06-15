@@ -400,6 +400,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         url = 'hpr/activate'
         data = {'datasetName': '/'.join([self.share, volume['name']])}
         self.nef.post(url, data)
+        self._ensure_share_mounted('%s:/%s/%s' % (
+            self.nas_host, self.share, volume['name']))
         data = {'export': volume['provider_location'], 'name': 'volume'}
         return {
             'driver_volume_type': self.driver_volume_type,
