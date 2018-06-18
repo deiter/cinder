@@ -13,7 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import ast
 import hashlib
 import os
 import six
@@ -167,7 +166,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self.nef.post(url, data)
         except exception.NexentaException as ex:
-            err = ast.literal_eval(ex.msg)
+            err = utils.ex2err(ex)
             if err['code'] == 'EEXIST':
                 LOG.debug('Filesystem %(filesystem)s already exists, '
                           'reuse existing filesystem',
@@ -346,7 +345,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self.nef.post(url, data)
         except exception.NexentaException as ex:
-            err = ast.literal_eval(ex.msg)
+            err = utils.ex2err(ex)
             if err['code'] == 'ENOENT' and len(nef_ips) > 1:
                 data['remoteNode']['host'] = nef_ips[1]
                 self.nef.post(url, data)
@@ -431,7 +430,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self.nef.delete(url)
         except exception.NexentaException as ex:
-            err = ast.literal_eval(ex.msg)
+            err = utils.ex2err(ex)
             if 'Failed to destroy snap' in err['message']:
                 url = 'storage/snapshots?parent=%s' % '%2F'.join(
                     [pool, fs, volume['name']])
@@ -529,7 +528,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self.nef.delete(url)
         except exception.NexentaException as ex:
-            err = ast.literal_eval(ex.msg)
+            err = utils.ex2err(ex)
             if (err['code'] == 'EBUSY' and
                 'Dependent datasets' in err['message']):
                 LOG.debug('Snapshot %(snapshot)s has dependent '

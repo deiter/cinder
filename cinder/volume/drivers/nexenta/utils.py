@@ -1,4 +1,4 @@
-# Copyright 2013 Nexenta Systems, Inc.
+# Copyright 2018 Nexenta Systems, Inc.
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import ast
 import re
 import six
 
@@ -163,3 +164,7 @@ def parse_nef_url(url):
 def get_migrate_snapshot_name(volume):
     """Return name for snapshot that will be used to migrate the volume."""
     return 'cinder-migrate-snapshot-%(id)s' % volume
+
+def ex2err(ex):
+    """Convert a Cinder Exception to a Nexenta Error."""
+    return ast.literal_eval(ex.msg)

@@ -13,7 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import ast
 import ipaddress
 import math
 import random
@@ -123,7 +122,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         try:
             self.nef.post(url, data)
         except exception.NexentaException as ex:
-            err = ast.literal_eval(ex.msg)
+            err = utils.ex2err(ex)
             if err['code'] == 'EEXIST':
                 LOG.debug('Volume group %(group)s already exists',
                           {'group': self.volume_group})
@@ -191,7 +190,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             url = 'storage/volumes/%s?snapshots=true' % path
             self.nef.delete(url)
         except exception.NexentaException as ex:
-            err = ast.literal_eval(ex.msg)
+            err = utils.ex2err(ex)
             if 'Failed to destroy snap' in err['message']:
                 url = 'storage/snapshots?parent=%s' % path
                 snap_map = {}

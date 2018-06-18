@@ -13,7 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import ast
 import json
 import requests
 import six
@@ -24,6 +23,7 @@ from oslo_log import log as logging
 from cinder import exception
 from cinder.i18n import _
 from cinder.utils import retry
+from cinder.volume.drivers.nexenta import utils
 from oslo_serialization import jsonutils
 from requests.cookies import extract_cookies_to_jar
 from requests.packages.urllib3 import exceptions
@@ -107,7 +107,7 @@ class RESTCaller(object):
         try:
             check_error(response)
         except exception.NexentaException as ex:
-            err = ast.literal_eval(ex.msg)
+            err = utils.ex2err(ex)
             if err['code'] == 'ENOENT':
                 LOG.warning('Exception on call to %(appliance)s: '
                             '%(url)s %(method)s data: %(data)s '
@@ -142,7 +142,7 @@ class RESTCaller(object):
                 try:
                     check_error(response)
                 except exception.NexentaException as ex:
-                    err = ast.literal_eval(ex.msg)
+                    err = utils.ex2err(ex)
                     if err['code'] == 'ENOENT':
                         LOG.debug('Exception on call to %(appliance)s: '
                                   '%(url)s %(method)s data: %(data)s '
