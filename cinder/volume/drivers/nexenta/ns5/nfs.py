@@ -32,7 +32,7 @@ from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 from cinder.volume.drivers import nfs
 
-VERSION = '1.6.3'
+VERSION = '1.6.5'
 LOG = logging.getLogger(__name__)
 BLOCK_SIZE_MB = 1
 
@@ -56,6 +56,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.6.1 - Fixed volume from image creation.
         1.6.2 - Removed redundant share mount from initialize_connection.
         1.6.3 - Adapted NexentaException for the latest Cinder.
+        1.6.4 - Fixed volume mount/unmount.
+        1.6.5 - Added driver_ssl_cert_verify for HA failover.
     """
 
     driver_prefix = 'nexenta'
@@ -135,23 +137,19 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Copy image %(image)s to volume %(volume)s',
                   {'image': image_id,
                    'volume': volume['name']})
-        self._ensure_share_mounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
+        self._mount_volume(volume)
         super(NexentaNfsDriver, self).copy_image_to_volume(
             context, volume, image_service, image_id)
-        self._ensure_share_unmounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
+        self._unmount_volume(volume)
 
     def copy_volume_to_image(self, context, volume, image_service, image_meta):
         LOG.debug('Copy volume %(volume)s to image %(image)s',
                   {'volume': volume['name'],
                    'image': image_meta['id']})
-        self._ensure_share_mounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
+        self._mount_volume(volume)
         super(NexentaNfsDriver, self).copy_volume_to_image(
             context, volume, image_service, image_meta)
-        self._ensure_share_unmounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
+        self._unmount_volume(volume)
 
     def _do_create_volume(self, volume):
         pool, fs = self._get_share_datasets(self.share)
@@ -177,9 +175,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.nas_host, self.share, volume['name'])
         try:
             self._share_folder(fs, volume['name'])
-            self._ensure_share_mounted('%s:/%s/%s' % (
-                self.nas_host, self.share, volume['name']))
-
+            self._mount_volume(volume)
             volume_size = volume['size']
             if getattr(self.configuration,
                        self.driver_prefix + '_sparsed_volumes'):
@@ -214,8 +210,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                            'error': six.text_type(ex)})
             raise ex
         finally:
-            self._ensure_share_unmounted('%s:/%s/%s' % (
-                self.nas_host, self.share, volume['name']))
+            self._unmount_volume(volume)
 
     def _ensure_share_unmounted(self, nfs_share, mount_path=None):
         """Ensure that NFS share is unmounted on the host.
@@ -259,6 +254,40 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 greenthread.sleep(1)
 
         self._delete(mount_path)
+
+    def _mount_volume(self, volume):
+        """Ensure that volume is activated and mounted on the host."""
+        dataset_name = self._get_dataset_name(volume)
+        dataset_url = 'storage/filesystems/%s' % (
+            urllib.parse.quote_plus(dataset_name))
+        dataset = self.nef.get(dataset_url)
+        dataset_mount_point = dataset.get('mountPoint')
+        dataset_ready = dataset.get('isMounted')
+        if dataset_mount_point == 'none':
+            hpr_url = 'hpr/activate'
+            data = {'datasetName': dataset_name}
+            self.nef.post(hpr_url, data)
+            dataset = self.nef.get(dataset_url)
+            dataset_mount_point = dataset.get('mountPoint')
+        elif not dataset_ready:
+            dataset_url = 'storage/filesystems/%s/mount' % (
+                urllib.parse.quote_plus(dataset_name))
+            self.nef.post(dataset_url)
+        nfs_share = '%s:%s' % (self.nas_host, dataset_mount_point)
+        self._ensure_share_mounted(nfs_share)
+
+    def _unmount_volume(self, volume):
+        """Ensure that volume is unmounted on the host."""
+        dataset_name = self._get_dataset_name(volume)
+        params = {'path': dataset_name}
+        url = 'storage/filesystems?%s' % urllib.parse.urlencode(params)
+        data = self.nef.get(url).get('data')
+        if not data:
+            return
+        dataset = data[0]
+        dataset_mount_point = dataset.get('mountPoint')
+        nfs_share = '%s:%s' % (self.nas_host, dataset_mount_point)
+        self._ensure_share_unmounted(nfs_share)
 
     def _create_sparsed_file(self, path, size):
         """Creates file with 0 disk usage."""
@@ -390,8 +419,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def terminate_connection(self, volume, connector, **kwargs):
         LOG.debug('Terminate volume connection for %(volume)s',
                   {'volume': volume['name']})
-        self._ensure_share_unmounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
+        self._unmount_volume(volume)
 
     def initialize_connection(self, volume, connector):
         LOG.debug('Initialize volume connection for %(volume)s',
@@ -399,8 +427,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         url = 'hpr/activate'
         data = {'datasetName': '/'.join([self.share, volume['name']])}
         self.nef.post(url, data)
-        self._ensure_share_mounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
+        self._mount_volume(volume)
         data = {'export': volume['provider_location'], 'name': 'volume'}
         return {
             'driver_volume_type': self.driver_volume_type,
@@ -415,14 +442,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         LOG.debug('Delete volume %(volume)s',
                   {'volume': volume['name']})
-        self._ensure_share_unmounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
         pool, fs = self._get_share_datasets(self.share)
         url = 'storage/filesystems?path=%s' % '%2F'.join(
             [pool, fs, volume['name']])
         if not self.nef.get(url).get('data'):
             return
-
+        self._unmount_volume(volume)
         field = 'originalSnapshot'
         origin = self.nef.get(url).get(field)
         url = 'storage/filesystems/%s?force=true&snapshots=true' % '%2F'.join(
@@ -477,8 +502,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.info('Extending volume: %(volume)s, new size: %(size)sGB',
                  {'volume': volume['name'],
                   'size': new_size})
-        self._ensure_share_mounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
+        self._mount_volume(volume)
         if self.sparsed_volumes:
             self._execute('truncate', '-s', '%sG' % new_size,
                           self.local_path(volume),
@@ -495,8 +519,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 'bs=%dM' % BLOCK_SIZE_MB,
                 'count=%d' % count,
                 run_as_root=True)
-        self._ensure_share_unmounted('%s:/%s/%s' % (
-            self.nas_host, self.share, volume['name']))
+        self._unmount_volume(volume)
 
     def create_snapshot(self, snapshot):
         """Creates a snapshot.
@@ -720,6 +743,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def _get_share_datasets(self, nfs_share):
         pool_name, fs = nfs_share.split('/', 1)
         return pool_name, urllib.parse.quote_plus(fs)
+
+    def _get_dataset_name(self, volume):
+        """Returns ZFS dataset name for a volume."""
+        return '%s/%s' % (self.share, volume['name'])
 
     def _get_clone_snapshot_name(self, volume):
         """Return name for snapshot that will be used to clone the volume."""

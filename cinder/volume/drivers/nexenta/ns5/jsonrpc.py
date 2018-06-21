@@ -44,20 +44,20 @@ def check_error(response):
             content = jsonutils.loads(body) if body else None
         except ValueError:
             msg = (_('Could not parse response from %(appliance)s: '
-                     '%(code)s %(reason)s %(body)s'),
-                   {'appliance': APPLIANCE,
-                    'code': code,
-                    'reason': reason,
-                    'body': body})
+                     '%(code)s %(reason)s %(body)s')
+                   % {'appliance': APPLIANCE,
+                      'code': code,
+                      'reason': reason,
+                      'body': body})
             raise exception.NexentaException(msg)
         if content and 'code' in content:
             raise exception.NexentaException(content)
         msg = (_('Got bad response from %(appliance)s: '
-                 '%(code)s %(reason)s %(content)s'),
-               {'appliance': APPLIANCE,
-                'code': code,
-                'reason': reason,
-                'content': content})
+                 '%(code)s %(reason)s %(content)s')
+               % {'appliance': APPLIANCE,
+                  'code': code,
+                  'reason': reason,
+                  'content': content})
         raise exception.NexentaException(msg)
 
 class RESTCaller(object):
@@ -195,7 +195,8 @@ class RESTCaller(object):
                 'rsf/clusters/%s/services' % cluster_name)
             while counter < 24:
                 counter += 1
-                response = self.__proxy.session.get(url)
+                response = self.__proxy.session.get(
+                    url, verify=self.__proxy.verify)
                 content = response.json() if response.content else None
                 if content:
                     for service in content['data']:
@@ -211,10 +212,10 @@ class RESTCaller(object):
                           {'pool': self.__proxy.pool,
                            'interval': interval})
                 time.sleep(interval)
-            msg=(_('Waited for %(period)ss, but pool %(pool)s '
-                   'service is still not running'),
-                 {'period': counter * interval,
-                  'pool': self.__proxy.pool})
+            msg = (_('Waited for %(period)ss, but pool %(pool)s '
+                     'service is still not running')
+                   % {'period': counter * interval,
+                      'pool': self.__proxy.pool})
             raise exception.NexentaException(msg)
         else:
             raise
@@ -291,10 +292,10 @@ class HTTPSAuth(requests.auth.AuthBase):
             token = content['token']
             del content['token']
             return token
-        msg = (_('Got bad response from %(appliance)s: %(code)s %(reason)s'),
-               {'appliance': APPLIANCE,
-                'code': response.status_code,
-                'reason': response.reason})
+        msg = (_('Got bad response from %(appliance)s: %(code)s %(reason)s')
+               % {'appliance': APPLIANCE,
+                  'code': response.status_code,
+                  'reason': response.reason})
         raise exception.NexentaException(msg)
 
 class NexentaJSONProxy(object):
