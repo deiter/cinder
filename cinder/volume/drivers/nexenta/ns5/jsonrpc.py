@@ -292,7 +292,8 @@ class HTTPSAuth(requests.auth.AuthBase):
             token = content['token']
             del content['token']
             return token
-        msg = (_('Got bad response from %(appliance)s: %(code)s %(reason)s')
+        msg = (_('Got bad response from %(appliance)s: '
+                 '%(code)s %(reason)s')
                % {'appliance': APPLIANCE,
                   'code': response.status_code,
                   'reason': response.reason})
