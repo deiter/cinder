@@ -36,8 +36,8 @@ def str2size(s, scale=1024):
 
     match = re.match(r'^([\.\d]+)\s*([BbKkMmGgTtPpEeZzYy]?)', s)
     if match is None:
-        raise ValueError('Invalid value: %(value)s',
-                         {'value': s})
+        raise ValueError('Invalid value: %(value)s'
+                         % {'value': s})
 
     groups = match.groups()
     value = float(groups[0])

@@ -36,6 +36,7 @@ from cinder.volume.drivers.nexenta import utils
 VERSION = '1.3.4'
 LOG = logging.getLogger(__name__)
 
+
 class NexentaISCSIDriver(driver.ISCSIDriver):
     """Executes volume driver commands on Nexenta Appliance.
 
@@ -135,8 +136,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         try:
             self.nef.get(url)
         except exception.NexentaException:
-            msg = (_('Volume group %(group)s not found'),
-                   {'group': self.volume_group})
+            msg = (_('Volume group %(group)s not found')
+                   % {'group': self.volume_group})
             raise exception.NexentaException(msg)
         services = self.nef.get('services')
         for service in services['data']:
