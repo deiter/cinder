@@ -31,7 +31,7 @@ from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 from cinder.volume.drivers import nfs
 
-VERSION = '1.6.4'
+VERSION = '1.6.5'
 LOG = logging.getLogger(__name__)
 BLOCK_SIZE_MB = 1
 
@@ -54,6 +54,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.6.2 - Removed redundant share mount from initialize_connection.
         1.6.3 - Adapted NexentaException for the latest Cinder.
         1.6.4 - Fixed volume mount/unmount.
+        1.6.5 - Added driver_ssl_cert_verify for HA failover.
     """
 
     driver_prefix = 'nexenta'
@@ -275,9 +276,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def _unmount_volume(self, volume):
         """Ensure that volume is unmounted on the host."""
         dataset_name = self._get_dataset_name(volume)
-        dataset_url = 'storage/filesystems/%s' % (
-            urllib.parse.quote_plus(dataset_name))
-        dataset = self.nef.get(dataset_url)
+        params = {'path': dataset_name}
+        url = 'storage/filesystems?%s' % urllib.parse.urlencode(params)
+        data = self.nef.get(url).get('data')
+        if not data:
+            return
+        dataset = data[0]
         dataset_mount_point = dataset.get('mountPoint')
         nfs_share = '%s:%s' % (self.nas_host, dataset_mount_point)
         self._ensure_share_unmounted(nfs_share)
@@ -477,13 +481,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         LOG.debug('Delete volume %(volume)s',
                   {'volume': volume['name']})
-        self._unmount_volume(volume)
         pool, fs = self._get_share_datasets(self.share)
         url = 'storage/filesystems?path=%s' % '%2F'.join(
             [pool, fs, volume['name']])
         if not self.nef.get(url).get('data'):
             return
-
+        self._unmount_volume(volume)
         field = 'originalSnapshot'
         origin = self.nef.get(url).get(field)
         url = 'storage/filesystems/%s?force=true&snapshots=true' % '%2F'.join(
