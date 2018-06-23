@@ -105,6 +105,9 @@ class RESTCaller(object):
                              'method': self.__method,
                              'data': data,
                              'message': six.text_type(err)})
+                if (err['source'] == 'hpr' and
+                        'Destination pool' in err['message']):
+                    return content
                 self.handle_failover()
                 url = self.get_full_url(args[0])
                 response = getattr(
@@ -140,6 +143,9 @@ class RESTCaller(object):
                                    'method': self.__method,
                                    'data': data,
                                    'message': six.text_type(err)})
+                        if (err['source'] == 'hpr' and
+                                'Destination pool' in err['message']):
+                            return content
                         self.handle_failover()
                         url = self.get_full_url(args[0])
                         response = getattr(
