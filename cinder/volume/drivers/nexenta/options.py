@@ -1,4 +1,4 @@
-# Copyright 2016 Nexenta Systems, Inc.
+# Copyright 2018 Nexenta Systems, Inc.
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -44,6 +44,9 @@ NEXENTA_EDGE_OPTS = [
                default='',
                help='NexentaEdge iSCSI Gateway client '
                'address for non-VIP service'),
+    cfg.IntOpt('nexenta_iops_limit',
+               default=0,
+               help='NexentaEdge iSCSI LUN object IOPS limit'),
     cfg.IntOpt('nexenta_chunksize',
                default=32768,
                help='NexentaEdge iSCSI LUN object chunk size'),
