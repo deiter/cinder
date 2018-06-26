@@ -13,7 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import ast
 import re
 import six
 
@@ -125,4 +124,4 @@ def get_migrate_snapshot_name(volume):
 
 def ex2err(ex):
     """Convert a Cinder Exception to a Nexenta Error."""
-    return ast.literal_eval(ex.msg)
+    return ex.msg
