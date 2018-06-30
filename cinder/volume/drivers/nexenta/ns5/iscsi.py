@@ -34,7 +34,7 @@ from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 
-VERSION = '1.3.5'
+VERSION = '1.3.6'
 LOG = logging.getLogger(__name__)
 
 
@@ -52,10 +52,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         1.3.0 - Removed target/TG caching, added support for target portals
                 and host groups.
         1.3.1 - Refactored _do_export to query exact lunMapping.
-        1.3.2 - Revert to snapshot support.
         1.3.3 - Refactored LUN creation, use host group for LUN mappings.
         1.3.4 - Adapted NexentaException for the latest Cinder.
         1.3.5 - Added deferred deletion for snapshots.
+        1.3.6 - Fixed race between volume/clone deletion.
     """
 
     VERSION = VERSION
@@ -192,7 +192,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.nef.delete(url)
         except exception.NexentaException as ex:
             err = utils.ex2err(ex)
-            if 'Failed to destroy snap' in err['message']:
+            if err['code'] == 'EEXIST':
                 params = {'parent': path}
                 url = 'storage/snapshots?%s' % (
                     urllib.parse.urlencode(params))
@@ -211,11 +211,11 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                     url = 'storage/volumes/%s/promote' % (
                         urllib.parse.quote_plus(clone))
                     self.nef.post(url)
-                    params = {'snapshots': 'true'}
-                    url = 'storage/volumes/%s?%s' % (
-                        urllib.parse.quote_plus(path),
-                        urllib.parse.urlencode(params))
-                    self.nef.delete(url)
+                params = {'snapshots': 'true'}
+                url = 'storage/volumes/%s?%s' % (
+                    urllib.parse.quote_plus(path),
+                    urllib.parse.urlencode(params))
+                self.nef.delete(url)
             else:
                 raise ex
 
@@ -268,23 +268,6 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             urllib.parse.quote_plus(path),
             urllib.parse.urlencode(params))
         self.nef.delete(url)
-
-    def snapshot_revert_use_temp_snapshot(self):
-        # Considering that NexentaStor based drivers use COW images
-        # for storing snapshots, having chains of such images,
-        # creating a backup snapshot when reverting one is not
-        # actually helpful.
-        return False
-
-    def revert_to_snapshot(self, context, volume, snapshot):
-        """Revert volume to snapshot."""
-        LOG.debug('Revert volume %(volume)s to snapshot %(snapshot)s',
-                 {'volume': volume['name'],
-                  'snapshot': snapshot['name']})
-        volume_path = self._get_volume_path(volume)
-        url = 'storage/volumes/%s/rollback' % urllib.parse.quote_plus(
-            volume_path)
-        self.nef.post(url, {'snapshot': snapshot['name']})
 
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create new volume from other's snapshot on appliance.

@@ -32,7 +32,7 @@ from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 from cinder.volume.drivers import nfs
 
-VERSION = '1.6.8'
+VERSION = '1.6.9'
 LOG = logging.getLogger(__name__)
 BLOCK_SIZE_MB = 1
 
@@ -49,7 +49,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 Added abandoned volumes and snapshots cleanup.
         1.3.0 - Failover support.
         1.4.0 - Migrate volume support and new NEF API calls.
-        1.5.0 - Revert to snapshot support.
         1.6.0 - Get mountPoint from API to support old style mount points.
                 Mount and umount shares on each operation to avoid mass
                 mounts on controller. Clean up mount folders on delete.
@@ -61,6 +60,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.6.6 - Destroy unused snapshots after deletion of it's last clone.
         1.6.7 - Fixed volume migration for HA environment.
         1.6.8 - Added deferred deletion for snapshots.
+        1.6.9 - Fixed race between volume/clone deletion.
     """
 
     driver_prefix = 'nexenta'
@@ -481,7 +481,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.nef.delete(url)
         except exception.NexentaException as ex:
             err = utils.ex2err(ex)
-            if 'Failed to destroy snap' in err['message']:
+            if err['code'] == 'EEXIST':
                 params = {'parent': path}
                 url = 'storage/snapshots?%s' % (
                     urllib.parse.urlencode(params))
@@ -500,15 +500,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
                     url = 'storage/filesystems/%s/promote' % (
                         urllib.parse.quote_plus(clone))
                     self.nef.post(url)
-                    path = self._get_dataset_name(volume)
-                    params = {
-                        'force': 'true',
-                        'snapshots': 'true'
-                    }
-                    url = 'storage/filesystems/%s?%s' % (
-                        urllib.parse.quote_plus(path),
-                        urllib.parse.urlencode(params))
-                    self.nef.delete(url)
+                params = {
+                    'force': 'true',
+                    'snapshots': 'true'
+                }
+                url = 'storage/filesystems/%s?%s' % (
+                    urllib.parse.quote_plus(path),
+                    urllib.parse.urlencode(params))
+                self.nef.delete(url)
             else:
                 raise ex
 
@@ -585,24 +584,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
             urllib.parse.quote_plus(path),
             urllib.parse.urlencode(params))
         self.nef.delete(url)
-
-    def snapshot_revert_use_temp_snapshot(self):
-        # Considering that NexentaStor based drivers use COW images
-        # for storing snapshots, having chains of such images,
-        # creating a backup snapshot when reverting one is not
-        # actually helpful.
-        return False
-
-    def revert_to_snapshot(self, context, volume, snapshot):
-        """Revert volume to snapshot."""
-        pool, fs = self._get_share_datasets(self.share)
-        fs_path = '/'.join([pool, fs, volume['name']])
-        LOG.debug('Revert volume %(volume)s to snapshot %(snapshot)s',
-                  {'volume': fs_path,
-                   'snapshot': snapshot['name']})
-        url = 'storage/filesystems/%s/rollback' % urllib.parse.quote_plus(
-            fs_path)
-        self.nef.post(url, {'snapshot': snapshot['name']})
 
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create new volume from other's snapshot on appliance.
