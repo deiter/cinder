@@ -1,4 +1,4 @@
-# Copyright 2017 Nexenta Systems, Inc.
+# Copyright 2018 Nexenta Systems, Inc.
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,6 +15,10 @@
 
 from oslo_config import cfg
 
+POLL_RETRIES = 5
+DEFAULT_ISCSI_PORT = 3260
+DEFAULT_HOST_GROUP = 'all'
+DEFAULT_TARGET_GROUP = 'all'
 
 NEXENTA_EDGE_OPTS = [
     cfg.StrOpt('nexenta_nbd_symlinks_dir',
@@ -23,10 +27,10 @@ NEXENTA_EDGE_OPTS = [
                     'links to NBDs'),
     cfg.StrOpt('nexenta_rest_user',
                default='admin',
-               help='User name to connect to NexentaEdge'),
+               help='User name to connect to NexentaEdge.'),
     cfg.StrOpt('nexenta_rest_password',
                default='nexenta',
-               help='Password to connect to NexentaEdge',
+               help='Password to connect to NexentaEdge.',
                secret=True),
     cfg.StrOpt('nexenta_lun_container',
                default='',
@@ -38,9 +42,19 @@ NEXENTA_EDGE_OPTS = [
                default='',
                help='NexentaEdge iSCSI Gateway client '
                'address for non-VIP service'),
+    cfg.IntOpt('nexenta_iops_limit',
+               default=0,
+               help='NexentaEdge iSCSI LUN object IOPS limit'),
     cfg.IntOpt('nexenta_chunksize',
                default=32768,
-               help='NexentaEdge iSCSI LUN object chunk size')
+               help='NexentaEdge iSCSI LUN object chunk size'),
+    cfg.IntOpt('nexenta_replication_count',
+               default=3,
+               help='NexentaEdge iSCSI LUN object replication count.'),
+    cfg.BoolOpt('nexenta_encryption',
+                default=False,
+                help='Defines whether NexentaEdge iSCSI LUN object '
+                     'has encryption enabled.')
 ]
 
 NEXENTA_CONNECTION_OPTS = [
@@ -62,6 +76,9 @@ NEXENTA_CONNECTION_OPTS = [
     cfg.BoolOpt('nexenta_use_https',
                 default=True,
                 help='Use secure HTTP for REST connection (default True)'),
+    cfg.BoolOpt('nexenta_lu_writebackcache_disabled',
+                default=False,
+                help='Postponed write to backing store or not'),
     cfg.StrOpt('nexenta_user',
                default='admin',
                help='User name to connect to Nexenta SA'),
@@ -98,6 +115,9 @@ NEXENTA_ISCSI_OPTS = [
     cfg.StrOpt('nexenta_target_group_prefix',
                default='cinder',
                help='Prefix for iSCSI target groups on SA'),
+    cfg.StrOpt('nexenta_host_group_prefix',
+               default='cinder',
+               help='Prefix for iSCSI host groups on SA'),
     cfg.StrOpt('nexenta_volume_group',
                default='iscsi',
                help='Volume group for NexentaStor5 iSCSI'),
@@ -107,6 +127,10 @@ NEXENTA_NFS_OPTS = [
     cfg.StrOpt('nexenta_shares_config',
                default='/etc/cinder/nfs_shares',
                help='File with the list of available nfs shares'),
+    cfg.StrOpt('nas_host',
+               deprecated_name='nas_ip',
+               default='',
+               help='VIP, IP address or Hostname of NexentaStor Appliance.'),
     cfg.StrOpt('nexenta_mount_point_base',
                default='$state_path/mnt',
                help='Base directory that contains NFS share mount points'),
@@ -116,6 +140,9 @@ NEXENTA_NFS_OPTS = [
                      'sparsed files that take no space. If disabled '
                      '(False), volume is created as a regular file, '
                      'which takes a long time.'),
+    cfg.BoolOpt('nexenta_qcow2_volumes',
+                default=False,
+                help='Create volumes as QCOW2 files rather than raw files'),
     cfg.BoolOpt('nexenta_nms_cache_volroot',
                 default=True,
                 help=('If set True cache NexentaStor appliance volroot option '
