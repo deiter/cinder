@@ -31,6 +31,7 @@ from cinder import db
 from cinder import exception
 from cinder.openstack.common import log as logging
 from cinder import units
+from cinder.openstack.common.gettextutils import _
 from cinder.volume.drivers import nexenta
 from cinder.volume.drivers.nexenta import jsonrpc
 from cinder.volume.drivers.nexenta import options
@@ -66,25 +67,28 @@ class NexentaNfsDriver(nfs.NfsDriver):  # pylint: disable=R0921
         super(NexentaNfsDriver, self).__init__(*args, **kwargs)
         if self.configuration:
             self.configuration.append_config_values(
-                options.NEXENTA_CONNECTION_OPTIONS)
+                options.NEXENTA_CONNECTION_OPTS)
             self.configuration.append_config_values(
-                options.NEXENTA_NFS_OPTIONS)
+                options.NEXENTA_NFS_OPTS)
             self.configuration.append_config_values(
-                options.NEXENTA_VOLUME_OPTIONS)
+                options.NEXENTA_DATASET_OPTS)
             self.configuration.append_config_values(
-                options.NEXENTA_RRMGR_OPTIONS)
+                options.NEXENTA_RRMGR_OPTS)
 
         self.nms_cache_volroot = self.configuration.nexenta_nms_cache_volroot
         self.rrmgr_compression = self.configuration.nexenta_rrmgr_compression
         self.rrmgr_tcp_buf_size = self.configuration.nexenta_rrmgr_tcp_buf_size
         self.rrmgr_connections = self.configuration.nexenta_rrmgr_connections
         self.nfs_mount_point_base = self.configuration.nexenta_mount_point_base
-        self.volume_compression = self.configuration.nexenta_volume_compression
-        self.volume_deduplication = self.configuration.nexenta_volume_dedup
-        self.volume_description = self.configuration.nexenta_volume_description
+        self.volume_compression = (
+            self.configuration.nexenta_dataset_compression)
+        self.volume_deduplication = self.configuration.nexenta_dataset_dedup
+        self.volume_description = (
+            self.configuration.nexenta_dataset_description)
         self.sparsed_volumes = self.configuration.nexenta_sparsed_volumes
         self._nms2volroot = {}
         self.share2nms = {}
+        self.nfs_versions = {}
 
     @property
     def backend_name(self):
@@ -228,9 +232,11 @@ class NexentaNfsDriver(nfs.NfsDriver):  # pylint: disable=R0921
         data = {'export': export, 'name': 'volume'}
         if volume['provider_location'] in self.shares:
             data['options'] = self.shares[volume['provider_location']]
+        data['options'] = None
         return {
             'driver_volume_type': self.driver_volume_type,
-            'data': data
+            'data': data,
+            'mount_point_base': self._get_mount_point_base()
         }
 
     def retype(self, context, volume, new_type, diff, host):
@@ -316,7 +322,7 @@ class NexentaNfsDriver(nfs.NfsDriver):  # pylint: disable=R0921
         LOG.debug('Creating folder on Nexenta Store %s', folder)
         nms.folder.create_with_props(
             vol, folder,
-            {'compression': self.configuration.nexenta_volume_compression}
+            {'compression': self.volume_compression}
         )
 
         volume_path = self.remote_path(volume)
@@ -435,9 +441,9 @@ class NexentaNfsDriver(nfs.NfsDriver):  # pylint: disable=R0921
             mount_path = self.remote_path(volume).strip(
                 '/%s' % self.VOLUME_FILE_NAME)
             if mount_path in self._remotefsclient._read_mounts():
-                props = nms.folder.get_child_props(folder, 'origin') or {}
                 self._execute('umount', mount_path, run_as_root=True)
             try:
+                props = nms.folder.get_child_props(folder, 'origin') or {}
                 nms.folder.destroy(folder, '-r')
             except nexenta.NexentaException as exc:
                 if 'does not exist' in exc.args[0]:
@@ -472,13 +478,13 @@ class NexentaNfsDriver(nfs.NfsDriver):  # pylint: disable=R0921
             self._create_sparsed_file(nms, volume_path, new_size)
         else:
             block_size_mb = 1
-            block_count = ((new_size - volume['size']) * units.Gi
-                           / (block_size_mb * units.Mi))
+            block_count = ((new_size - volume['size']) * units.GiB /
+                (block_size_mb * units.MiB))
 
             nms.appliance.execute(
                 'dd if=/dev/zero seek=%(seek)d of=%(path)s'
                 ' bs=%(bs)dM count=%(count)d' % {
-                    'seek': volume['size'] * units.Gi / block_size_mb,
+                    'seek': volume['size'] * units.GiB / block_size_mb,
                     'path': volume_path,
                     'bs': block_size_mb,
                     'count': block_count
@@ -539,7 +545,7 @@ class NexentaNfsDriver(nfs.NfsDriver):  # pylint: disable=R0921
         :param size: size of file
         """
         block_size_mb = 1
-        block_count = size * units.Gi / (block_size_mb * units.Mi)
+        block_count = size * units.GiB / (block_size_mb * units.MiB)
 
         LOG.info(_('Creating regular file: %s.'
                    'This may take some time.') % path)
@@ -698,11 +704,17 @@ class NexentaNfsDriver(nfs.NfsDriver):  # pylint: disable=R0921
                     self._ensure_share_mounted(sub_share, mnt_path)
 
     def _get_nfs_server_version(self, share):
-        nms = self.share2nms[share]
-        nfs_opts = nms.netsvc.get_confopts(
-            'svc:/network/nfs/server:default', 'configure')
-        version = nfs_opts['nfs_server_versmax']['current']
-        return int(version)
+        if not self.nfs_versions.get(share):
+            nms = self.share2nms[share]
+            nfs_opts = nms.netsvc.get_confopts(
+                'svc:/network/nfs/server:default', 'configure')
+            try:
+                self.nfs_versions[share] = int(
+                    nfs_opts['nfs_server_versmax']['current'])
+            except KeyError:
+                self.nfs_versions[share] = int(
+                    nfs_opts['server_versmax']['current'])
+        return self.nfs_versions[share]
 
     def _get_capacity_info(self, nfs_share):
         """Calculate available space on the NFS share.

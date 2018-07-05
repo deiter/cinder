@@ -1,4 +1,4 @@
-# Copyright 2013 Nexenta Systems, Inc.
+# Copyright 2018 Nexenta Systems, Inc.
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -12,15 +12,9 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-"""
-:mod:`nexenta.utils` -- Nexenta-specific utils functions.
-=========================================================
-
-.. automodule:: nexenta.utils
-.. moduleauthor:: Nexenta OpenStack Developers <openstack.team@nexenta.com>
-"""
 
 import re
+import six
 
 from cinder import units
 import six.moves.urllib.parse as urlparse
@@ -37,16 +31,17 @@ def str2size(s, scale=1024):
     if not s:
         return 0
 
-    if isinstance(s, (int, long)):
+    if isinstance(s, six.integer_types):
         return s
 
     match = re.match(r'^([\.\d]+)\s*([BbKkMmGgTtPpEeZzYy]?)', s)
     if match is None:
-        raise ValueError('Invalid value: "%s"' % s)
+        raise ValueError('Invalid value: %(value)s'
+                         % {'value': s})
 
     groups = match.groups()
     value = float(groups[0])
-    suffix = len(groups) > 1 and groups[1].upper() or 'B'
+    suffix = groups[1].upper() if groups[1] else 'B'
 
     types = ('B', 'K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y')
     for i, t in enumerate(types):
@@ -57,7 +52,7 @@ def str2size(s, scale=1024):
 def str2gib_size(s):
     """Covert size-string to size in gigabytes."""
     size_in_bytes = str2size(s)
-    return size_in_bytes / units.GiB
+    return size_in_bytes // units.GiB
 
 
 def get_rrmgr_cmd(src, dst, compression=None, tcp_buf_size=None,
@@ -65,13 +60,13 @@ def get_rrmgr_cmd(src, dst, compression=None, tcp_buf_size=None,
     """Returns rrmgr command for source and destination."""
     cmd = ['rrmgr', '-s', 'zfs']
     if compression:
-        cmd.extend(['-c', '%s' % str(compression)])
+        cmd.extend(['-c', six.text_type(compression)])
     cmd.append('-q')
     cmd.append('-e')
     if tcp_buf_size:
-        cmd.extend(['-w', str(tcp_buf_size)])
+        cmd.extend(['-w', six.text_type(tcp_buf_size)])
     if connections:
-        cmd.extend(['-n', str(connections)])
+        cmd.extend(['-n', six.text_type(connections)])
     cmd.extend([src, dst])
     return ' '.join(cmd)
 
@@ -83,9 +78,12 @@ def parse_nms_url(url):
         auto://admin:nexenta@192.168.1.1:2000/
 
     NMS URL parts:
-        auto                True if url starts with auto://, protocol will be
-                            automatically switched to https if http not
-                            supported;
+
+    .. code-block:: none
+
+        auto                True if url starts with auto://, protocol
+                            will be automatically switched to https
+                            if http not supported;
         scheme (auto)       connection protocol (http or https);
         user (admin)        NMS user;
         password (nexenta)  NMS password;
@@ -120,3 +118,8 @@ def parse_nms_url(url):
 def get_migrate_snapshot_name(volume):
     """Return name for snapshot that will be used to migrate the volume."""
     return 'cinder-migrate-snapshot-%(id)s' % volume
+
+
+def ex2err(ex):
+    """Convert a Cinder Exception to a Nexenta Error."""
+    return ex.msg
