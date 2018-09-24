@@ -34,7 +34,7 @@ from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 
-VERSION = '1.3.7'
+VERSION = '1.3.8'
 LOG = logging.getLogger(__name__)
 
 
@@ -58,6 +58,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         1.3.5 - Added deferred deletion for snapshots.
         1.3.6 - Fixed race between volume/clone deletion.
         1.3.7 - Added consistency group support.
+        1.3.8 - Added volume multi-attach.
     """
 
     VERSION = VERSION
@@ -354,6 +355,16 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         host_groups = []
         volume_path = self._get_volume_path(volume['name'])
         if isinstance(connector, dict) and 'initiator' in connector:
+            attachments = volume.volume_attachment
+            connectors = [attachment.connector for attachment in attachments]
+            if connectors.count(connector) > 1:
+                LOG.debug('Detected multiple connections on host '
+                          '%(host_name)s [%(host_ip)s] for volume '
+                          '%(volume)s, skip terminate volume connection',
+                          {'host_name': connector.get('host', 'unknown'),
+                           'host_ip': connector.get('ip', 'unknown'),
+                           'volume': volume['name']})
+                return True
             host_iqn = connector.get('initiator')
             host_groups.append(options.DEFAULT_HOST_GROUP)
             host_group = self._get_host_group(host_iqn)
@@ -361,17 +372,18 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 host_groups.append(host_group)
             LOG.debug('Terminate connection for volume %(volume)s '
                       'and initiator %(initiator)s',
-                      {'volume': volume_path, 'initiator': host_iqn})
+                      {'volume': volume['name'],
+                       'initiator': host_iqn})
         else:
             LOG.debug('Terminate all connections for volume %(volume)s',
-                      {'volume': volume_path})
+                      {'volume': volume['name']})
 
         params = {'volume': volume_path}
         url = 'san/lunMappings?%s' % urllib.parse.urlencode(params)
         mappings = self.nef.get(url).get('data')
         if len(mappings) == 0:
             LOG.debug('There are no LUN mappings found for volume %(volume)s',
-                      {'volume': volume_path})
+                      {'volume': volume['name']})
             return info
         for mapping in mappings:
             mapping_id = mapping.get('id')
@@ -380,13 +392,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             if host_iqn is None or mapping_hg in host_groups:
                 LOG.debug('Delete LUN mapping %(id)s for volume %(volume)s, '
                           'target group %(tg)s and host group %(hg)s',
-                          {'id': mapping_id, 'volume': volume_path,
+                          {'id': mapping_id, 'volume': volume['name'],
                            'tg': mapping_tg, 'hg': mapping_hg})
                 self._delete_lun_mapping(mapping_id)
             else:
                 LOG.debug('Skip LUN mapping %(id)s for volume %(volume)s, '
                           'target group %(tg)s and host group %(hg)s',
-                          {'id': mapping_id, 'volume': volume_path,
+                          {'id': mapping_id, 'volume': volume['name'],
                            'tg': mapping_tg, 'hg': mapping_hg})
         return info
 
@@ -429,6 +441,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'free_capacity_gb': free,
             'reserved_percentage': self.configuration.reserved_percentage,
             'QoS_support': False,
+            'multiattach': True,
             'consistencygroup_support': True,
             'consistent_group_snapshot_enabled': True,
             'volume_backend_name': self.backend_name,
