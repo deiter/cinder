@@ -34,7 +34,7 @@ from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 
-VERSION = '1.3.6'
+VERSION = '1.3.7'
 LOG = logging.getLogger(__name__)
 
 
@@ -57,6 +57,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         1.3.4 - Adapted NexentaException for the latest Cinder.
         1.3.5 - Added deferred deletion for snapshots.
         1.3.6 - Fixed race between volume/clone deletion.
+        1.3.7 - Added consistency group support.
     """
 
     VERSION = VERSION
@@ -101,6 +102,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.configuration.nexenta_dataset_description)
         self.iscsi_target_portal_port = (
             self.configuration.nexenta_iscsi_target_portal_port)
+        self.dataset = '%s/%s' % (self.storage_pool, self.volume_group)
 
     @property
     def backend_name(self):
@@ -136,8 +138,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """Verify that the zfs pool, vg and iscsi service exists."""
         url = 'storage/pools/%s' % self.storage_pool
         self.nef.get(url)
-        url = 'storage/volumeGroups/%s' % '%2F'.join([
-            self.storage_pool, self.volume_group])
+        url = 'storage/volumeGroups/%s' % urllib.parse.quote_plus(
+            self.dataset)
         try:
             self.nef.get(url)
         except exception.NexentaException:
@@ -178,14 +180,14 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """
         LOG.debug('Delete volume %(volume)s',
                   {'volume': volume['name']})
-        path = self._get_volume_path(volume)
+        path = self._get_volume_path(volume['name'])
         params = {'path': path}
         url = 'storage/volumes?%s' % (
             urllib.parse.urlencode(params))
         data = self.nef.get(url).get('data')
         if not data:
             return
-        params = {'snapshots': 'true'}
+        params = {'snapshots': True}
         url = 'storage/volumes/%s?%s' % (
             urllib.parse.quote_plus(path),
             urllib.parse.urlencode(params))
@@ -212,7 +214,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                     url = 'storage/volumes/%s/promote' % (
                         urllib.parse.quote_plus(clone))
                     self.nef.post(url)
-                params = {'snapshots': 'true'}
+                params = {'snapshots': True}
                 url = 'storage/volumes/%s?%s' % (
                     urllib.parse.quote_plus(path),
                     urllib.parse.urlencode(params))
@@ -229,10 +231,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         LOG.debug('Extend volume %(volume)s, new size: %(size)sGB',
                   {'volume': volume['name'],
                    'size': new_size})
-        path = '%2F'.join([
-            self.storage_pool, self.volume_group, volume['name']])
-        url = 'storage/volumes/%s' % path
-
+        volume_path = self._get_volume_path(volume['name'])
+        url = 'storage/volumes/%s' % urllib.parse.quote_plus(volume_path)
         self.nef.put(url, {'volumeSize': new_size * units.Gi})
 
     def create_snapshot(self, snapshot):
@@ -240,11 +240,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
         :param snapshot: snapshot reference
         """
-        snapshot_vol = self._get_snapshot_volume(snapshot)
         LOG.info('Create snapshot %(snapshot)s for volume %(volume)s',
                  {'snapshot': snapshot['name'],
-                  'volume': snapshot_vol['name']})
-        volume_path = self._get_volume_path(snapshot_vol)
+                  'volume': snapshot['volume_name']})
+        volume_path = self._get_volume_path(snapshot['volume_name'])
         url = 'storage/snapshots'
         data = {'path': '%s@%s' % (volume_path, snapshot['name'])}
         self.nef.post(url, data)
@@ -256,19 +255,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """
         LOG.debug('Delete snapshot: %(snapshot)s',
                   {'snapshot': snapshot['name']})
-        volume = self._get_snapshot_volume(snapshot)
-        path = '%s@%s' % (self._get_volume_path(volume),
-                          snapshot['name'])
-        params = {'path': path}
-        url = 'storage/snapshots?%s' % urllib.parse.urlencode(params)
-        snap_data = self.nef.get(url).get('data')
-        if not snap_data:
-            return
-        params = {'defer': 'true'}
-        url = 'storage/snapshots/%s?%s' % (
-            urllib.parse.quote_plus(path),
-            urllib.parse.urlencode(params))
-        self.nef.delete(url)
+        volume_path = self._get_volume_path(snapshot['volume_name'])
+        snapshot_path = '%s@%s' % (volume_path, snapshot['name'])
+        self._delete_snapshot(snapshot_path)
 
     def snapshot_revert_use_temp_snapshot(self):
         # Considering that NexentaStor based drivers use COW images
@@ -280,9 +269,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
     def revert_to_snapshot(self, context, volume, snapshot):
         """Revert volume to snapshot."""
         LOG.debug('Revert volume %(volume)s to snapshot %(snapshot)s',
-                  {'volume': volume['name'],
-                   'snapshot': snapshot['name']})
-        volume_path = self._get_volume_path(volume)
+                 {'volume': volume['name'],
+                  'snapshot': snapshot['name']})
+        volume_path = self._get_volume_path(volume['name'])
         url = 'storage/volumes/%s/rollback' % urllib.parse.quote_plus(
             volume_path)
         self.nef.post(url, {'snapshot': snapshot['name']})
@@ -294,15 +283,15 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param snapshot: reference of source snapshot
         """
         LOG.debug('Create volume %(volume)s from snapshot: %(snapshot)s',
-                  {'volume': volume['name'],
-                   'snapshot': snapshot['name']})
-        snapshot_vol = self._get_snapshot_volume(snapshot)
-        path = '%2F'.join([
-            self.storage_pool, self.volume_group, snapshot_vol['name']])
-        url = 'storage/snapshots/%s@%s/clone' % (path, snapshot['name'])
-        self.nef.post(url, {'targetPath': self._get_volume_path(volume)})
-        if (('size' in volume) and (
-                volume['size'] > snapshot['volume_size'])):
+                 {'volume': volume['name'],
+                  'snapshot': snapshot['name']})
+        target_path = self._get_volume_path(volume['name'])
+        source_path = self._get_volume_path(snapshot['volume_name'])
+        snapshot_path = '%s@%s' % (source_path, snapshot['name'])
+        url = 'storage/snapshots/%s/clone' % urllib.parse.quote_plus(
+            snapshot_path)
+        self.nef.post(url, {'targetPath': target_path})
+        if volume['size'] > snapshot['volume_size']:
             self.extend_volume(volume, volume['size'])
 
     def create_cloned_volume(self, volume, src_vref):
@@ -311,10 +300,11 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param volume: new volume reference
         :param src_vref: source volume reference
         """
-        snapshot = {'volume_name': src_vref['name'],
+        snapshot_name = self._get_clone_snapshot_name(volume['id'])
+        snapshot = {'name': snapshot_name,
+                    'volume_name': src_vref['name'],
                     'volume_id': src_vref['id'],
-                    'volume_size': src_vref['size'],
-                    'name': self._get_clone_snapshot_name(volume)}
+                    'volume_size': src_vref['size']}
         LOG.debug('Create temporary snapshot %(snapshot)s '
                   'for the original volume %(volume)s',
                   {'snapshot': snapshot['name'],
@@ -362,7 +352,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         info = {'driver_volume_type': 'iscsi', 'data': {}}
         host_iqn = None
         host_groups = []
-        volume_path = self._get_volume_path(volume)
+        volume_path = self._get_volume_path(volume['name'])
         if isinstance(connector, dict) and 'initiator' in connector:
             host_iqn = connector.get('initiator')
             host_groups.append(options.DEFAULT_HOST_GROUP)
@@ -413,9 +403,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor appliance."""
         LOG.debug('Updating volume stats')
-
-        url = 'storage/volumeGroups/%s?fields=bytesAvailable,bytesUsed' % (
-            '%2F'.join([self.storage_pool, self.volume_group]))
+        params = {'fields': 'bytesAvailable,bytesUsed'}
+        url = 'storage/volumeGroups/%s?%s' % (
+            urllib.parse.quote_plus(self.dataset),
+            urllib.parse.urlencode(params))
         stats = self.nef.get(url)
         free = utils.str2gib_size(stats['bytesAvailable'])
         allocated = utils.str2gib_size(stats['bytesUsed'])
@@ -438,22 +429,22 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'free_capacity_gb': free,
             'reserved_percentage': self.configuration.reserved_percentage,
             'QoS_support': False,
+            'consistencygroup_support': True,
+            'consistent_group_snapshot_enabled': True,
             'volume_backend_name': self.backend_name,
             'location_info': location_info,
             'iscsi_target_portal_port': self.iscsi_target_portal_port,
             'nef_url': self.nef.url
         }
 
-    # auxiliary methods  ######################################################
-    def _get_volume_path(self, volume):
+    def _get_volume_path(self, volume_name):
         """Return zfs volume name that corresponds given volume name."""
-        return '%s/%s/%s' % (self.storage_pool, self.volume_group,
-                             volume['name'])
+        return '%s/%s' % (self.dataset, volume_name)
 
     @staticmethod
-    def _get_clone_snapshot_name(volume):
+    def _get_clone_snapshot_name(volume_id):
         """Return name for snapshot that will be used to clone the volume."""
-        return 'cinder-clone-snapshot-%(id)s' % volume
+        return 'cinder-clone-snapshot-%s' % volume_id
 
     def _get_target_group_name(self, target_name):
         """Return Nexenta iSCSI target group name for volume."""
@@ -584,7 +575,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param connector: connector reference
         :returns: dictionary of connection information
         """
-        volume_path = self._get_volume_path(volume)
+        volume_path = self._get_volume_path(volume['name'])
         host_iqn = connector.get('initiator')
         LOG.debug('Initialize connection for volume: %(volume)s '
                   'and initiator: %(initiator)s',
@@ -879,6 +870,143 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             result.append('%s:%s' % (key_val['address'], key_val['port']))
         return result
 
-    def _get_snapshot_volume(self, snapshot):
-        ctxt = context.get_admin_context()
-        return db.volume_get(ctxt, snapshot['volume_id'])
+    def _delete_snapshot(self, path, recursive=False, defer=True):
+        """Deletes a snapshot.
+
+        :param path: absolute snapshot path
+        :param recursive: boolean, True to recursively destroy snapshots
+                          of the same name on a child datasets
+        :param defer: boolean, True to mark the snapshot for deferred
+                      destroy when there are not any active references
+                      to it (for example, clones)
+        """
+        params = {'path': path}
+        url = 'storage/snapshots?%s' % urllib.parse.urlencode(params)
+        data = self.nef.get(url).get('data')
+        if not data:
+            return
+        params = {'recursive': recursive, 'defer': defer}
+        url = 'storage/snapshots/%s?%s' % (
+            urllib.parse.quote_plus(path),
+            urllib.parse.urlencode(params))
+        self.nef.delete(url)
+
+    def create_consistencygroup(self, context, group):
+        """Creates a consistencygroup.
+
+        :param context: the context of the caller.
+        :param group: the dictionary of the consistency group to be created.
+        :returns: group_model_update
+        """
+        group_model_update = {}
+        return group_model_update
+
+    def delete_consistencygroup(self, context, group, volumes):
+        """Deletes a consistency group.
+
+        :param context: the context of the caller.
+        :param group: the dictionary of the consistency group to be deleted.
+        :param volumes: a list of volume dictionaries in the group.
+        :returns: group_model_update, volumes_model_update
+        """
+        group_model_update = {}
+        volumes_model_update = []
+        for volume in volumes:
+            self.delete_volume(volume)
+        return group_model_update, volumes_model_update
+
+    def update_consistencygroup(self, context, group,
+                                add_volumes=None,
+                                remove_volumes=None):
+        """Updates a consistency group.
+
+        :param context: the context of the caller.
+        :param group: the dictionary of the consistency group to be updated.
+        :param add_volumes: a list of volume dictionaries to be added.
+        :param remove_volumes: a list of volume dictionaries to be removed.
+        :returns: group_model_update, add_volumes_update, remove_volumes_update
+        """
+        group_model_update = {}
+        add_volumes_update = []
+        remove_volumes_update = []
+        return group_model_update, add_volumes_update, remove_volumes_update
+
+    def create_cgsnapshot(self, context, cgsnapshot, snapshots):
+        """Creates a consistency group snapshot.
+
+        :param context: the context of the caller.
+        :param cgsnapshot: the dictionary of the cgsnapshot to be created.
+        :param snapshots: a list of snapshot dictionaries in the cgsnapshot.
+        :returns: group_model_update, snapshots_model_update
+        """
+        group_model_update = {}
+        snapshots_model_update = []
+        cgsnapshot_name = 'cgsnapshot-%s' % cgsnapshot['id']
+        cgsnapshot_path = '%s@%s' % (self.dataset, cgsnapshot_name)
+        url = 'storage/snapshots'
+        data = {'path': cgsnapshot_path, 'recursive': True}
+        self.nef.post(url, data)
+        for snapshot in snapshots:
+            volume_path = self._get_volume_path(snapshot['volume_name'])
+            snapshot_path = '%s@%s' % (volume_path, cgsnapshot_name)
+            url = 'storage/snapshots/%s/rename' % (
+                urllib.parse.quote_plus(snapshot_path))
+            data = {'newName': snapshot['name']}
+            self.nef.post(url, data)
+        self._delete_snapshot(cgsnapshot_path, True)
+        return group_model_update, snapshots_model_update
+
+    def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
+        """Deletes a consistency group snapshot.
+
+        :param context: the context of the caller.
+        :param cgsnapshot: the dictionary of the cgsnapshot to be created.
+        :param snapshots: a list of snapshot dictionaries in the cgsnapshot.
+        :returns: group_model_update, snapshots_model_update
+        """
+        group_model_update = {}
+        snapshots_model_update = []
+        for snapshot in snapshots:
+            self.delete_snapshot(snapshot)
+        return group_model_update, snapshots_model_update
+
+    def create_consistencygroup_from_src(self, context, group, volumes,
+                                         cgsnapshot=None, snapshots=None,
+                                         source_cg=None, source_vols=None):
+        """Creates a consistency group from source.
+
+        :param context: the context of the caller.
+        :param group: the dictionary of the consistency group to be created.
+        :param volumes: a list of volume dictionaries in the group.
+        :param cgsnapshot: the dictionary of the cgsnapshot as source.
+        :param snapshots: a list of snapshot dictionaries in the cgsnapshot.
+        :param source_cg: the dictionary of a consistency group as source.
+        :param source_vols: a list of volume dictionaries in the source_cg.
+        :returns: group_model_update, volumes_model_update
+        """
+        group_model_update = {}
+        volumes_model_update = []
+        if cgsnapshot and snapshots:
+            for volume, snapshot in zip(volumes, snapshots):
+                self.create_volume_from_snapshot(volume, snapshot)
+        elif source_cg and source_vols:
+            cgsnapshot_name = 'cgsnapshot-%s' % group['id']
+            cgsnapshot_path = '%s@%s' % (self.dataset, cgsnapshot_name)
+            url = 'storage/snapshots'
+            data = {'path': cgsnapshot_path, 'recursive': True}
+            self.nef.post(url, data)
+            for volume, source_vol in zip(volumes, source_vols):
+                source_path = self._get_volume_path(source_vol['name'])
+                snapshot_path = '%s@%s' % (source_path, cgsnapshot_name)
+                snapshot_name = self._get_clone_snapshot_name(volume['id'])
+                url = 'storage/snapshots/%s/rename' % (
+                    urllib.parse.quote_plus(snapshot_path))
+                data = {'newName': snapshot_name}
+                self.nef.post(url, data)
+                snapshot = {'name': snapshot_name,
+                            'volume_id': source_vol['id'],
+                            'volume_name': source_vol['name'],
+                            'volume_size': source_vol['size']}
+                self.create_volume_from_snapshot(volume, snapshot)
+            self._delete_snapshot(cgsnapshot_path, True)
+        return group_model_update, volumes_model_update
