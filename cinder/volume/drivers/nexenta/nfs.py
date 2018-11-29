@@ -58,6 +58,7 @@ class NexentaNfsDriver(nfs.NfsDriver):  # pylint: disable=R0921
         1.3.2 - Pass mount_point_base in init_conn to support host-based
                 migration.
         1.3.3 - Fixed automatic mode for nexenta_rest_protocol, improved logging.
+        1.3.4 - More informative exception messages for REST API.
     """
 
     driver_prefix = 'nexenta'

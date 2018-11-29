@@ -30,7 +30,7 @@ from cinder.volume.drivers.nexenta import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 
-VERSION = '1.3.5'
+VERSION = '1.3.6'
 LOG = logging.getLogger(__name__)
 
 
@@ -66,6 +66,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 Fixed collection of backend statistics.
                 Refactored LUN creation, use host group for LUN mappings.
                 Added deferred deletion for snapshots.
+        1.3.6 - More informative exception messages for REST API.
     """
 
     VERSION = VERSION

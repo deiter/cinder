@@ -17,6 +17,7 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 import requests
 from requests.packages.urllib3 import exceptions
+import six
 
 from cinder import coordination
 from cinder import exception
@@ -125,25 +126,45 @@ class NexentaJSONProxy(object):
                                          verify=self.verify)
 
         if not response.ok:
-            msg = (_('Got bad response from %(appliance)s: '
-                     '%(url)s, status: %(status)s, '
+            msg = (_('Got bad response from %(appliance)s: %(url)s, '
+                     'data: %(data)s, status: %(status)s, '
                      'reason: %(reason)s, content: %(content)s')
                    % {'appliance': APPLIANCE,
                       'url': self.url,
+                      'data': data,
                       'status': response.status_code,
                       'reason': response.reason,
                       'content': response.text})
             raise exception.NexentaException(msg)
 
-        json = response.json()
-        LOG.debug('Got response from %(appliance)s: '
-                  '%(url)s, status: %(status)s, '
-                  'response: %(json)s',
+        try:
+            json = response.json()
+        except Exception as ex:
+            msg = (_('Got bad JSON from %(appliance)s: %(url)s, '
+                     'data: %(data)s, status: %(status)s, '
+                     'reason: %(reason)s, content: %(content)s, '
+                     'error: %(error)s')
+                   % {'appliance': APPLIANCE,
+                      'url': self.url,
+                      'data': data,
+                      'status': response.status_code,
+                      'reason': response.reason,
+                      'content': response.text,
+                      'error': six.text_type(ex)})
+            raise exception.NexentaException(msg)
+
+        LOG.debug('Got response from %(appliance)s: %(url)s, '
+                  'data: %(data)s, status: %(status)s, '
+                  'reason: %(reason)s, response: %(json)s',
                   {'appliance': APPLIANCE,
                    'url': self.url,
+                   'data': data,
                    'status': response.status_code,
+                   'reason': response.reason,
                    'json': json})
+
         if json.get('error') is not None:
-            message = json['error'].get('message', '')
-            raise exception.NexentaException(message)
+            msg = json['error'].get('message', '')
+            raise exception.NexentaException(msg)
+
         return json.get('result')
