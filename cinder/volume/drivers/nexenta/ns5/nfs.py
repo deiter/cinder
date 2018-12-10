@@ -30,7 +30,7 @@ from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
 from cinder.volume.drivers import nfs
 
-VERSION = '1.7.0'
+VERSION = '1.7.1'
 LOG = logging.getLogger(__name__)
 BLOCK_SIZE_MB = 1
 
@@ -64,6 +64,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.6.8 - Added deferred deletion for snapshots.
         1.6.9 - Fixed race between volume/clone deletion.
         1.7.0 - Added consistency group support.
+        1.7.1 - Removed redundant hpr/activate call from initialize_connection.
     """
 
     driver_prefix = 'nexenta'
@@ -447,9 +448,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def initialize_connection(self, volume, connector):
         LOG.debug('Initialize volume connection for %(volume)s',
                   {'volume': volume['name']})
-        url = 'hpr/activate'
-        data = {'datasetName': '/'.join([self.share, volume['name']])}
-        self.nef.post(url, data)
         self._mount_volume(volume)
         data = {'export': volume['provider_location'], 'name': 'volume'}
         return {
