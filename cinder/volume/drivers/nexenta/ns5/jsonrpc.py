@@ -51,8 +51,6 @@ def check_error(response):
                       'reason': reason,
                       'body': body})
             raise exception.NexentaException(msg)
-        if content and 'code' in content:
-            raise exception.NexentaException(content)
         msg = (_('Got bad response from %(appliance)s: '
                  '%(code)s %(reason)s %(content)s')
                % {'appliance': APPLIANCE,
