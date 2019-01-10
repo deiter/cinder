@@ -25,6 +25,7 @@ from six.moves import urllib
 from cinder import exception
 from cinder.i18n import _
 from cinder import interface
+import cinder.privsep.fs
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils
@@ -65,6 +66,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.6.9 - Fixed race between volume/clone deletion.
         1.7.0 - Added consistency group support.
         1.7.1 - Removed redundant hpr/activate call from initialize_connection.
+        1.7.2 - Merged upstream changes for umount.
     """
 
     driver_prefix = 'nexenta'
@@ -239,7 +241,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         for attempt in range(num_attempts):
             try:
-                self._execute('umount', mount_path, run_as_root=True)
+                cinder.privsep.fs.umount(mount_path)
                 LOG.debug('NFS share %(share)s has been unmounted at %(path)s',
                           {'share': nfs_share,
                            'path': mount_path})
