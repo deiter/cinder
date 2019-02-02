@@ -14,6 +14,7 @@
 #    under the License.
 
 import json
+import hashlib
 import os
 
 from eventlet import greenthread
@@ -273,35 +274,38 @@ class NefRequest(object):
     def failover(self):
         result = False
         self.lock = True
-        host = self.proxy.host
         method = 'get'
-        pool = NefPools(self.proxy)
-        path = pool.path(self.proxy.pool)
+        host = self.proxy.host
+        root = self.proxy.root
         for item in self.proxy.hosts:
             if item == host:
                 continue
             self.proxy.update_host(item)
-            LOG.debug('Try to failover pool %(pool)s to %(host)s',
-                      {'pool': self.proxy.pool, 'host': item})
+            LOG.debug('Try to failover path '
+                      '%(root)s to host %(host)s',
+                      {'root': root, 'host': item})
             try:
-                response = self.request(method, path)
+                response = self.request(method, root)
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.Timeout) as error:
-                LOG.debug('Skip unavailable host %(host)s: %(error)s',
+                LOG.debug('Skip unavailable host %(host)s '
+                          'due to error: %(error)s',
                           {'host': item, 'error': error})
                 continue
             LOG.debug('Failover result: %(code)s %(content)s',
                       {'code': response.status_code,
                        'content': response.content})
             if response.status_code == requests.codes.ok:
-                LOG.debug('Successful %(pool)s failover to %(host)s',
-                          {'pool': self.proxy.pool, 'host': item})
+                LOG.debug('Successful failover path '
+                          '%(root)s to host %(host)s',
+                          {'root': root, 'host': item})
+                self.proxy.update_lock()
                 result = True
                 break
             else:
                 LOG.debug('Skip unsuitable host %(host)s: '
-                          'there is no pool %(pool)s found',
-                          {'host': item, 'pool': self.proxy.pool})
+                          'there is no %(root)s path found',
+                          {'host': item, 'root': root})
         self.lock = False
         return result
 
@@ -364,9 +368,15 @@ class NefCollections(object):
                 raise error
 
 
-class NefPools(NefCollections):
-    subj = 'pool'
-    root = '/storage/pools'
+class NefSettings(NefCollections):
+    subj = 'setting'
+    root = '/settings/properties'
+
+    def create(self, *args):
+        return NotImplemented
+
+    def delete(self, name, *args):
+        return NotImplemented
 
 
 class NefDatasets(NefCollections):
@@ -493,9 +503,9 @@ class NefNetAddresses(NefCollections):
 
 
 class NefProxy(object):
-    def __init__(self, conf):
+    def __init__(self, proto, path, conf):
         self.session = requests.Session()
-        self.pools = NefPools(self)
+        self.settings = NefSettings(self)
         self.filesystems = NefFilesystems(self)
         self.volumegroups = NefVolumeGroups(self)
         self.volumes = NefVolumes(self)
@@ -508,6 +518,7 @@ class NefProxy(object):
         self.mappings = NefLunMappings(self)
         self.logicalunits = NefLogicalUnits(self)
         self.netaddrs = NefNetAddresses(self)
+        self.lock = None
         self.tokens = {}
         self.headers = {
             'Content-Type': 'application/json',
@@ -533,7 +544,8 @@ class NefProxy(object):
                 self.port = 8443
             else:
                 self.port = 8080
-        self.pool = conf.nexenta_volume
+        self.proto = proto
+        self.path = path
         self.backoff_factor = conf.nexenta_rest_backoff_factor
         self.retries = len(self.hosts) * conf.nexenta_rest_retry_count
         self.timeout = Timeout(connect=conf.nexenta_rest_connect_timeout,
@@ -546,6 +558,15 @@ class NefProxy(object):
         self.session.mount('%s://' % self.scheme, adapter)
         if not conf.driver_ssl_cert_verify:
             requests.packages.urllib3.disable_warnings()
+        if proto == 'nfs':
+            self.root = self.filesystems.path(path)
+        elif proto == 'iscsi':
+            self.root = self.volumegroups.path(path)
+        else:
+            message = (_('Storage protocol %(proto)s not supported')
+                       % {'proto': proto})
+            raise NefException({'code': 'EPROTO', 'message': message})
+        self.update_lock()
 
     def __getattr__(self, name):
         return NefRequest(self, name)
@@ -567,6 +588,12 @@ class NefProxy(object):
         if host in self.tokens:
             token = self.tokens[host]
             self.update_bearer(token)
+
+    def update_lock(self):
+        prop = self.settings.get('system.guid')
+        guid = prop.get('value')
+        lock = '%s:%s' % (guid, self.path)
+        self.lock = hashlib.md5(lock).hexdigest()
 
     def url(self, path):
         netloc = '%s:%d' % (self.host, int(self.port))

@@ -28,7 +28,6 @@ from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefProxy
 from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefException
 
-VERSION = '1.8.0'
 LOG = logging.getLogger(__name__)
 
 
@@ -72,30 +71,34 @@ class NexentaNfsDriver(nfs.NfsDriver):
               - Fixed HTTP authentication.
               - Disabled non-blocking mandatory locks.
               - Added coordination for dataset operations.
+        1.8.1 - Support for NexentaStor tenants.
     """
 
-    driver_prefix = 'nexenta'
-    volume_backend_name = 'NexentaNfsDriver'
-    VERSION = VERSION
+    VERSION = '1.8.1'
 
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = "Nexenta_CI"
 
+    storage_protocol = 'NFS'
+    driver_volume_type = 'nfs'
+    volume_backend_name = 'NexentaStor5_NFS'
+
     def __init__(self, *args, **kwargs):
         super(NexentaNfsDriver, self).__init__(*args, **kwargs)
-        if self.configuration:
-            self.configuration.append_config_values(
-                options.NEXENTA_CONNECTION_OPTS)
-            self.configuration.append_config_values(
-                options.NEXENTA_NFS_OPTS)
-            self.configuration.append_config_values(
-                options.NEXENTA_DATASET_OPTS)
+        if not self.configuration:
+            message = (_('%(name)s backend configuration not found')
+                       % {'name': self.volume_backend_name})
+            raise NefException({'code': 'ENODATA', 'message': message})
+        self.configuration.append_config_values(
+            options.NEXENTA_CONNECTION_OPTS)
+        self.configuration.append_config_values(
+            options.NEXENTA_NFS_OPTS)
+        self.configuration.append_config_values(
+            options.NEXENTA_DATASET_OPTS)
         self.nef = None
         self.root_mount_point = None
         self.nas_host = self.configuration.nas_host
         self.root_path = self.configuration.nas_share_path
-        self.pool = self.root_path.split('/')[0]
-        self.configuration.nexenta_volume = self.pool
         self.dataset_sparsed = self.configuration.nexenta_sparse
         self.dataset_deduplication = self.configuration.nexenta_dataset_dedup
         self.dataset_compression = (
@@ -103,23 +106,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.dataset_description = (
             self.configuration.nexenta_dataset_description)
         self.mount_point_base = self.configuration.nexenta_mount_point_base
-        self.lock = '%s:%s' % (self.backend_name, self.root_path)
-
-    @property
-    def backend_name(self):
-        backend_name = None
-        if self.configuration:
-            backend_name = self.configuration.safe_get('volume_backend_name')
-        if not backend_name:
-            backend_name = self.__class__.__name__
-        return backend_name
 
     def do_setup(self, context):
-        self.nef = NefProxy(self.configuration)
+        self.nef = NefProxy(self.driver_volume_type,
+                            self.root_path,
+                            self.configuration)
 
     def check_for_setup_error(self):
         """Check ZFS pool, filesystem and NFS server service."""
-        self.nef.pools.get(self.pool)
         filesystem = self.nef.filesystems.get(self.root_path)
         if filesystem['mountPoint'] == 'none':
             message = (_('NFS root filesystem %(path)s is not writable')
@@ -400,7 +394,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """Synchronously recreate an export for a volume."""
         pass
 
-    @coordination.synchronized('{self.lock}')
+    @coordination.synchronized('{self.nef.lock}')
     def delete_volume(self, volume):
         """Deletes a volume.
 
@@ -464,7 +458,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           run_as_root=True)
         self._unmount_volume(volume)
 
-    @coordination.synchronized('{self.lock}')
+    @coordination.synchronized('{self.nef.lock}')
     def create_snapshot(self, snapshot):
         """Creates a snapshot.
 
@@ -482,7 +476,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         snapshot_path = self._get_snapshot_path(snapshot)
         self._delete_snapshot(snapshot_path)
 
-    @coordination.synchronized('{self.lock}')
+    @coordination.synchronized('{self.nef.lock}')
     def _delete_snapshot(self, snapshot_path, recursive=False, defer=True):
         """Deletes a snapshot.
 
@@ -509,7 +503,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = {'snapshot': snapshot['name']}
         self.nef.filesystems.rollback(volume_path, payload)
 
-    @coordination.synchronized('{self.lock}')
+    @coordination.synchronized('{self.nef.lock}')
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create new volume from other's snapshot on appliance.
 
@@ -604,7 +598,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         remove_volumes_update = []
         return group_model_update, add_volumes_update, remove_volumes_update
 
-    @coordination.synchronized('{self.lock}')
+    @coordination.synchronized('{self.nef.lock}')
     def _rename_cgsnapshot(self, cgsnapshot, snapshot):
         path = '%s/%s@%s' % (self.root_path, snapshot['volume_name'],
                              self._get_cgsnapshot_name(cgsnapshot))
@@ -775,6 +769,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Updating volume stats')
         payload = {'fields': 'bytesAvailable,bytesUsed'}
         stats = self.nef.filesystems.get(self.root_path, payload)
+        volume_backend_name = (
+            self.configuration.safe_get('volume_backend_name') or
+            self.volume_backend_name)
         free = stats['bytesAvailable'] // units.Gi
         allocated = stats['bytesUsed'] // units.Gi
         share = '%s:%s' % (self.nas_host, self.root_mount_point)
@@ -790,7 +787,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'nef_url': self.nef.host,
             'nef_port': self.nef.port,
             'driver_version': self.VERSION,
-            'storage_protocol': 'NFS',
+            'storage_protocol': self.storage_protocol,
             'sparsed_volumes': self.dataset_sparsed,
             'total_capacity_gb': free + allocated,
             'free_capacity_gb': free,
@@ -800,6 +797,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'consistent_group_snapshot_enabled': True,
             'multiattach': True,
             'location_info': location_info,
-            'volume_backend_name': self.backend_name,
+            'volume_backend_name': volume_backend_name,
             'nfs_mount_point_base': self.mount_point_base
         }
