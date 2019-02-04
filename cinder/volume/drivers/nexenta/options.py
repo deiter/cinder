@@ -213,6 +213,12 @@ NEXENTA_DATASET_OPTS = [
     cfg.BoolOpt('nexenta_sparse',
                 default=False,
                 help='Enables or disables the creation of sparse datasets'),
+    cfg.StrOpt('nexenta_origin_snapshot_template',
+               default='origin-snapshot-%s',
+               help='Template string to generate origin name of clone'),
+    cfg.StrOpt('nexenta_group_snapshot_template',
+               default='group-snapshot-%s',
+               help='Template string to generate group snapshot name')
 ]
 
 NEXENTA_RRMGR_OPTS = [

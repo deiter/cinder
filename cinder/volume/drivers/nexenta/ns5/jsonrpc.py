@@ -15,17 +15,17 @@
 
 import json
 import hashlib
-import os
+import posixpath
+import six
 
 from eventlet import greenthread
-from oslo_log import log as logging
 
 import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 from requests.packages.urllib3.util.timeout import Timeout
 
-from six.moves import urllib
+from oslo_log import log as logging
 
 from cinder.exception import VolumeDriverException
 from cinder.i18n import _
@@ -34,25 +34,24 @@ LOG = logging.getLogger(__name__)
 
 
 class NefException(VolumeDriverException):
-    def __init__(self, message=None, **kwargs):
+    def __init__(self, data=None, **kwargs):
         defaults = {
-            'source': os.path.basename(__file__),
-            'name': 'NexentaCinderDriver',
+            'name': 'NexentaError',
             'code': 'EBADMSG',
-            'message': 'UnknownError'
+            'source': 'CinderDriver',
+            'message': 'Unknown error'
         }
-        if message:
-            if isinstance(message, dict):
-                for key in defaults:
-                    if key in kwargs:
-                        continue
-                    if key in message:
-                        kwargs[key] = message[key]
-                    else:
-                        kwargs[key] = defaults[key]
-            elif isinstance(message, str):
-                if 'message' not in kwargs:
-                    kwargs['message'] = message
+        if isinstance(data, dict):
+            for key in defaults:
+                if key in kwargs:
+                    continue
+                if key in data:
+                    kwargs[key] = data[key]
+                else:
+                    kwargs[key] = defaults[key]
+        elif isinstance(data, six.string_types):
+            if 'message' not in kwargs:
+                kwargs['message'] = data
         for key in defaults:
             if key not in kwargs:
                 kwargs[key] = defaults[key]
@@ -87,13 +86,13 @@ class NefRequest(object):
                   {'method': self.method, 'args': args})
         if not args:
             message = (_('Nef request path is required'))
-            raise NefException({'code': 'EINVAL', 'message': message})
+            raise NefException(code='EINVAL', message=message)
         self.path = args[0]
         if len(args) > 1:
             payload = args[1]
             if not isinstance(payload, dict):
                 message = (_('Nef request body must be a dictionary'))
-                raise NefException({'code': 'EINVAL', 'message': message})
+                raise NefException(code='EINVAL', message=message)
             if self.method in ['get', 'delete']:
                 self.payload = {'params': payload}
             elif self.method in ['put', 'post']:
@@ -170,14 +169,14 @@ class NefRequest(object):
             message = (_('There is no response content '
                          'is available for %(text)s')
                        % {'text': text})
-            raise NefException({'code': 'ENODATA', 'message': message})
+            raise NefException(code='ENODATA', message=message)
 
         try:
             content = json.loads(response.content)
         except (TypeError, ValueError) as error:
             message = (_('Failed to decode JSON for %(text)s: %(error)s')
                        % {'text': text, 'error': error})
-            raise NefException({'code': 'ENOMSG', 'message': message})
+            raise NefException(code='ENOMSG', message=message)
 
         method = 'get'
         if response.status_code == requests.codes.unauthorized:
@@ -222,7 +221,7 @@ class NefRequest(object):
                 message = (_('There is no monitor path '
                              'available for %(text)s')
                            % {'text': text})
-                raise NefException({'code': 'ENOMSG', 'message': message})
+                raise NefException(code='ENOMSG', message=message)
             self.proxy.delay(self.stat[response.status_code])
             return self.request(method, path)
         elif response.status_code == requests.codes.ok:
@@ -267,7 +266,7 @@ class NefRequest(object):
                           'body': response.request.body,
                           'code': response.status_code,
                           'content': response.content})
-            raise NefException({'code': 'ENODATA', 'message': message})
+            raise NefException(code='ENODATA', message=message)
         token = content['token']
         self.proxy.update_token(token)
 
@@ -323,13 +322,14 @@ class NefRequest(object):
 
 class NefCollections(object):
     subj = 'collection'
-    root = '/'
+    root = '/collections'
 
     def __init__(self, proxy):
         self.proxy = proxy
 
     def path(self, name):
-        return '%s/%s' % (self.root, urllib.parse.quote_plus(name))
+        quoted_name = six.moves.urllib.parse.quote_plus(name)
+        return posixpath.join(self.root, quoted_name)
 
     def get(self, name, *args):
         LOG.debug('Get properties of %(subj)s %(name)s: %(args)s',
@@ -386,7 +386,7 @@ class NefDatasets(NefCollections):
     def rename(self, name, *args):
         LOG.debug('Rename %(subj)s %(name)s: %(args)s',
                   {'subj': self.subj, 'name': name, 'args': args})
-        path = '%s/%s' % (self.path(name), 'rename')
+        path = posixpath.join(self.path(name), 'rename')
         return self.proxy.post(path, *args)
 
 
@@ -397,7 +397,7 @@ class NefSnapshots(NefDatasets, NefCollections):
     def clone(self, name, *args):
         LOG.debug('Clone %(subj)s %(name)s: %(args)s',
                   {'subj': self.subj, 'name': name, 'args': args})
-        path = '%s/%s' % (self.path(name), 'clone')
+        path = posixpath.join(self.path(name), 'clone')
         return self.proxy.post(path, *args)
 
 
@@ -408,7 +408,7 @@ class NefVolumeGroups(NefDatasets, NefCollections):
     def rollback(self, name, *args):
         LOG.debug('Rollback %(subj)s %(name)s: %(args)s',
                   {'subj': self.subj, 'name': name, 'args': args})
-        path = '%s/%s' % (self.path(name), 'rollback')
+        path = posixpath.join(self.path(name), 'rollback')
         return self.proxy.post(path, *args)
 
 
@@ -419,7 +419,7 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
     def promote(self, name, *args):
         LOG.debug('Promote %(subj)s %(name)s: %(args)s',
                   {'subj': self.subj, 'name': name, 'args': args})
-        path = '%s/%s' % (self.path(name), 'promote')
+        path = posixpath.join(self.path(name), 'promote')
         return self.proxy.post(path, *args)
 
 
@@ -430,19 +430,19 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
     def mount(self, name, *args):
         LOG.debug('Mount %(subj)s %(name)s: %(args)s',
                   {'subj': self.subj, 'name': name, 'args': args})
-        path = '%s/%s' % (self.path(name), 'mount')
+        path = posixpath.join(self.path(name), 'mount')
         return self.proxy.post(path, *args)
 
     def unmount(self, name, *args):
         LOG.debug('Unmount %(subj)s %(name)s: %(args)s',
                   {'subj': self.subj, 'name': name, 'args': args})
-        path = '%s/%s' % (self.path(name), 'unmount')
+        path = posixpath.join(self.path(name), 'unmount')
         return self.proxy.post(path, *args)
 
     def acl(self, name, *args):
         LOG.debug('Set %(subj)s %(name)s ACL: %(args)s',
                   {'subj': self.subj, 'name': name, 'args': args})
-        path = '%s/%s' % (self.path(name), 'acl')
+        path = posixpath.join(self.path(name), 'acl')
         return self.proxy.post(path, *args)
 
 
@@ -452,13 +452,13 @@ class NefHpr(NefCollections):
 
     def activate(self, *args):
         LOG.debug('Activate %(args)s', {'args': args})
-        path = '%s/%s' % (self.root, 'activate')
+        path = posixpath.join(self.root, 'activate')
         return self.proxy.post(path, *args)
 
     def start(self, name, *args):
         LOG.debug('Start %(subj)s %(name)s: %(args)s',
                   {'subj': self.subj, 'name': name, 'args': args})
-        path = '%s/%s' % (self.path(name), 'start')
+        path = posixpath.join(self.path(name), 'start')
         return self.proxy.post(path, *args)
 
 
@@ -511,6 +511,7 @@ class NefProxy(object):
         self.volumes = NefVolumes(self)
         self.snapshots = NefSnapshots(self)
         self.services = NefServices(self)
+        self.hpr = NefHpr(self)
         self.nfs = NefNfs(self)
         self.targets = NefTargets(self)
         self.hostgroups = NefHostGroups(self)
@@ -534,8 +535,18 @@ class NefProxy(object):
         if conf.nexenta_rest_address:
             for host in conf.nexenta_rest_address.split(','):
                 self.hosts.append(host.strip())
+        if proto == 'nfs':
+            self.root = self.filesystems.path(path)
+            if not self.hosts:
+                self.hosts.append(conf.nas_host)
+        elif proto == 'iscsi':
+            self.root = self.volumegroups.path(path)
+            if not self.hosts:
+                self.hosts.append(conf.nexenta_host)
         else:
-            self.hosts.append(conf.nexenta_host)
+            message = (_('Storage protocol %(proto)s not supported')
+                       % {'proto': proto})
+            raise NefException(code='EPROTO', message=message)
         self.host = self.hosts[0]
         if conf.nexenta_rest_port:
             self.port = conf.nexenta_rest_port
@@ -558,14 +569,6 @@ class NefProxy(object):
         self.session.mount('%s://' % self.scheme, adapter)
         if not conf.driver_ssl_cert_verify:
             requests.packages.urllib3.disable_warnings()
-        if proto == 'nfs':
-            self.root = self.filesystems.path(path)
-        elif proto == 'iscsi':
-            self.root = self.volumegroups.path(path)
-        else:
-            message = (_('Storage protocol %(proto)s not supported')
-                       % {'proto': proto})
-            raise NefException({'code': 'EPROTO', 'message': message})
         self.update_lock()
 
     def __getattr__(self, name):
@@ -592,13 +595,15 @@ class NefProxy(object):
     def update_lock(self):
         prop = self.settings.get('system.guid')
         guid = prop.get('value')
-        lock = '%s:%s' % (guid, self.path)
-        self.lock = hashlib.md5(lock).hexdigest()
+        path = '%s:%s' % (guid, self.path)
+        if isinstance(path, six.text_type):
+            path = path.encode('utf-8')
+        self.lock = hashlib.md5(path).hexdigest()
 
     def url(self, path):
         netloc = '%s:%d' % (self.host, int(self.port))
         components = (self.scheme, netloc, str(path), None, None)
-        url = urllib.parse.urlunsplit(components)
+        url = six.moves.urllib.parse.urlunsplit(components)
         return url
 
     def delay(self, attempt):

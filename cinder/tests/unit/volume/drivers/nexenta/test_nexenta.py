@@ -1,4 +1,4 @@
-# Copyright 2016 Nexenta Systems, Inc.
+# Copyright 2019 Nexenta Systems, Inc.
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -77,8 +77,11 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.cfg.nexenta_iscsi_target_portal_port = 3260
         self.cfg.nexenta_target_prefix = 'iqn:cinder-'
         self.cfg.nexenta_target_group_prefix = 'cinder-'
+        self.cfg.nexenta_iscsi_target_portal_groups = 'cinder'
         self.cfg.nexenta_blocksize = '8K'
         self.cfg.nexenta_sparse = True
+        self.cfg.driver_ssl_cert_verify = False
+        self.cfg.nexenta_folder = 'nas'
         self.cfg.nexenta_dataset_compression = 'on'
         self.cfg.nexenta_dataset_dedup = 'off'
         self.cfg.nexenta_rrmgr_compression = 1
@@ -86,8 +89,9 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.cfg.nexenta_rrmgr_connections = 2
         self.cfg.reserved_percentage = 20
         self.nms_mock = mock.Mock()
-        for mod in ['volume', 'zvol', 'iscsitarget', 'appliance',
-                    'stmf', 'scsidisk', 'snapshot']:
+        for mod in ['appliance', 'plugin', 'rsf_plugin',
+                    'volume', 'folder', 'zvol', 'stmf',
+                    'snapshot', 'scsidisk', 'iscsitarget']:
             setattr(self.nms_mock, mod, mock.Mock())
         self.mock_object(jsonrpc, 'NexentaJSONProxy',
                          return_value=self.nms_mock)
@@ -391,6 +395,7 @@ class TestNexentaNfsDriver(test.TestCase):
         self.cfg.nfs_mount_options = None
         self.cfg.nas_mount_options = None
         self.cfg.nexenta_nms_cache_volroot = False
+        self.cfg.driver_ssl_cert_verify = False
         self.cfg.nfs_mount_attempts = 3
         self.cfg.reserved_percentage = 20
         self.cfg.max_over_subscription_ratio = 20.0
