@@ -1,4 +1,4 @@
-# Copyright 2018 Nexenta Systems, Inc.
+# Copyright 2019 Nexenta Systems, Inc.
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -14,25 +14,25 @@
 #    under the License.
 
 import ipaddress
-import math
+import posixpath
 import random
-import six
 import uuid
+import six
 
-from eventlet import greenthread
 from oslo_log import log as logging
 from oslo_utils import units
-from six.moves import urllib
 
-from cinder import exception
-from cinder.i18n import _
+from cinder import context
+from cinder import coordination
 from cinder import interface
+from cinder import objects
+from cinder.i18n import _
 from cinder.volume import driver
-from cinder.volume.drivers.nexenta.ns5 import jsonrpc
+from cinder.volume import utils
 from cinder.volume.drivers.nexenta import options
-from cinder.volume.drivers.nexenta import utils
+from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefProxy
+from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefException
 
-VERSION = '1.3.8'
 LOG = logging.getLogger(__name__)
 
 
@@ -41,10 +41,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
     """Executes volume driver commands on Nexenta Appliance.
 
     Version history:
+
+    .. code-block:: none
+
         1.0.0 - Initial driver version.
         1.1.0 - Added HTTPS support.
-                Added use of sessions for REST calls.
-                Added abandoned volumes and snapshots cleanup.
+              - Added use of sessions for REST calls.
+              - Added abandoned volumes and snapshots cleanup.
         1.2.0 - Failover support.
         1.2.1 - Configurable luns per parget, target prefix.
         1.3.0 - Removed target/TG caching, added support for target portals
@@ -57,26 +60,44 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         1.3.6 - Fixed race between volume/clone deletion.
         1.3.7 - Added consistency group support.
         1.3.8 - Added volume multi-attach.
+        1.4.0 - Refactored iSCSI driver.
+              - Added pagination support.
+              - Added configuration parameters for REST API connect/read
+                timeouts, connection retries and backoff factor.
+              - Fixed HA failover.
+              - Added retries on EBUSY errors.
+              - Fixed HTTP authentication.
+              - Added coordination for dataset operations.
+        1.4.1 - Support for NexentaStor tenants.
+        1.4.2 - Added manage/unmanage/manageable-list volume/snapshot support.
     """
 
-    VERSION = VERSION
-
-    # ThirdPartySystems wiki page
+    VERSION = '1.4.2'
     CI_WIKI_NAME = "Nexenta_CI"
+
+    vendor_name = 'Nexenta'
+    product_name = 'NexentaStor5'
+    storage_protocol = 'iSCSI'
+    driver_volume_type = 'iscsi'
 
     def __init__(self, *args, **kwargs):
         super(NexentaISCSIDriver, self).__init__(*args, **kwargs)
+        if not self.configuration:
+            message = (_('%(product_name)s %(storage_protocol)s '
+                         'backend configuration not found')
+                       % {'product_name': self.product_name,
+                          'storage_protocol': self.storage_protocol})
+            raise NefException(code='ENODATA', message=message)
+        self.configuration.append_config_values(
+            options.NEXENTA_CONNECTION_OPTS)
+        self.configuration.append_config_values(
+            options.NEXENTA_ISCSI_OPTS)
+        self.configuration.append_config_values(
+            options.NEXENTA_DATASET_OPTS)
         self.nef = None
-        if self.configuration:
-            self.configuration.append_config_values(
-                options.NEXENTA_CONNECTION_OPTS)
-            self.configuration.append_config_values(
-                options.NEXENTA_ISCSI_OPTS)
-            self.configuration.append_config_values(
-                options.NEXENTA_DATASET_OPTS)
-            self.configuration.append_config_values(
-                options.NEXENTA_RRMGR_OPTS)
-        self.verify_ssl = self.configuration.driver_ssl_cert_verify
+        self.volume_backend_name = (
+            self.configuration.safe_get('volume_backend_name') or
+            '%s_%s' % (self.product_name, self.storage_protocol))
         self.target_prefix = self.configuration.nexenta_target_prefix
         self.target_group_prefix = (
             self.configuration.nexenta_target_group_prefix)
@@ -84,74 +105,48 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.luns_per_target = self.configuration.nexenta_luns_per_target
         self.lu_writebackcache_disabled = (
             self.configuration.nexenta_lu_writebackcache_disabled)
-        self.use_https = self.configuration.nexenta_use_https
-        self.nef_host = self.configuration.nexenta_rest_address
         self.iscsi_host = self.configuration.nexenta_host
-        self.nef_port = self.configuration.nexenta_rest_port
-        self.nef_user = self.configuration.nexenta_user
-        self.nef_password = self.configuration.nexenta_password
-        self.storage_pool = self.configuration.nexenta_volume
+        self.pool = self.configuration.nexenta_volume
         self.volume_group = self.configuration.nexenta_volume_group
         self.portal_port = self.configuration.nexenta_iscsi_target_portal_port
         self.portals = self.configuration.nexenta_iscsi_target_portals
-        self.dataset_compression = (
+        self.sparsed_volumes = self.configuration.nexenta_sparse
+        self.deduplicated_volumes = self.configuration.nexenta_dataset_dedup
+        self.compressed_volumes = (
             self.configuration.nexenta_dataset_compression)
-        self.dataset_deduplication = self.configuration.nexenta_dataset_dedup
         self.dataset_description = (
             self.configuration.nexenta_dataset_description)
         self.iscsi_target_portal_port = (
             self.configuration.nexenta_iscsi_target_portal_port)
-        self.dataset = '%s/%s' % (self.storage_pool, self.volume_group)
-
-    @property
-    def backend_name(self):
-        backend_name = None
-        if self.configuration:
-            backend_name = self.configuration.safe_get('volume_backend_name')
-        if not backend_name:
-            backend_name = self.__class__.__name__
-        return backend_name
+        self.root_path = posixpath.join(self.pool, self.volume_group)
+        self.dataset_blocksize = self.configuration.nexenta_ns5_blocksize
+        if not self.configuration.nexenta_ns5_blocksize > 128:
+            self.dataset_blocksize *= units.Ki
+        self.group_snapshot_template = (
+            self.configuration.nexenta_group_snapshot_template)
+        self.origin_snapshot_template = (
+            self.configuration.nexenta_origin_snapshot_template)
 
     def do_setup(self, context):
-        host = self.nef_host or self.iscsi_host
-        self.nef = jsonrpc.NexentaJSONProxy(
-            host, self.nef_port, self.nef_user, self.nef_password,
-            self.use_https, self.storage_pool, self.verify_ssl)
-        url = 'storage/volumeGroups'
-        data = {
-            'path': '/'.join([self.storage_pool, self.volume_group]),
-            'volumeBlockSize': (
-                self.configuration.nexenta_ns5_blocksize * units.Ki)
-        }
-        try:
-            self.nef.post(url, data)
-        except exception.NexentaException as ex:
-            err = utils.ex2err(ex)
-            if err['code'] == 'EEXIST':
-                LOG.debug('Volume group %(group)s already exists',
-                          {'group': self.volume_group})
-            else:
-                raise ex
+        self.nef = NefProxy(self.driver_volume_type,
+                            self.root_path,
+                            self.configuration)
 
     def check_for_setup_error(self):
-        """Verify that the zfs pool, vg and iscsi service exists."""
-        url = 'storage/pools/%s' % self.storage_pool
-        self.nef.get(url)
-        url = 'storage/volumeGroups/%s' % urllib.parse.quote_plus(
-            self.dataset)
+        """Check root volume group and iSCSI target service."""
         try:
-            self.nef.get(url)
-        except exception.NexentaException:
-            msg = (_('Volume group %(group)s not found')
-                   % {'group': self.volume_group})
-            raise exception.NexentaException(msg)
-        services = self.nef.get('services')
-        for service in services['data']:
-            if service['name'] == 'iscsit':
-                if service['state'] != 'online':
-                    msg = _('iSCSI target service is not running')
-                    raise exception.NexentaException(msg)
-                break
+            self.nef.volumegroups.get(self.root_path)
+        except NefException as error:
+            if error.code != 'ENOENT':
+                raise error
+            payload = {'path': self.root_path,
+                       'volumeBlockSize': self.dataset_blocksize}
+            self.nef.volumegroups.create(payload)
+        service = self.nef.services.get('iscsit')
+        if service['state'] != 'online':
+            message = (_('iSCSI target service is not online: %(state)s')
+                       % {'state': service['state']})
+            raise NefException(code='ESRCH', message=message)
 
     def create_volume(self, volume):
         """Create a zfs volume on appliance.
@@ -159,67 +154,40 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param volume: volume reference
         :returns: model update dict for volume reference
         """
-        LOG.debug('Create volume %(volume)s',
-                  {'volume': volume['name']})
-        url = 'storage/volumes'
-        path = '/'.join([self.storage_pool, self.volume_group, volume['name']])
-        data = {
-            'path': path,
+        payload = {
+            'path': self._get_volume_path(volume),
             'volumeSize': volume['size'] * units.Gi,
-            'volumeBlockSize': (
-                self.configuration.nexenta_ns5_blocksize * units.Ki),
-            'sparseVolume': self.configuration.nexenta_sparse
+            'volumeBlockSize': self.dataset_blocksize,
+            'compressionMode': self.compressed_volumes,
+            'sparseVolume': self.sparsed_volumes
         }
-        self.nef.post(url, data)
+        self.nef.volumes.create(payload)
 
+    @coordination.synchronized('{self.nef.lock}')
     def delete_volume(self, volume):
         """Deletes a logical volume.
 
         :param volume: volume reference
         """
-        LOG.debug('Delete volume %(volume)s',
-                  {'volume': volume['name']})
-        path = self._get_volume_path(volume['name'])
-        params = {'path': path}
-        url = 'storage/volumes?%s' % (
-            urllib.parse.urlencode(params))
-        data = self.nef.get(url).get('data')
-        if not data:
-            return
-        params = {'snapshots': True}
-        url = 'storage/volumes/%s?%s' % (
-            urllib.parse.quote_plus(path),
-            urllib.parse.urlencode(params))
+        volume_path = self._get_volume_path(volume)
+        delete_payload = {'snapshots': True}
         try:
-            self.nef.delete(url)
-        except exception.NexentaException as ex:
-            err = utils.ex2err(ex)
-            if err['code'] == 'EEXIST':
-                params = {'parent': path}
-                url = 'storage/snapshots?%s' % (
-                    urllib.parse.urlencode(params))
-                snap_map = {}
-                for snap in self.nef.get(url)['data']:
-                    url = 'storage/snapshots/%s' % (
-                        urllib.parse.quote_plus(snap['path']))
-                    data = self.nef.get(url)
-                    if data and data.get('clones'):
-                        snap_map[data['creationTxg']] = snap['path']
-                if snap_map:
-                    snap = snap_map[max(snap_map)]
-                    url = 'storage/snapshots/%s' % urllib.parse.quote_plus(
-                        snap)
-                    clone = self.nef.get(url)['clones'][0]
-                    url = 'storage/volumes/%s/promote' % (
-                        urllib.parse.quote_plus(clone))
-                    self.nef.post(url)
-                params = {'snapshots': True}
-                url = 'storage/volumes/%s?%s' % (
-                    urllib.parse.quote_plus(path),
-                    urllib.parse.urlencode(params))
-                self.nef.delete(url)
-            else:
-                raise ex
+            self.nef.volumes.delete(volume_path, delete_payload)
+        except NefException as error:
+            if error.code != 'EEXIST':
+                raise error
+            snapshots_tree = {}
+            snapshots_payload = {'parent': volume_path, 'fields': 'path'}
+            snapshots = self.nef.snapshots.list(snapshots_payload)
+            for snapshot in snapshots:
+                clones_payload = {'fields': 'clones,creationTxg'}
+                data = self.nef.snapshots.get(snapshot['path'], clones_payload)
+                if data['clones']:
+                    snapshots_tree[data['creationTxg']] = data['clones'][0]
+            if snapshots_tree:
+                clone_path = snapshots_tree[max(snapshots_tree)]
+                self.nef.volumes.promote(clone_path)
+            self.nef.volumes.delete(volume_path, delete_payload)
 
     def extend_volume(self, volume, new_size):
         """Extend an existing volume.
@@ -227,36 +195,29 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param volume: volume reference
         :param new_size: volume new size in GB
         """
-        LOG.debug('Extend volume %(volume)s, new size: %(size)sGB',
-                  {'volume': volume['name'],
-                   'size': new_size})
-        volume_path = self._get_volume_path(volume['name'])
-        url = 'storage/volumes/%s' % urllib.parse.quote_plus(volume_path)
-        self.nef.put(url, {'volumeSize': new_size * units.Gi})
+        volume_path = self._get_volume_path(volume)
+        payload = {'volumeSize': new_size * units.Gi}
+        self.nef.volumes.set(volume_path, payload)
 
+    @coordination.synchronized('{self.nef.lock}')
     def create_snapshot(self, snapshot):
         """Creates a snapshot.
 
         :param snapshot: snapshot reference
         """
-        LOG.info('Create snapshot %(snapshot)s for volume %(volume)s',
-                 {'snapshot': snapshot['name'],
-                  'volume': snapshot['volume_name']})
-        volume_path = self._get_volume_path(snapshot['volume_name'])
-        url = 'storage/snapshots'
-        data = {'path': '%s@%s' % (volume_path, snapshot['name'])}
-        self.nef.post(url, data)
+        snapshot_path = self._get_snapshot_path(snapshot)
+        payload = {'path': snapshot_path}
+        self.nef.snapshots.create(payload)
 
+    @coordination.synchronized('{self.nef.lock}')
     def delete_snapshot(self, snapshot):
         """Deletes a snapshot.
 
         :param snapshot: snapshot reference
         """
-        LOG.debug('Delete snapshot: %(snapshot)s',
-                  {'snapshot': snapshot['name']})
-        volume_path = self._get_volume_path(snapshot['volume_name'])
-        snapshot_path = '%s@%s' % (volume_path, snapshot['name'])
-        self._delete_snapshot(snapshot_path)
+        snapshot_path = self._get_snapshot_path(snapshot)
+        payload = {'defer': True}
+        self.nef.snapshots.delete(snapshot_path, payload)
 
     def snapshot_revert_use_temp_snapshot(self):
         # Considering that NexentaStor based drivers use COW images
@@ -267,29 +228,21 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
     def revert_to_snapshot(self, context, volume, snapshot):
         """Revert volume to snapshot."""
-        LOG.debug('Revert volume %(volume)s to snapshot %(snapshot)s',
-                  {'volume': volume['name'],
-                   'snapshot': snapshot['name']})
-        volume_path = self._get_volume_path(volume['name'])
-        url = 'storage/volumes/%s/rollback' % urllib.parse.quote_plus(
-            volume_path)
-        self.nef.post(url, {'snapshot': snapshot['name']})
+        volume_path = self._get_volume_path(volume)
+        payload = {'snapshot': snapshot['name']}
+        self.nef.volumes.rollback(volume_path, payload)
 
+    @coordination.synchronized('{self.nef.lock}')
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create new volume from other's snapshot on appliance.
 
         :param volume: reference of volume to be created
         :param snapshot: reference of source snapshot
         """
-        LOG.debug('Create volume %(volume)s from snapshot: %(snapshot)s',
-                  {'volume': volume['name'],
-                   'snapshot': snapshot['name']})
-        target_path = self._get_volume_path(volume['name'])
-        source_path = self._get_volume_path(snapshot['volume_name'])
-        snapshot_path = '%s@%s' % (source_path, snapshot['name'])
-        url = 'storage/snapshots/%s/clone' % urllib.parse.quote_plus(
-            snapshot_path)
-        self.nef.post(url, {'targetPath': target_path})
+        snapshot_path = self._get_snapshot_path(snapshot)
+        clone_path = self._get_volume_path(volume)
+        payload = {'targetPath': clone_path}
+        self.nef.snapshots.clone(snapshot_path, payload)
         if volume['size'] > snapshot['volume_size']:
             self.extend_volume(volume, volume['size'])
 
@@ -299,45 +252,41 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param volume: new volume reference
         :param src_vref: source volume reference
         """
-        snapshot_name = self._get_clone_snapshot_name(volume['id'])
-        snapshot = {'name': snapshot_name,
-                    'volume_name': src_vref['name'],
-                    'volume_id': src_vref['id'],
-                    'volume_size': src_vref['size']}
-        LOG.debug('Create temporary snapshot %(snapshot)s '
-                  'for the original volume %(volume)s',
-                  {'snapshot': snapshot['name'],
-                   'volume': snapshot['volume_name']})
+        snapshot = {
+            'name': self.origin_snapshot_template % volume['id'],
+            'volume_id': src_vref['id'],
+            'volume_name': src_vref['name'],
+            'volume_size': src_vref['size']
+        }
         self.create_snapshot(snapshot)
-        LOG.debug('Create clone %(clone)s from '
-                  'temporary snapshot %(snapshot)s',
-                  {'clone': volume['name'],
-                   'snapshot': snapshot['name']})
         try:
             self.create_volume_from_snapshot(volume, snapshot)
-        except exception.NexentaException as ex:
-            LOG.debug('Volume creation failed, deleting temporary '
-                      'snapshot %(volume)s@%(snapshot)s',
-                      {'volume': snapshot['volume_name'],
-                       'snapshot': snapshot['name']})
+        except NefException as error:
+            LOG.debug('Failed to create clone %(clone)s '
+                      'from volume %(volume)s: %(error)s',
+                      {'clone': volume['name'],
+                       'volume': src_vref['name'],
+                       'error': error})
+            raise error
+        finally:
             try:
                 self.delete_snapshot(snapshot)
-            except (exception.NexentaException, exception.SnapshotIsBusy):
+            except NefException as error:
                 LOG.debug('Failed to delete temporary snapshot '
-                          '%(volume)s@%(snapshot)s',
-                          {'volume': snapshot['volume_name'],
-                           'snapshot': snapshot['name']})
-            raise ex
+                          '%(volume)s@%(snapshot)s: %(error)s',
+                          {'volume': src_vref['name'],
+                           'snapshot': snapshot['name'],
+                           'error': error})
 
-    def create_export(self, _ctx, volume, connector):
+    def create_export(self, context, volume, connector):
         """Export a volume."""
         pass
 
-    def ensure_export(self, _ctx, volume):
+    def ensure_export(self, context, volume):
         """Synchronously recreate an export for a volume."""
         pass
 
-    def remove_export(self, _ctx, volume):
+    def remove_export(self, context, volume):
         """Remove an export for a volume."""
         pass
 
@@ -348,13 +297,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param connector: a connector object
         :returns: dictionary of connection information
         """
-        info = {'driver_volume_type': 'iscsi', 'data': {}}
+        info = {'driver_volume_type': self.driver_volume_type, 'data': {}}
         host_iqn = None
         host_groups = []
-        volume_path = self._get_volume_path(volume['name'])
+        volume_path = self._get_volume_path(volume)
         if isinstance(connector, dict) and 'initiator' in connector:
             connectors = []
-            for attachment in volume.volume_attachment:
+            for attachment in volume['volume_attachment']:
                 connectors.append(attachment.get('connector'))
             if connectors.count(connector) > 1:
                 LOG.debug('Detected multiple connections on host '
@@ -377,9 +326,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             LOG.debug('Terminate all connections for volume %(volume)s',
                       {'volume': volume['name']})
 
-        params = {'volume': volume_path}
-        url = 'san/lunMappings?%s' % urllib.parse.urlencode(params)
-        mappings = self.nef.get(url).get('data')
+        payload = {'volume': volume_path}
+        mappings = self.nef.mappings.list(payload)
         if not mappings:
             LOG.debug('There are no LUN mappings found for volume %(volume)s',
                       {'volume': volume['name']})
@@ -406,57 +354,58 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
         If 'refresh' is True, run update the stats first.
         """
-        if refresh:
+        if refresh or not self._stats:
             self._update_volume_stats()
 
         return self._stats
 
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor appliance."""
-        LOG.debug('Updating volume stats')
-        params = {'fields': 'bytesAvailable,bytesUsed'}
-        url = 'storage/volumeGroups/%s?%s' % (
-            urllib.parse.quote_plus(self.dataset),
-            urllib.parse.urlencode(params))
-        stats = self.nef.get(url)
-        free = utils.str2gib_size(stats['bytesAvailable'])
-        allocated = utils.str2gib_size(stats['bytesUsed'])
-
+        LOG.debug('Updating volume backend %(volume_backend_name)s stats',
+                  {'volume_backend_name': self.volume_backend_name})
+        payload = {'fields': 'bytesAvailable,bytesUsed'}
+        dataset = self.nef.volumegroups.get(self.root_path, payload)
+        free = dataset['bytesAvailable'] // units.Gi
+        used = dataset['bytesUsed'] // units.Gi
+        total = free + used
         location_info = '%(driver)s:%(host)s:%(pool)s/%(group)s' % {
             'driver': self.__class__.__name__,
             'host': self.iscsi_host,
-            'pool': self.storage_pool,
+            'pool': self.pool,
             'group': self.volume_group,
         }
         self._stats = {
-            'vendor_name': 'Nexenta',
-            'dedup': self.dataset_deduplication,
-            'compression': self.dataset_compression,
+            'vendor_name': self.vendor_name,
+            'dedup': self.deduplicated_volumes,
+            'compression': self.compressed_volumes,
             'description': self.dataset_description,
+            'nef_url': self.nef.host,
+            'nef_port': self.nef.port,
             'driver_version': self.VERSION,
-            'storage_protocol': 'iSCSI',
-            'sparsed_volumes': self.configuration.nexenta_sparse,
-            'total_capacity_gb': free + allocated,
+            'storage_protocol': self.storage_protocol,
+            'sparsed_volumes': self.sparsed_volumes,
+            'total_capacity_gb': total,
             'free_capacity_gb': free,
             'reserved_percentage': self.configuration.reserved_percentage,
             'QoS_support': False,
             'multiattach': True,
             'consistencygroup_support': True,
             'consistent_group_snapshot_enabled': True,
-            'volume_backend_name': self.backend_name,
             'location_info': location_info,
-            'iscsi_target_portal_port': self.iscsi_target_portal_port,
-            'nef_url': self.nef.url
+            'volume_backend_name': self.volume_backend_name,
+            'iscsi_target_portal_port': self.iscsi_target_portal_port
         }
 
-    def _get_volume_path(self, volume_name):
-        """Return zfs volume name that corresponds given volume name."""
-        return '%s/%s' % (self.dataset, volume_name)
+    def _get_volume_path(self, volume):
+        """Return ZFS datset path for the volume."""
+        return posixpath.join(self.root_path, volume['name'])
 
-    @staticmethod
-    def _get_clone_snapshot_name(volume_id):
-        """Return name for snapshot that will be used to clone the volume."""
-        return 'cinder-clone-snapshot-%s' % volume_id
+    def _get_snapshot_path(self, snapshot):
+        """Return ZFS snapshot path for the snapshot."""
+        volume_name = snapshot['volume_name']
+        snapshot_name = snapshot['name']
+        volume_path = posixpath.join(self.root_path, volume_name)
+        return '%s@%s' % (volume_path, snapshot_name)
 
     def _get_target_group_name(self, target_name):
         """Return Nexenta iSCSI target group name for volume."""
@@ -475,9 +424,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
     def _get_host_addresses(self):
         """Return Nexenta IP addresses list."""
         host_addresses = []
-        url = 'network/addresses'
-        data = self.nef.get(url).get('data')
-        for item in data:
+        items = self.nef.netaddrs.list()
+        for item in items:
             ip_cidr = six.text_type(item['address'])
             ip_addr, ip_mask = ip_cidr.split('/')
             ip_obj = ipaddress.ip_address(ip_addr)
@@ -537,9 +485,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                       {'group': group_name})
             return {}
         group_props = {}
-        params = {'name': group_name}
-        url = 'san/targetgroups?%s' % urllib.parse.urlencode(params)
-        data = self.nef.get(url).get('data')
+        payload = {'name': group_name}
+        data = self.nef.targetgroups.list(payload)
         if not data:
             LOG.debug('Skip target group %(group)s: group not found',
                       {'group': group_name})
@@ -553,9 +500,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             return group_props
         for target_name in target_names:
             group_props[target_name] = []
-            params = {'name': target_name}
-            url = 'san/iscsi/targets?%s' % urllib.parse.urlencode(params)
-            data = self.nef.get(url).get('data')
+            payload = {'name': target_name}
+            data = self.nef.targets.list(payload)
             if not data:
                 LOG.debug('Skip target group %(group)s: '
                           'group member %(target)s not found',
@@ -587,7 +533,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param connector: connector reference
         :returns: dictionary of connection information
         """
-        volume_path = self._get_volume_path(volume['name'])
+        volume_path = self._get_volume_path(volume)
         host_iqn = connector.get('initiator')
         LOG.debug('Initialize connection for volume: %(volume)s '
                   'and initiator: %(initiator)s',
@@ -602,9 +548,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         props_portals = []
         props_iqns = []
         props_luns = []
-        params = {'volume': volume_path}
-        url = 'san/lunMappings?%s' % urllib.parse.urlencode(params)
-        mappings = self.nef.get(url).get('data')
+        payload = {'volume': volume_path}
+        mappings = self.nef.mappings.list(payload)
         for mapping in mappings:
             mapping_id = mapping['id']
             mapping_lu = mapping['lun']
@@ -650,16 +595,16 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 props['target_lun'] = props_luns[index]
             LOG.debug('Use existing LUN mapping(s) %(props)s',
                       {'props': props})
-            return {'driver_volume_type': 'iscsi', 'data': props}
+            return {'driver_volume_type': self.driver_volume_type,
+                    'data': props}
 
         if host_group is None:
             host_group = '%s-%s' % (self.host_group_prefix, uuid.uuid4().hex)
-            self._create_host_group(host_group, host_iqn)
+            self._create_host_group(host_group, [host_iqn])
 
         mappings_spread = {}
         targets_spread = {}
-        url = 'san/targetgroups'
-        data = self.nef.get(url).get('data')
+        data = self.nef.targetgroups.list()
         for item in data:
             target_group = item['name']
             group_props = self._target_group_props(target_group, host_portals)
@@ -668,9 +613,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 LOG.debug('Skip unsuitable target group %(tg)s',
                           {'tg': target_group})
                 continue
-            params = {'targetGroup': target_group}
-            url = 'san/lunMappings?%s' % urllib.parse.urlencode(params)
-            data = self.nef.get(url).get('data')
+            payload = {'targetGroup': target_group}
+            data = self.nef.mappings.list(payload)
             mappings = len(data)
             if not mappings < self.luns_per_target:
                 LOG.debug('Skip target group %(tg)s: '
@@ -705,27 +649,21 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 props_portals += portals
                 props_iqns += [target] * len(portals)
 
-        url = 'san/lunMappings'
-        data = {
-            'volume': volume_path,
-            'targetGroup': target_group,
-            'hostGroup': host_group
-        }
-        LOG.debug('Create LUN mapping %(data)s',
-                  {'data': data})
-        self.nef.post(url, data)
-
-        params = {
-            'fields': 'lun',
-            'volume': volume_path,
-            'targetGroup': target_group,
-            'hostGroup': host_group
-        }
-        LOG.debug('Get LUN number of LUN mapping for %(params)s',
-                  {'params': params})
-        url = 'san/lunMappings?%s' % urllib.parse.urlencode(params)
-        data = self._poll_result(url)
-        lun = data[0]['lun']
+        payload = {'volume': volume_path,
+                   'targetGroup': target_group,
+                   'hostGroup': host_group}
+        self.nef.mappings.create(payload)
+        mapping = {}
+        for attempt in range(0, self.nef.retries):
+            mapping = self.nef.mappings.list(payload)
+            if mapping:
+                break
+            self.nef.delay(attempt)
+        if not mapping:
+            message = (_('Failed to get LUN number for %(volume)s')
+                       % {'volume': volume_path})
+            raise NefException(code='ENOTBLK', message=message)
+        lun = mapping[0]['lun']
         props_luns = [lun] * len(props_iqns)
 
         if multipath:
@@ -741,19 +679,16 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         if not self.lu_writebackcache_disabled:
             LOG.debug('Get LUN guid for volume %(volume)s',
                       {'volume': volume_path})
-            params = {'fields': 'guid', 'volume': volume_path}
-            url = 'san/logicalUnits?%s' % urllib.parse.urlencode(params)
-            data = self.nef.get(url).get('data')
+            payload = {'fields': 'guid', 'volume': volume_path}
+            data = self.nef.logicalunits.list(payload)
             guid = data[0]['guid']
-            LOG.debug('Enable Write Back Cache for LUN %(guid)s',
-                      {'guid': guid})
-            url = 'san/logicalUnits/%s' % urllib.parse.quote_plus(guid)
-            data = {'writebackCacheDisabled': False}
-            self.nef.put(url, data)
+            payload = {'writebackCacheDisabled': False}
+            self.nef.logicalunits.set(guid, payload)
 
         LOG.debug('Created new LUN mapping(s): %(props)s',
                   {'props': props})
-        return {'driver_volume_type': 'iscsi', 'data': props}
+        return {'driver_volume_type': self.driver_volume_type,
+                'data': props}
 
     def _create_target_group(self, name, members):
         """Create a new target group with members.
@@ -761,15 +696,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param name: group name
         :param members: group members list
         """
-        url = 'san/targetgroups'
-        data = {
-            'name': name,
-            'members': members
-        }
-        LOG.debug('Create new target group %(name)s '
-                  'with members %(members)s',
-                  {'name': name, 'members': members})
-        self.nef.post(url, data)
+        payload = {'name': name, 'members': members}
+        self.nef.targetgroups.create(payload)
 
     def _update_target_group(self, name, members):
         """Update a existing target group with new members.
@@ -777,24 +705,15 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param name: group name
         :param members: group members list
         """
-        url = 'san/targetgroups/%s' % urllib.parse.quote_plus(name)
-        data = {
-            'members': members
-        }
-        LOG.debug('Update existing target group %(name)s '
-                  'with new members %(members)s',
-                  {'name': name, 'members': members})
-        self.nef.put(url, data)
+        payload = {'members': members}
+        self.nef.targetgroups.set(name, payload)
 
-    def _delete_lun_mapping(self, mapping):
+    def _delete_lun_mapping(self, name):
         """Delete an existing LUN mapping.
 
-        :param mapping: LUN mapping ID
+        :param name: LUN mapping ID
         """
-        url = 'san/lunMappings/%s' % mapping
-        LOG.debug('Delete LUN mapping %(mapping)s',
-                  {'mapping': mapping})
-        self.nef.delete(url)
+        self.nef.mappings.delete(name)
 
     def _create_target(self, name, portals):
         """Create a new target with portals.
@@ -802,14 +721,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param name: target name
         :param portals: target portals list
         """
-        url = 'san/iscsi/targets'
-        data = {
-            'name': name,
-            'portals': self._s2d(portals)
-        }
-        LOG.debug('Create new target %(name)s with portals %(portals)s',
-                  {'name': name, 'portals': portals})
-        self.nef.post(url, data)
+        payload = {'name': name,
+                   'portals': self._s2d(portals)}
+        self.nef.targets.create(payload)
 
     def _get_host_group(self, member):
         """Find existing host group by group member.
@@ -817,8 +731,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param member: host group member
         :returns: host group name
         """
-        url = 'san/hostgroups'
-        host_groups = self.nef.get(url).get('data')
+        host_groups = self.nef.hostgroups.list()
         for host_group in host_groups:
             members = host_group['members']
             if member in members:
@@ -828,36 +741,14 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 return name
         return None
 
-    def _create_host_group(self, name, member):
+    def _create_host_group(self, name, members):
         """Create a new host group.
 
         :param name: host group name
-        :param member: host group member
+        :param members: host group members list
         """
-        url = 'san/hostgroups'
-        data = {
-            'name': name,
-            'members': [member]
-        }
-        LOG.debug('Create new host group %(name)s with member %(member)s',
-                  {'name': name, 'member': member})
-        self.nef.post(url, data)
-
-    def _poll_result(self, url):
-        """Poll non-empty response data for NEF get method.
-
-        :param url: NEF URL
-        :returns: response data list
-        """
-        for retry in range(0, options.POLL_RETRIES):
-            data = self.nef.get(url).get('data')
-            if data:
-                return data
-            delay = int(math.exp(retry))
-            LOG.debug('Retry after %(delay)s seconds delay',
-                      {'delay': delay})
-            greenthread.sleep(delay)
-        return []
+        payload = {'name': name, 'members': members}
+        self.nef.hostgroups.create(payload)
 
     @staticmethod
     def _s2d(css):
@@ -884,6 +775,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             result.append('%s:%s' % (key_val['address'], key_val['port']))
         return result
 
+    @coordination.synchronized('{self.nef.lock}')
     def _delete_snapshot(self, path, recursive=False, defer=True):
         """Deletes a snapshot.
 
@@ -894,16 +786,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                       destroy when there are not any active references
                       to it (for example, clones)
         """
-        params = {'path': path}
-        url = 'storage/snapshots?%s' % urllib.parse.urlencode(params)
-        data = self.nef.get(url).get('data')
-        if not data:
-            return
-        params = {'recursive': recursive, 'defer': defer}
-        url = 'storage/snapshots/%s?%s' % (
-            urllib.parse.quote_plus(path),
-            urllib.parse.urlencode(params))
-        self.nef.delete(url)
+        payload = {'recursive': recursive, 'defer': defer}
+        self.nef.snapshots.delete(path, payload)
 
     def create_consistencygroup(self, context, group):
         """Creates a consistencygroup.
@@ -955,19 +839,19 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """
         group_model_update = {}
         snapshots_model_update = []
-        cgsnapshot_name = 'cgsnapshot-%s' % cgsnapshot['id']
-        cgsnapshot_path = '%s@%s' % (self.dataset, cgsnapshot_name)
-        url = 'storage/snapshots'
-        data = {'path': cgsnapshot_path, 'recursive': True}
-        self.nef.post(url, data)
+        cgsnapshot_name = self.group_snapshot_template % cgsnapshot['id']
+        cgsnapshot_path = '%s@%s' % (self.root_path, cgsnapshot_name)
+        create_payload = {'path': cgsnapshot_path, 'recursive': True}
+        self.nef.snapshots.create(create_payload)
         for snapshot in snapshots:
-            volume_path = self._get_volume_path(snapshot['volume_name'])
+            volume_name = snapshot['volume_name']
+            volume_path = posixpath.join(self.root_path, volume_name)
+            snapshot_name = snapshot['name']
             snapshot_path = '%s@%s' % (volume_path, cgsnapshot_name)
-            url = 'storage/snapshots/%s/rename' % (
-                urllib.parse.quote_plus(snapshot_path))
-            data = {'newName': snapshot['name']}
-            self.nef.post(url, data)
-        self._delete_snapshot(cgsnapshot_path, True)
+            rename_payload = {'newName': snapshot_name}
+            self.nef.snapshots.rename(snapshot_path, rename_payload)
+        delete_payload = {'defer': True, 'recursive': True}
+        self.nef.snapshots.delete(cgsnapshot_path, delete_payload)
         return group_model_update, snapshots_model_update
 
     def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
@@ -1004,23 +888,483 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             for volume, snapshot in zip(volumes, snapshots):
                 self.create_volume_from_snapshot(volume, snapshot)
         elif source_cg and source_vols:
-            cgsnapshot_name = 'cgsnapshot-%s' % group['id']
-            cgsnapshot_path = '%s@%s' % (self.dataset, cgsnapshot_name)
-            url = 'storage/snapshots'
-            data = {'path': cgsnapshot_path, 'recursive': True}
-            self.nef.post(url, data)
+            snapshot_name = self.origin_snapshot_template % group['id']
+            snapshot_path = '%s@%s' % (self.root_path, snapshot_name)
+            create_payload = {'path': snapshot_path, 'recursive': True}
+            self.nef.snapshots.create(create_payload)
             for volume, source_vol in zip(volumes, source_vols):
-                source_path = self._get_volume_path(source_vol['name'])
-                snapshot_path = '%s@%s' % (source_path, cgsnapshot_name)
-                snapshot_name = self._get_clone_snapshot_name(volume['id'])
-                url = 'storage/snapshots/%s/rename' % (
-                    urllib.parse.quote_plus(snapshot_path))
-                data = {'newName': snapshot_name}
-                self.nef.post(url, data)
-                snapshot = {'name': snapshot_name,
-                            'volume_id': source_vol['id'],
-                            'volume_name': source_vol['name'],
-                            'volume_size': source_vol['size']}
+                snapshot = {
+                    'name': snapshot_name,
+                    'volume_id': source_vol['id'],
+                    'volume_name': source_vol['name'],
+                    'volume_size': source_vol['size']
+                }
                 self.create_volume_from_snapshot(volume, snapshot)
-            self._delete_snapshot(cgsnapshot_path, True)
+            delete_payload = {'defer': True, 'recursive': True}
+            self.nef.snapshots.delete(snapshot_path, delete_payload)
         return group_model_update, volumes_model_update
+
+    def _get_existing_volume(self, existing_ref):
+        types = {
+            'source-name': 'name',
+            'source-guid': 'guid'
+        }
+        if not any(key in types for key in existing_ref):
+            keys = ', '.join(types.keys())
+            message = (_('Manage existing volume failed '
+                         'due to invalid backend reference. '
+                         'Volume reference must contain '
+                         'at least one valid key: %(keys)s')
+                       % {'keys': keys})
+            raise NefException(code='EINVAL', message=message)
+        payload = {
+            'parent': self.root_path,
+            'fields': 'name,path,volumeSize'
+        }
+        for key, value in types.items():
+            if key in existing_ref:
+                payload[value] = existing_ref[key]
+        existing_volumes = self.nef.volumes.list(payload)
+        if len(existing_volumes) == 1:
+            volume_path = existing_volumes[0]['path']
+            volume_name = existing_volumes[0]['name']
+            volume_size = existing_volumes[0]['volumeSize'] // units.Gi
+            existing_volume = {
+                'name': volume_name,
+                'path': volume_path,
+                'size': volume_size
+            }
+            vid = utils.extract_id_from_volume_name(volume_name)
+            if utils.check_already_managed_volume(vid):
+                message = (_('Volume %(name)s already managed')
+                           % {'name': volume_name})
+                raise NefException(code='EBUSY', message=message)
+            return existing_volume
+        elif not existing_volumes:
+            code = 'ENOENT'
+            reason = _('no matching volumes were found')
+        else:
+            code = 'EINVAL'
+            reason = _('too many volumes were found')
+        message = (_('Unable to manage existing volume by '
+                     'reference %(reference)s: %(reason)s')
+                   % {'reference': existing_ref, 'reason': reason})
+        raise NefException(code=code, message=message)
+
+    def _check_already_managed_snapshot(self, snapshot_id):
+        """Check cinder database for already managed snapshot.
+
+        :param snapshot_id: snapshot id parameter
+        :returns: return True, if database entry with specified
+                  snapshot id exists, otherwise return False
+        """
+        if not isinstance(snapshot_id, six.string_types):
+            return False
+        try:
+            uuid.UUID(snapshot_id, version=4)
+        except ValueError:
+            return False
+        ctxt = context.get_admin_context()
+        return objects.Snapshot.exists(ctxt, snapshot_id)
+
+    def _get_existing_snapshot(self, snapshot, existing_ref):
+        types = {
+            'source-name': 'name',
+            'source-guid': 'guid'
+        }
+        if not any(key in types for key in existing_ref):
+            keys = ', '.join(types.keys())
+            message = (_('Manage existing snapshot failed '
+                         'due to invalid backend reference. '
+                         'Snapshot reference must contain '
+                         'at least one valid key: %(keys)s')
+                       % {'keys': keys})
+            raise NefException(code='EINVAL', message=message)
+        volume_name = snapshot['volume_name']
+        volume_size = snapshot['volume_size']
+        volume = {'name': volume_name}
+        volume_path = self._get_volume_path(volume)
+        payload = {
+            'parent': volume_path,
+            'fields': 'name,path',
+            'recursive': False
+        }
+        for key, value in types.items():
+            if key in existing_ref:
+                payload[value] = existing_ref[key]
+        existing_snapshots = self.nef.snapshots.list(payload)
+        if len(existing_snapshots) == 1:
+            name = existing_snapshots[0]['name']
+            path = existing_snapshots[0]['path']
+            existing_snapshot = {
+                'name': name,
+                'path': path,
+                'volume_name': volume_name,
+                'volume_size': volume_size
+            }
+            sid = utils.extract_id_from_snapshot_name(name)
+            if self._check_already_managed_snapshot(sid):
+                message = (_('Snapshot %(name)s already managed')
+                           % {'name': name})
+                raise NefException(code='EBUSY', message=message)
+            return existing_snapshot
+        elif not existing_snapshots:
+            code = 'ENOENT'
+            reason = _('no matching snapshots were found')
+        else:
+            code = 'EINVAL'
+            reason = _('too many snapshots were found')
+        message = (_('Unable to manage existing snapshot by '
+                     'reference %(reference)s: %(reason)s')
+                   % {'reference': existing_ref, 'reason': reason})
+        raise NefException(code=code, message=message)
+
+    @coordination.synchronized('{self.nef.lock}')
+    def manage_existing(self, volume, existing_ref):
+        """Brings an existing backend storage object under Cinder management.
+
+        existing_ref is passed straight through from the API request's
+        manage_existing_ref value, and it is up to the driver how this should
+        be interpreted.  It should be sufficient to identify a storage object
+        that the driver should somehow associate with the newly-created cinder
+        volume structure.
+
+        There are two ways to do this:
+
+        1. Rename the backend storage object so that it matches the,
+           volume['name'] which is how drivers traditionally map between a
+           cinder volume and the associated backend storage object.
+
+        2. Place some metadata on the volume, or somewhere in the backend, that
+           allows other driver requests (e.g. delete, clone, attach, detach...)
+           to locate the backend storage object when required.
+
+        If the existing_ref doesn't make sense, or doesn't refer to an existing
+        backend storage object, raise a ManageExistingInvalidReference
+        exception.
+
+        The volume may have a volume_type, and the driver can inspect that and
+        compare against the properties of the referenced backend storage
+        object.  If they are incompatible, raise a
+        ManageExistingVolumeTypeMismatch, specifying a reason for the failure.
+
+        :param volume:       Cinder volume to manage
+        :param existing_ref: Driver-specific information used to identify a
+                             volume
+        """
+        existing_volume = self._get_existing_volume(existing_ref)
+        existing_volume_path = existing_volume['path']
+        payload = {'volume': existing_volume_path}
+        mappings = self.nef.mappings.list(payload)
+        if mappings:
+            message = (_('Failed to manage existing volume %(path)s '
+                         'due to existing LUN mappings: %(mappings)s')
+                       % {'path': existing_volume_path,
+                          'mappings': mappings})
+            raise NefException(code='EEXIST', message=message)
+        if existing_volume['name'] != volume['name']:
+            volume_path = self._get_volume_path(volume)
+            payload = {'newPath': volume_path}
+            self.nef.volumes.rename(existing_volume_path, payload)
+
+    def manage_existing_get_size(self, volume, existing_ref):
+        """Return size of volume to be managed by manage_existing.
+
+        When calculating the size, round up to the next GB.
+
+        :param volume:       Cinder volume to manage
+        :param existing_ref: Driver-specific information used to identify a
+                             volume
+        :returns size:       Volume size in GiB (integer)
+        """
+        existing_volume = self._get_existing_volume(existing_ref)
+        return existing_volume['size']
+
+    def get_manageable_volumes(self, cinder_volumes, marker, limit, offset,
+                               sort_keys, sort_dirs):
+        """List volumes on the backend available for management by Cinder.
+
+        Returns a list of dictionaries, each specifying a volume in the host,
+        with the following keys:
+        - reference (dictionary): The reference for a volume, which can be
+          passed to "manage_existing".
+        - size (int): The size of the volume according to the storage
+          backend, rounded up to the nearest GB.
+        - safe_to_manage (boolean): Whether or not this volume is safe to
+          manage according to the storage backend. For example, is the volume
+          in use or invalid for any reason.
+        - reason_not_safe (string): If safe_to_manage is False, the reason why.
+        - cinder_id (string): If already managed, provide the Cinder ID.
+        - extra_info (string): Any extra information to return to the user
+
+        :param cinder_volumes: A list of volumes in this host that Cinder
+                               currently manages, used to determine if
+                               a volume is manageable or not.
+        :param marker:    The last item of the previous page; we return the
+                          next results after this value (after sorting)
+        :param limit:     Maximum number of items to return
+        :param offset:    Number of items to skip after marker
+        :param sort_keys: List of keys to sort results by (valid keys are
+                          'identifier' and 'size')
+        :param sort_dirs: List of directions to sort by, corresponding to
+                          sort_keys (valid directions are 'asc' and 'desc')
+        """
+        manageable_volumes = []
+        cinder_volume_names = {}
+        for cinder_volume in cinder_volumes:
+            key = cinder_volume['name']
+            value = cinder_volume['id']
+            cinder_volume_names[key] = value
+        payload = {
+            'parent': self.root_path,
+            'fields': 'name,guid,path,volumeSize',
+            'recursive': False
+        }
+        volumes = self.nef.volumes.list(payload)
+        for volume in volumes:
+            safe_to_manage = True
+            reason_not_safe = None
+            cinder_id = None
+            extra_info = None
+            path = volume['path']
+            guid = volume['guid']
+            size = volume['volumeSize'] // units.Gi
+            name = volume['name']
+            if name in cinder_volume_names:
+                cinder_id = cinder_volume_names[name]
+                safe_to_manage = False
+                reason_not_safe = _('Volume already managed')
+            else:
+                payload = {
+                    'volume': path,
+                    'fields': 'hostGroup'
+                }
+                mappings = self.nef.mappings.list(payload)
+                members = []
+                for mapping in mappings:
+                    hostgroup = mapping['hostGroup']
+                    if hostgroup == options.DEFAULT_HOST_GROUP:
+                        members.append(hostgroup)
+                    else:
+                        group = self.nef.hostgroups.get(hostgroup)
+                        members += group['members']
+                if members:
+                    safe_to_manage = False
+                    hosts = ', '.join(members)
+                    reason_not_safe = (_('Volume is connected '
+                                         'to host(s) %(hosts)s')
+                                       % {'hosts': hosts})
+            reference = {
+                'source-name': name,
+                'source-guid': guid
+            }
+            manageable_volumes.append({
+                'reference': reference,
+                'size': size,
+                'safe_to_manage': safe_to_manage,
+                'reason_not_safe': reason_not_safe,
+                'cinder_id': cinder_id,
+                'extra_info': extra_info
+            })
+        return utils.paginate_entries_list(manageable_volumes,
+                                           marker, limit, offset,
+                                           sort_keys, sort_dirs)
+
+    def unmanage(self, volume):
+        """Removes the specified volume from Cinder management.
+
+        Does not delete the underlying backend storage object.
+
+        For most drivers, this will not need to do anything.  However, some
+        drivers might use this call as an opportunity to clean up any
+        Cinder-specific configuration that they have associated with the
+        backend storage object.
+
+        :param volume: Cinder volume to unmanage
+        """
+        pass
+
+    @coordination.synchronized('{self.nef.lock}')
+    def manage_existing_snapshot(self, snapshot, existing_ref):
+        """Brings an existing backend storage object under Cinder management.
+
+        existing_ref is passed straight through from the API request's
+        manage_existing_ref value, and it is up to the driver how this should
+        be interpreted.  It should be sufficient to identify a storage object
+        that the driver should somehow associate with the newly-created cinder
+        snapshot structure.
+
+        There are two ways to do this:
+
+        1. Rename the backend storage object so that it matches the
+           snapshot['name'] which is how drivers traditionally map between a
+           cinder snapshot and the associated backend storage object.
+
+        2. Place some metadata on the snapshot, or somewhere in the backend,
+           that allows other driver requests (e.g. delete) to locate the
+           backend storage object when required.
+
+        If the existing_ref doesn't make sense, or doesn't refer to an existing
+        backend storage object, raise a ManageExistingInvalidReference
+        exception.
+
+        :param snapshot:     Cinder volume snapshot to manage
+        :param existing_ref: Driver-specific information used to identify a
+                             volume snapshot
+        """
+        existing_snapshot = self._get_existing_snapshot(snapshot, existing_ref)
+        existing_snapshot_path = existing_snapshot['path']
+        if existing_snapshot['name'] != snapshot['name']:
+            payload = {'newName': snapshot['name']}
+            self.nef.snapshots.rename(existing_snapshot_path, payload)
+
+    def manage_existing_snapshot_get_size(self, snapshot, existing_ref):
+        """Return size of snapshot to be managed by manage_existing.
+
+        When calculating the size, round up to the next GB.
+
+        :param snapshot:     Cinder volume snapshot to manage
+        :param existing_ref: Driver-specific information used to identify a
+                             volume snapshot
+        :returns size:       Volume snapshot size in GiB (integer)
+        """
+        existing_snapshot = self._get_existing_snapshot(snapshot, existing_ref)
+        return existing_snapshot['volume_size']
+
+    def get_manageable_snapshots(self, cinder_snapshots, marker, limit, offset,
+                                 sort_keys, sort_dirs):
+        """List snapshots on the backend available for management by Cinder.
+
+        Returns a list of dictionaries, each specifying a snapshot in the host,
+        with the following keys:
+        - reference (dictionary): The reference for a snapshot, which can be
+          passed to "manage_existing_snapshot".
+        - size (int): The size of the snapshot according to the storage
+          backend, rounded up to the nearest GB.
+        - safe_to_manage (boolean): Whether or not this snapshot is safe to
+          manage according to the storage backend. For example, is the snapshot
+          in use or invalid for any reason.
+        - reason_not_safe (string): If safe_to_manage is False, the reason why.
+        - cinder_id (string): If already managed, provide the Cinder ID.
+        - extra_info (string): Any extra information to return to the user
+        - source_reference (string): Similar to "reference", but for the
+          snapshot's source volume.
+
+        :param cinder_snapshots: A list of snapshots in this host that Cinder
+                                 currently manages, used to determine if
+                                 a snapshot is manageable or not.
+        :param marker:    The last item of the previous page; we return the
+                          next results after this value (after sorting)
+        :param limit:     Maximum number of items to return
+        :param offset:    Number of items to skip after marker
+        :param sort_keys: List of keys to sort results by (valid keys are
+                          'identifier' and 'size')
+        :param sort_dirs: List of directions to sort by, corresponding to
+                          sort_keys (valid directions are 'asc' and 'desc')
+
+        """
+        manageable_snapshots = []
+        cinder_volume_names = {}
+        cinder_snapshot_names = {}
+        ctxt = context.get_admin_context()
+        cinder_volumes = objects.VolumeList.get_all_by_host(ctxt, self.host)
+        for cinder_volume in cinder_volumes:
+            key = self._get_volume_path(cinder_volume)
+            value = {
+                'name': cinder_volume['name'],
+                'size': cinder_volume['size']
+            }
+            cinder_volume_names[key] = value
+        for cinder_snapshot in cinder_snapshots:
+            key = cinder_snapshot['name']
+            value = {
+                'id': cinder_snapshot['id'],
+                'size': cinder_snapshot['volume_size'],
+                'parent': cinder_snapshot['volume_name']
+            }
+            cinder_snapshot_names[key] = value
+        payload = {
+            'parent': self.root_path,
+            'fields': 'name,guid,path,parent,hprService,snaplistId',
+            'recursive': True
+        }
+        snapshots = self.nef.snapshots.list(payload)
+        for snapshot in snapshots:
+            safe_to_manage = True
+            reason_not_safe = None
+            cinder_id = None
+            extra_info = None
+            name = snapshot['name']
+            guid = snapshot['guid']
+            path = snapshot['path']
+            parent = snapshot['parent']
+            if parent not in cinder_volume_names:
+                LOG.debug('Skip snapshot %(path)s: parent '
+                          'volume %(parent)s is unmanaged',
+                          {'path': path, 'parent': parent})
+                continue
+            if name.startswith(self.origin_snapshot_template):
+                LOG.debug('Skip temporary origin snapshot %(path)s',
+                          {'path': path})
+                continue
+            if name.startswith(self.group_snapshot_template):
+                LOG.debug('Skip temporary group snapshot %(path)s',
+                          {'path': path})
+                continue
+            if snapshot['hprService'] or snapshot['snaplistId']:
+                LOG.debug('Skip HPR/snapping snapshot %(path)s',
+                          {'path': path})
+                continue
+            if name in cinder_snapshot_names:
+                size = cinder_snapshot_names[name]['size']
+                cinder_id = cinder_snapshot_names[name]['id']
+                safe_to_manage = False
+                reason_not_safe = _('Snapshot already managed')
+            else:
+                size = cinder_volume_names[parent]['size']
+                payload = {'fields': 'clones'}
+                props = self.nef.snapshots.get(path)
+                clones = props['clones']
+                unmanaged_clones = []
+                for clone in clones:
+                    if not clone in cinder_volume_names:
+                        unmanaged_clones.append(clone)
+                if unmanaged_clones:
+                    safe_to_manage = False
+                    dependent_clones = ', '.join(unmanaged_clones)
+                    reason_not_safe = (_('Snapshot has unmanaged '
+                                         'dependent clone(s) %(clones)s')
+                                       % {'clones': dependent_clones})
+            reference = {
+                'source-name': name,
+                'source-guid': guid
+            }
+            source_reference = {
+                'name': cinder_volume_names[parent]['name']
+            }
+            manageable_snapshots.append({
+                'reference': reference,
+                'size': size,
+                'safe_to_manage': safe_to_manage,
+                'reason_not_safe': reason_not_safe,
+                'cinder_id': cinder_id,
+                'extra_info': extra_info,
+                'source_reference': source_reference
+            })
+        return utils.paginate_entries_list(manageable_snapshots,
+                                           marker, limit, offset,
+                                           sort_keys, sort_dirs)
+
+    def unmanage_snapshot(self, snapshot):
+        """Removes the specified snapshot from Cinder management.
+
+        Does not delete the underlying backend storage object.
+
+        For most drivers, this will not need to do anything. However, some
+        drivers might use this call as an opportunity to clean up any
+        Cinder-specific configuration that they have associated with the
+        backend storage object.
+
+        :param snapshot: Cinder volume snapshot to unmanage
+        """
+        pass
