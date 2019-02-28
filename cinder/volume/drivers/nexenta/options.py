@@ -13,8 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_config import cfg
 from cinder.volume import configuration as conf
+from oslo_config import cfg
 
 DEFAULT_ISCSI_PORT = 3260
 DEFAULT_HOST_GROUP = 'all'
