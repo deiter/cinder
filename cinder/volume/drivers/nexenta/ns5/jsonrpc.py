@@ -13,8 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import json
 import hashlib
+import json
 import posixpath
 import six
 
@@ -81,17 +81,20 @@ class NefRequest(object):
             'timeout': self.proxy.timeout
         }
 
-    def __call__(self, *args):
-        LOG.debug('Nef request start: %(method)s %(args)s',
-                  {'method': self.method, 'args': args})
-        if not args:
-            message = (_('Nef request path is required'))
+    def __call__(self, path, payload=None):
+        LOG.debug('NEF request start: %(method)s %(path)s %(payload)s',
+                  {'method': self.method, 'path': path, 'payload': payload})
+        if self.method not in ['get', 'delete', 'put', 'post']:
+            message = (_('NEF API does not support %(method)s method'),
+                       {'method': self.method})
             raise NefException(code='EINVAL', message=message)
-        self.path = args[0]
-        if len(args) > 1:
-            payload = args[1]
+        if not path:
+            message = (_('NEF API call requires collection path'))
+            raise NefException(code='EINVAL', message=message)
+        self.path = path
+        if payload:
             if not isinstance(payload, dict):
-                message = (_('Nef request body must be a dictionary'))
+                message = (_('NEF API call payload must be a dictionary'))
                 raise NefException(code='EINVAL', message=message)
             if self.method in ['get', 'delete']:
                 self.payload = {'params': payload}
@@ -112,12 +115,13 @@ class NefRequest(object):
                        'path': self.path,
                        'payload': self.payload})
             response = self.request(self.method, self.path, **self.payload)
-        LOG.debug('Nef request done: %(method)s %(args)s. '
-                  'Total response time: %(time)s seconds, '
+        LOG.debug('NEF request done: %(method)s %(path)s %(payload)s, '
+                  'total response time: %(time)s seconds, '
                   'total requests count: %(count)s, '
                   'requests statistics: %(stat)s',
                   {'method': self.method,
-                   'args': args,
+                   'path': self.path,
+                   'payload': self.payload,
                    'time': self.time,
                    'count': sum(self.stat.values()),
                    'stat': self.stat})
@@ -331,38 +335,38 @@ class NefCollections(object):
         quoted_name = six.moves.urllib.parse.quote_plus(name)
         return posixpath.join(self.root, quoted_name)
 
-    def get(self, name, *args):
-        LOG.debug('Get properties of %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def get(self, name, payload=None):
+        LOG.debug('Get properties of %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = self.path(name)
-        return self.proxy.get(path, *args)
+        return self.proxy.get(path, payload)
 
-    def set(self, name, *args):
-        LOG.debug('Modify properties of %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def set(self, name, payload=None):
+        LOG.debug('Modify properties of %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = self.path(name)
-        return self.proxy.put(path, *args)
+        return self.proxy.put(path, payload)
 
-    def list(self, *args):
-        LOG.debug('List of %(subj)ss: %(args)s',
-                  {'subj': self.subj, 'args': args})
-        return self.proxy.get(self.root, *args)
+    def list(self, payload=None):
+        LOG.debug('List of %(subj)ss: %(payload)s',
+                  {'subj': self.subj, 'payload': payload})
+        return self.proxy.get(self.root, payload)
 
-    def create(self, *args):
-        LOG.debug('Create %(subj)s: %(args)s',
-                  {'subj': self.subj, 'args': args})
+    def create(self, payload=None):
+        LOG.debug('Create %(subj)s: %(payload)s',
+                  {'subj': self.subj, 'payload': payload})
         try:
-            return self.proxy.post(self.root, *args)
+            return self.proxy.post(self.root, payload)
         except NefException as error:
             if error.code != 'EEXIST':
                 raise error
 
-    def delete(self, name, *args):
-        LOG.debug('Delete %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def delete(self, name, payload=None):
+        LOG.debug('Delete %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = self.path(name)
         try:
-            return self.proxy.delete(path, *args)
+            return self.proxy.delete(path, payload)
         except NefException as error:
             if error.code != 'ENOENT':
                 raise error
@@ -372,10 +376,10 @@ class NefSettings(NefCollections):
     subj = 'setting'
     root = '/settings/properties'
 
-    def create(self, *args):
+    def create(self, payload=None):
         return NotImplemented
 
-    def delete(self, name, *args):
+    def delete(self, name, payload=None):
         return NotImplemented
 
 
@@ -383,83 +387,84 @@ class NefDatasets(NefCollections):
     subj = 'dataset'
     root = '/storage/datasets'
 
-    def rename(self, name, *args):
-        LOG.debug('Rename %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def rename(self, name, payload=None):
+        LOG.debug('Rename %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = posixpath.join(self.path(name), 'rename')
-        return self.proxy.post(path, *args)
+        return self.proxy.post(path, payload)
 
 
 class NefSnapshots(NefDatasets, NefCollections):
     subj = 'snapshot'
     root = '/storage/snapshots'
 
-    def clone(self, name, *args):
-        LOG.debug('Clone %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def clone(self, name, payload=None):
+        LOG.debug('Clone %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = posixpath.join(self.path(name), 'clone')
-        return self.proxy.post(path, *args)
+        return self.proxy.post(path, payload)
 
 
 class NefVolumeGroups(NefDatasets, NefCollections):
     subj = 'volume group'
     root = 'storage/volumeGroups'
 
-    def rollback(self, name, *args):
-        LOG.debug('Rollback %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def rollback(self, name, payload=None):
+        LOG.debug('Rollback %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = posixpath.join(self.path(name), 'rollback')
-        return self.proxy.post(path, *args)
+        return self.proxy.post(path, payload)
 
 
 class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
     subj = 'volume'
     root = '/storage/volumes'
 
-    def promote(self, name, *args):
-        LOG.debug('Promote %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def promote(self, name, payload=None):
+        LOG.debug('Promote %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = posixpath.join(self.path(name), 'promote')
-        return self.proxy.post(path, *args)
+        return self.proxy.post(path, payload)
 
 
 class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
     subj = 'filesystem'
     root = '/storage/filesystems'
 
-    def mount(self, name, *args):
-        LOG.debug('Mount %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def mount(self, name, payload=None):
+        LOG.debug('Mount %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = posixpath.join(self.path(name), 'mount')
-        return self.proxy.post(path, *args)
+        return self.proxy.post(path, payload)
 
-    def unmount(self, name, *args):
-        LOG.debug('Unmount %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def unmount(self, name, payload=None):
+        LOG.debug('Unmount %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = posixpath.join(self.path(name), 'unmount')
-        return self.proxy.post(path, *args)
+        return self.proxy.post(path, payload)
 
-    def acl(self, name, *args):
-        LOG.debug('Set %(subj)s %(name)s ACL: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def acl(self, name, payload=None):
+        LOG.debug('Set %(subj)s %(name)s ACL: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = posixpath.join(self.path(name), 'acl')
-        return self.proxy.post(path, *args)
+        return self.proxy.post(path, payload)
 
 
 class NefHpr(NefCollections):
     subj = 'HPR service'
     root = '/hpr'
 
-    def activate(self, *args):
-        LOG.debug('Activate %(args)s', {'args': args})
+    def activate(self, payload=None):
+        LOG.debug('Activate %(payload)s',
+                  {'payload': payload})
         path = posixpath.join(self.root, 'activate')
-        return self.proxy.post(path, *args)
+        return self.proxy.post(path, payload)
 
-    def start(self, name, *args):
-        LOG.debug('Start %(subj)s %(name)s: %(args)s',
-                  {'subj': self.subj, 'name': name, 'args': args})
+    def start(self, name, payload=None):
+        LOG.debug('Start %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
         path = posixpath.join(self.path(name), 'start')
-        return self.proxy.post(path, *args)
+        return self.proxy.post(path, payload)
 
 
 class NefServices(NefCollections):
