@@ -17,23 +17,23 @@ import errno
 import hashlib
 import os
 import posixpath
-import uuid
 import six
+import uuid
 
 from oslo_log import log as logging
 from oslo_utils import units
 
 from cinder import context
 from cinder import coordination
+from cinder.i18n import _
 from cinder import interface
 from cinder import objects
-from cinder.i18n import _
 from cinder.privsep import fs
-from cinder.volume import utils
-from cinder.volume.drivers import nfs
-from cinder.volume.drivers.nexenta import options
-from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefProxy
 from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefException
+from cinder.volume.drivers.nexenta.ns5.jsonrpc import NefProxy
+from cinder.volume.drivers.nexenta import options
+from cinder.volume.drivers import nfs
+from cinder.volume import utils
 
 LOG = logging.getLogger(__name__)
 
@@ -1197,7 +1197,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 clones = props['clones']
                 unmanaged_clones = []
                 for clone in clones:
-                    if not clone in cinder_volume_names:
+                    if clone not in cinder_volume_names:
                         unmanaged_clones.append(clone)
                 if unmanaged_clones:
                     safe_to_manage = False
