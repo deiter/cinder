@@ -349,6 +349,18 @@ class TestNefRequest(test.TestCase):
         self.assertRaises(jsonrpc.NefException, instance, path, payload)
 
     @patch('cinder.volume.drivers.nexenta.ns5.'
+           'jsonrpc.NefRequest.request')
+    def test___call___non_ok_response(self, request):
+        method = 'get'
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        path = 'parent/child'
+        payload = {'key': 'value'}
+        content = {'code': 'ENOENT', 'message': 'error'}
+        response = self.fake_response(method, path, payload, 500, content)
+        request.return_value = response
+        self.assertRaises(jsonrpc.NefException, instance, path, payload)
+
+    @patch('cinder.volume.drivers.nexenta.ns5.'
            'jsonrpc.NefRequest.failover')
     @patch('cinder.volume.drivers.nexenta.ns5.'
            'jsonrpc.NefRequest.request')

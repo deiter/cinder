@@ -447,12 +447,13 @@ class TestNexentaNfsDriver(test.TestCase):
     @patch('cinder.volume.drivers.nexenta.ns5.'
            'nfs.NexentaNfsDriver._unmount_volume')
     @patch('oslo_concurrency.processutils.execute')
+    @patch('cinder.privsep.fs.truncate')
     @patch('cinder.volume.drivers.nexenta.ns5.'
            'nfs.NexentaNfsDriver.local_path')
     @patch('cinder.volume.drivers.nexenta.ns5.'
            'nfs.NexentaNfsDriver._mount_volume')
     def test_extend_volume(self, mount_volume, get_volume_local_path,
-                           execute_command, unmount_volume):
+                           truncate_file, dd_command, unmount_volume):
         volume = fake_volume(self.ctxt)
         root_helper = 'sudo cinder-rootwrap /etc/cinder/rootwrap.conf'
         local_path = '/path/to/volume/file'
@@ -462,24 +463,21 @@ class TestNexentaNfsDriver(test.TestCase):
         count = (new_size - volume['size']) * units.Ki
         mount_volume.return_value = True
         get_volume_local_path.return_value = local_path
-        execute_command.return_value = True
         unmount_volume.return_value = True
         with patch.object(self.drv, 'sparsed_volumes', False):
+            dd_command.return_value = True
             self.assertIsNone(self.drv.extend_volume(volume, new_size))
-            execute_command.assert_called_with('dd', 'if=/dev/zero',
-                                               'of=%s' % local_path,
-                                               'bs=%d' % bs,
-                                               'seek=%d' % seek,
-                                               'count=%d' % count,
-                                               run_as_root=True,
-                                               root_helper=root_helper)
+            dd_command.assert_called_with('dd', 'if=/dev/zero',
+                                          'of=%s' % local_path,
+                                          'bs=%d' % bs,
+                                          'seek=%d' % seek,
+                                          'count=%d' % count,
+                                          run_as_root=True,
+                                          root_helper=root_helper)
         with patch.object(self.drv, 'sparsed_volumes', True):
+            truncate_file.return_value = True
             self.assertIsNone(self.drv.extend_volume(volume, new_size))
-            execute_command.assert_called_with('truncate', '-s',
-                                               '%sG' % new_size,
-                                               local_path,
-                                               run_as_root=True,
-                                               root_helper=root_helper)
+            truncate_file.assert_called_with('%dG' % new_size, local_path)
         mount_volume.assert_called_with(volume)
         unmount_volume.assert_called_with(volume)
 
