@@ -16,24 +16,19 @@
 import hashlib
 import json
 import posixpath
-import six
 
 from eventlet import greenthread
-
-import requests
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
-from requests.packages.urllib3.util.timeout import Timeout
-
 from oslo_log import log as logging
+import requests
+import six
 
-from cinder.exception import VolumeDriverException
+from cinder import exception
 from cinder.i18n import _
 
 LOG = logging.getLogger(__name__)
 
 
-class NefException(VolumeDriverException):
+class NefException(exception.VolumeDriverException):
     def __init__(self, data=None, **kwargs):
         defaults = {
             'name': 'NexentaError',
@@ -108,7 +103,7 @@ class NefRequest(object):
                       {'method': self.method, 'path': self.path,
                        'payload': self.payload, 'error': error})
             if not self.failover():
-                raise error
+                raise
             LOG.debug('Retry initial request after failover: '
                       '%(method)s %(path)s %(payload)s',
                       {'method': self.method,
@@ -187,10 +182,10 @@ class NefRequest(object):
             if self.stat[response.status_code] > self.proxy.retries:
                 raise NefException(content)
             self.auth()
+            LOG.debug('Retry %(text)s after authentication',
+                      {'text': request_text})
             request = response.request.copy()
             request.headers.update(self.proxy.session.headers)
-            LOG.debug('Retry last %(text)s after authentication',
-                      {'text': request_text})
             return self.proxy.session.send(request, **kwargs)
         elif response.status_code == requests.codes.not_found:
             if self.lock:
@@ -207,6 +202,7 @@ class NefRequest(object):
                 return response
             LOG.debug('Retry %(text)s after failover',
                       {'text': initial_text})
+            self.data = []
             return self.request(self.method, self.path, **self.payload)
         elif response.status_code == requests.codes.server_error:
             if not (isinstance(content, dict) and
@@ -218,6 +214,7 @@ class NefRequest(object):
             self.proxy.delay(self.stat[response.status_code])
             LOG.debug('Retry %(text)s after delay',
                       {'text': initial_text})
+            self.data = []
             return self.request(self.method, self.path, **self.payload)
         elif response.status_code == requests.codes.accepted:
             path = self.getpath(content, 'monitor')
@@ -254,8 +251,10 @@ class NefRequest(object):
     def auth(self):
         method = 'post'
         path = 'auth/login'
-        payload = {'username': self.proxy.username,
-                   'password': self.proxy.password}
+        payload = {
+            'username': self.proxy.username,
+            'password': self.proxy.password
+        }
         data = json.dumps(payload)
         kwargs = {'data': data}
         self.proxy.delete_bearer()
@@ -278,22 +277,19 @@ class NefRequest(object):
         result = False
         self.lock = True
         method = 'get'
-        host = self.proxy.host
         root = self.proxy.root
-        for item in self.proxy.hosts:
-            if item == host:
-                continue
-            self.proxy.update_host(item)
+        for host in self.proxy.hosts:
+            self.proxy.update_host(host)
             LOG.debug('Try to failover path '
                       '%(root)s to host %(host)s',
-                      {'root': root, 'host': item})
+                      {'root': root, 'host': host})
             try:
                 response = self.request(method, root)
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.Timeout) as error:
                 LOG.debug('Skip unavailable host %(host)s '
                           'due to error: %(error)s',
-                          {'host': item, 'error': error})
+                          {'host': host, 'error': error})
                 continue
             LOG.debug('Failover result: %(code)s %(content)s',
                       {'code': response.status_code,
@@ -301,14 +297,14 @@ class NefRequest(object):
             if response.status_code == requests.codes.ok:
                 LOG.debug('Successful failover path '
                           '%(root)s to host %(host)s',
-                          {'root': root, 'host': item})
+                          {'root': root, 'host': host})
                 self.proxy.update_lock()
                 result = True
                 break
             else:
                 LOG.debug('Skip unsuitable host %(host)s: '
                           'there is no %(root)s path found',
-                          {'host': item, 'root': root})
+                          {'host': host, 'root': root})
         self.lock = False
         return result
 
@@ -359,7 +355,7 @@ class NefCollections(object):
             return self.proxy.post(self.root, payload)
         except NefException as error:
             if error.code != 'EEXIST':
-                raise error
+                raise
 
     def delete(self, name, payload=None):
         LOG.debug('Delete %(subj)s %(name)s: %(payload)s',
@@ -369,7 +365,7 @@ class NefCollections(object):
             return self.proxy.delete(path, payload)
         except NefException as error:
             if error.code != 'ENOENT':
-                raise error
+                raise
 
 
 class NefSettings(NefCollections):
@@ -564,11 +560,13 @@ class NefProxy(object):
         self.path = path
         self.backoff_factor = conf.nexenta_rest_backoff_factor
         self.retries = len(self.hosts) * conf.nexenta_rest_retry_count
-        self.timeout = Timeout(connect=conf.nexenta_rest_connect_timeout,
-                               read=conf.nexenta_rest_read_timeout)
-        max_retries = Retry(total=conf.nexenta_rest_retry_count,
-                            backoff_factor=conf.nexenta_rest_backoff_factor)
-        adapter = HTTPAdapter(max_retries=max_retries)
+        self.timeout = requests.packages.urllib3.util.timeout.Timeout(
+            connect=conf.nexenta_rest_connect_timeout,
+            read=conf.nexenta_rest_read_timeout)
+        max_retries = requests.packages.urllib3.util.retry.Retry(
+            total=conf.nexenta_rest_retry_count,
+            backoff_factor=conf.nexenta_rest_backoff_factor)
+        adapter = requests.adapters.HTTPAdapter(max_retries=max_retries)
         self.session.verify = conf.driver_ssl_cert_verify
         self.session.headers.update(self.headers)
         self.session.mount('%s://' % self.scheme, adapter)

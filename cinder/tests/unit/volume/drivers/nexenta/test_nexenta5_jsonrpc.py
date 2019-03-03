@@ -21,34 +21,13 @@ import json
 import posixpath
 import uuid
 
-from mock import Mock
-from mock import patch
-
+import mock
 import requests
 import six
 
 from cinder import test
 from cinder.volume import configuration as conf
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
-
-
-class FakeSession(object):
-
-    def __init__(self):
-        self.headers = {}
-
-    def request(self, method, url, **kwargs):
-        return {
-            'method': method,
-            'url': url,
-            'kwargs': kwargs
-        }
-
-    def send(self, request, **kwargs):
-        return {
-            'request': request,
-            'kwargs': kwargs
-        }
 
 
 class FakeNefProxy(object):
@@ -63,10 +42,11 @@ class FakeNefProxy(object):
         self.password = 'password'
         self.retries = 3
         self.timeout = 5
-        self.session = FakeSession()
+        self.session = mock.Mock()
+        self.session.headers = {}
 
     def __getattr__(self, name):
-        return FakeNefRequest(self, name)
+        pass
 
     def delay(self, interval):
         pass
@@ -85,24 +65,6 @@ class FakeNefProxy(object):
 
     def url(self, path):
         return '%s://%s:%s/%s' % (self.scheme, self.host, self.port, path)
-
-
-class FakeNefRequest(object):
-
-    def __init__(self, proxy, method):
-        self.proxy = proxy
-        self.method = method
-        self.path = None
-        self.payload = {}
-
-    def __call__(self, path, payload=None):
-        self.path = path
-        self.payload = payload
-        return {
-            'method': self.method,
-            'path': self.path,
-            'payload': self.payload
-        }
 
 
 class TestNefException(test.TestCase):
@@ -170,9 +132,10 @@ class TestNefRequest(test.TestCase):
         self.proxy = FakeNefProxy()
 
     def fake_response(self, method, path, payload, code, content):
-        request = requests.Request()
+        request = requests.PreparedRequest()
         request.method = method
         request.url = self.proxy.url(path)
+        request.headers = {'Content-Type': 'application/json'}
         request.body = None
         if method in ['get', 'delete']:
             request.params = payload
@@ -180,7 +143,6 @@ class TestNefRequest(test.TestCase):
             request.data = json.dumps(payload)
         response = requests.Response()
         response.request = request
-        response.headers['Content-Type'] = 'application/json'
         response.status_code = code
         if content:
             response._content = json.dumps(content)
@@ -204,8 +166,8 @@ class TestNefRequest(test.TestCase):
         instance = jsonrpc.NefRequest(self.proxy, method)
         self.assertRaises(jsonrpc.NefException, instance, '')
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___get(self, request):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -218,8 +180,8 @@ class TestNefRequest(test.TestCase):
         request.assert_called_with(method, path)
         self.assertEqual(content, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___get_payload(self, request):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -233,6 +195,32 @@ class TestNefRequest(test.TestCase):
         request.assert_called_with(method, path, **params)
         self.assertEqual(content, result)
 
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
+    def test___call___get_data_payload(self, request):
+        method = 'get'
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        path = 'parent/child'
+        payload = {'key': 'value'}
+        data = [
+            {
+                'name': 'fs1',
+                'path': 'pool/fs1'
+            },
+            {
+                'name': 'fs2',
+                'path': 'pool/fs2'
+            }
+        ]
+        content = {'data': data}
+        response = self.fake_response(method, path, payload, 200, content)
+        request.return_value = response
+        instance.data = data
+        result = instance(path, payload)
+        params = {'params': payload}
+        request.assert_called_with(method, path, **params)
+        self.assertEqual(data, result)
+
     def test___call___get_invalid_payload(self):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -240,8 +228,8 @@ class TestNefRequest(test.TestCase):
         payload = 'bad data'
         self.assertRaises(jsonrpc.NefException, instance, path, payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___delete(self, request):
         method = 'delete'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -254,8 +242,8 @@ class TestNefRequest(test.TestCase):
         request.assert_called_with(method, path)
         self.assertEqual(content, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___delete_payload(self, request):
         method = 'delete'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -276,8 +264,8 @@ class TestNefRequest(test.TestCase):
         payload = 'bad data'
         self.assertRaises(jsonrpc.NefException, instance, path, payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___post(self, request):
         method = 'post'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -290,8 +278,8 @@ class TestNefRequest(test.TestCase):
         request.assert_called_with(method, path)
         self.assertEqual(content, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___post_payload(self, request):
         method = 'post'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -312,8 +300,8 @@ class TestNefRequest(test.TestCase):
         payload = 'bad data'
         self.assertRaises(jsonrpc.NefException, instance, path, payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___put(self, request):
         method = 'put'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -326,8 +314,8 @@ class TestNefRequest(test.TestCase):
         request.assert_called_with(method, path)
         self.assertEqual(content, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___put_payload(self, request):
         method = 'put'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -348,8 +336,8 @@ class TestNefRequest(test.TestCase):
         payload = 'bad data'
         self.assertRaises(jsonrpc.NefException, instance, path, payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___non_ok_response(self, request):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -360,10 +348,10 @@ class TestNefRequest(test.TestCase):
         request.return_value = response
         self.assertRaises(jsonrpc.NefException, instance, path, payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.failover')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.failover')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___request_after_failover(self, request, failover):
         method = 'post'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -378,10 +366,10 @@ class TestNefRequest(test.TestCase):
         request.assert_called_with(method, path, **params)
         self.assertEqual(content, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.failover')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.failover')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test___call___request_failover_error(self, request, failover):
         method = 'put'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -390,6 +378,16 @@ class TestNefRequest(test.TestCase):
         request.side_effect = requests.exceptions.Timeout
         failover.return_value = False
         self.assertRaises(requests.exceptions.Timeout, instance, path, payload)
+
+    def test_hook_default(self):
+        method = 'post'
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        path = 'parent/child'
+        payload = {'key': 'value'}
+        content = {'name': 'dataset'}
+        response = self.fake_response(method, path, payload, 303, content)
+        result = instance.hook(response)
+        self.assertEqual(response, result)
 
     def test_hook_200_empty(self):
         method = 'delete'
@@ -430,18 +428,34 @@ class TestNefRequest(test.TestCase):
         response._content = 'bad_content'
         self.assertRaises(jsonrpc.NefException, instance.hook, response)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.auth')
-    def test_hook_403(self, auth):
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.auth')
+    def test_hook_401(self, auth, request):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
         path = 'parent/child'
         payload = {'key': 'value'}
         content = {'code': 'EAUTH'}
-        response = self.fake_response(method, path, payload, 403, content)
+        response = self.fake_response(method, path, payload, 401, content)
         auth.return_value = True
+        content2 = {'name': 'test'}
+        response2 = self.fake_response(method, path, payload, 200, content2)
+        request.return_value = response2
+        self.proxy.session.send.return_value = content2
         result = instance.hook(response)
-        self.assertEqual(response, result)
+        self.assertEqual(content2, result)
+
+    def test_hook_401_max_retries(self):
+        method = 'get'
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        instance.stat[401] = self.proxy.retries
+        path = 'parent/child'
+        payload = {'key': 'value'}
+        content = {'code': 'EAUTH'}
+        response = self.fake_response(method, path, payload, 401, content)
+        self.assertRaises(jsonrpc.NefException, instance.hook, response)
 
     def test_hook_404_nested(self):
         method = 'get'
@@ -464,8 +478,8 @@ class TestNefRequest(test.TestCase):
         response = self.fake_response(method, path, payload, 404, content)
         self.assertRaises(jsonrpc.NefException, instance.hook, response)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.failover')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.failover')
     def test_hook_404_failover_error(self, failover):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -477,10 +491,10 @@ class TestNefRequest(test.TestCase):
         result = instance.hook(response)
         self.assertEqual(response, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.failover')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.failover')
     def test_hook_404_failover_ok(self, failover, request):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -514,8 +528,8 @@ class TestNefRequest(test.TestCase):
         response = self.fake_response(method, path, payload, 500, content)
         self.assertRaises(jsonrpc.NefException, instance.hook, response)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test_hook_500_busy_ok(self, request):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -538,8 +552,8 @@ class TestNefRequest(test.TestCase):
         response = self.fake_response(method, path, payload, 202, content)
         self.assertRaises(jsonrpc.NefException, instance.hook, response)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test_hook_201_ok(self, request):
         method = 'delete'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -578,8 +592,8 @@ class TestNefRequest(test.TestCase):
         result = instance.hook(response)
         self.assertEqual(response, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test_200_pagination_next(self, request):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -604,16 +618,19 @@ class TestNefRequest(test.TestCase):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
         path = 'parent/child'
-        url = self.proxy.url(path)
         payload = {'key': 'value'}
+        expected = {'name': 'dataset'}
+        url = self.proxy.url(path)
+        kwargs = payload.copy()
+        kwargs['timeout'] = self.proxy.timeout
+        kwargs['hooks'] = {'response': instance.hook}
+        self.proxy.session.request.return_value = expected
         result = instance.request(method, path, **payload)
-        self.assertEqual(url, result['url'])
-        self.assertEqual(method, result['method'])
-        for key in payload:
-            self.assertIn(payload[key], result['kwargs'][key])
+        self.proxy.session.request.assert_called_with(method, url, **kwargs)
+        self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test_auth(self, request):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -631,8 +648,26 @@ class TestNefRequest(test.TestCase):
         instance.auth()
         request.assert_called_with(method, path, **payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefRequest.request')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
+    def test_auth_error(self, request):
+        method = 'get'
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        method = 'post'
+        path = 'auth/login'
+        payload = {
+            'data': json.dumps({
+                'username': self.proxy.username,
+                'password': self.proxy.password
+            })
+        }
+        content = {'data': 'noauth'}
+        response = self.fake_response(method, path, payload, 200, content)
+        request.return_value = response
+        self.assertRaises(jsonrpc.NefException, instance.auth)
+
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
     def test_failover(self, request):
         method = 'get'
         instance = jsonrpc.NefRequest(self.proxy, method)
@@ -646,15 +681,68 @@ class TestNefRequest(test.TestCase):
         expected = True
         self.assertEqual(expected, result)
 
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
+    def test_failover_timeout(self, request):
+        method = 'get'
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        path = self.proxy.root
+        payload = {}
+        content = {'path': path}
+        response = self.fake_response(method, path, payload, 200, content)
+        request.side_effect = [requests.exceptions.Timeout, response]
+        result = instance.failover()
+        request.assert_called_with(method, path)
+        expected = True
+        self.assertEqual(expected, result)
+
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
+    def test_failover_404(self, request):
+        method = 'get'
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        path = self.proxy.root
+        payload = {}
+        content = {}
+        response = self.fake_response(method, path, payload, 404, content)
+        request.side_effect = [response, response]
+        result = instance.failover()
+        request.assert_called_with(method, path)
+        expected = False
+        self.assertEqual(expected, result)
+
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRequest.request')
+    def test_failover_error(self, request):
+        method = 'get'
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        path = self.proxy.root
+        request.side_effect = [
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError
+        ]
+        result = instance.failover()
+        request.assert_called_with(method, path)
+        expected = False
+        self.assertEqual(expected, result)
+
     def test_getpath(self):
         method = 'get'
         rel = 'monitor'
         href = 'jobStatus/jobID'
         content = {
-            'links': [{
-                'rel': rel,
-                'href': href
-            }]
+            'links': [
+                [1, 2],
+                'bad link',
+                {
+                    'rel': 'next',
+                    'href': href
+                },
+                {
+                    'rel': rel,
+                    'href': href
+                }
+            ]
         }
         instance = jsonrpc.NefRequest(self.proxy, method)
         result = instance.getpath(content, rel)
@@ -666,7 +754,7 @@ class TestNefCollections(test.TestCase):
 
     def setUp(self):
         super(TestNefCollections, self).setUp()
-        self.proxy = FakeNefProxy()
+        self.proxy = mock.Mock()
         self.instance = jsonrpc.NefCollections(self.proxy)
 
     def test_path(self):
@@ -679,67 +767,88 @@ class TestNefCollections(test.TestCase):
     def test_get(self):
         name = 'parent/child'
         payload = {'key': 'value'}
+        expected = {'name': 'dataset'}
         path = self.instance.path(name)
+        self.proxy.get.return_value = expected
         result = self.instance.get(name, payload)
-        expected = {
-            'method': 'get',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.get.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
     def test_set(self):
         name = 'parent/child'
         payload = {'key': 'value'}
+        expected = None
         path = self.instance.path(name)
+        self.proxy.put.return_value = expected
         result = self.instance.set(name, payload)
-        expected = {
-            'method': 'put',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.put.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
     def test_list(self):
         payload = {'key': 'value'}
-        path = self.instance.root
+        expected = [{'name': 'dataset'}]
+        self.proxy.get.return_value = expected
         result = self.instance.list(payload)
-        expected = {
-            'method': 'get',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.get.assert_called_with(self.instance.root, payload)
         self.assertEqual(expected, result)
 
     def test_create(self):
         payload = {'key': 'value'}
-        path = self.instance.root
+        expected = None
+        self.proxy.post.return_value = expected
         result = self.instance.create(payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(self.instance.root, payload)
         self.assertEqual(expected, result)
+
+    def test_create_exist(self):
+        payload = {'key': 'value'}
+        expected = None
+        self.proxy.post.side_effect = jsonrpc.NefException(code='EEXIST')
+        result = self.instance.create(payload)
+        self.proxy.post.assert_called_with(self.instance.root, payload)
+        self.assertEqual(expected, result)
+
+    def test_create_error(self):
+        payload = {'key': 'value'}
+        self.proxy.post.side_effect = jsonrpc.NefException(code='EBUSY')
+        self.assertRaises(jsonrpc.NefException, self.instance.create, payload)
+        self.proxy.post.assert_called_with(self.instance.root, payload)
 
     def test_delete(self):
         name = 'parent/child'
         payload = {'key': 'value'}
+        expected = None
         path = self.instance.path(name)
+        self.proxy.delete.return_value = expected
         result = self.instance.delete(name, payload)
-        expected = {
-            'method': 'delete',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.delete.assert_called_with(path, payload)
         self.assertEqual(expected, result)
+
+    def test_delete_not_found(self):
+        name = 'parent/child'
+        payload = {'key': 'value'}
+        expected = None
+        path = self.instance.path(name)
+        self.proxy.delete.side_effect = jsonrpc.NefException(code='ENOENT')
+        result = self.instance.delete(name, payload)
+        self.proxy.delete.assert_called_with(path, payload)
+        self.assertEqual(expected, result)
+
+    def test_delete_error(self):
+        name = 'parent/child'
+        payload = {'key': 'value'}
+        path = self.instance.path(name)
+        self.proxy.delete.side_effect = jsonrpc.NefException(code='EINVAL')
+        self.assertRaises(jsonrpc.NefException, self.instance.delete, name,
+                          payload)
+        self.proxy.delete.assert_called_with(path, payload)
 
 
 class TestNefSettings(test.TestCase):
 
     def setUp(self):
         super(TestNefSettings, self).setUp()
-        self.proxy = FakeNefProxy()
+        self.proxy = mock.Mock()
         self.instance = jsonrpc.NefSettings(self.proxy)
 
     def test_create(self):
@@ -760,19 +869,18 @@ class TestNefDatasets(test.TestCase):
 
     def setUp(self):
         super(TestNefDatasets, self).setUp()
-        self.proxy = FakeNefProxy()
+        self.proxy = mock.Mock()
         self.instance = jsonrpc.NefDatasets(self.proxy)
 
     def test_rename(self):
         name = 'parent/child'
         payload = {'key': 'value'}
-        path = '%s/%s' % (self.instance.path(name), 'rename')
+        expected = None
+        path = self.instance.path(name)
+        path = posixpath.join(path, 'rename')
+        self.proxy.post.return_value = expected
         result = self.instance.rename(name, payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
 
@@ -780,19 +888,18 @@ class TestNefSnapshots(test.TestCase):
 
     def setUp(self):
         super(TestNefSnapshots, self).setUp()
-        self.proxy = FakeNefProxy()
+        self.proxy = mock.Mock()
         self.instance = jsonrpc.NefSnapshots(self.proxy)
 
     def test_clone(self):
         name = 'parent/child'
         payload = {'key': 'value'}
-        path = '%s/%s' % (self.instance.path(name), 'clone')
+        expected = None
+        path = self.instance.path(name)
+        path = posixpath.join(path, 'clone')
+        self.proxy.post.return_value = expected
         result = self.instance.clone(name, payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
 
@@ -800,19 +907,18 @@ class TestNefVolumeGroups(test.TestCase):
 
     def setUp(self):
         super(TestNefVolumeGroups, self).setUp()
-        self.proxy = FakeNefProxy()
+        self.proxy = mock.Mock()
         self.instance = jsonrpc.NefVolumeGroups(self.proxy)
 
     def test_rollback(self):
         name = 'parent/child'
         payload = {'key': 'value'}
-        path = '%s/%s' % (self.instance.path(name), 'rollback')
+        expected = None
+        path = self.instance.path(name)
+        path = posixpath.join(path, 'rollback')
+        self.proxy.post.return_value = expected
         result = self.instance.rollback(name, payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
 
@@ -820,19 +926,18 @@ class TestNefVolumes(test.TestCase):
 
     def setUp(self):
         super(TestNefVolumes, self).setUp()
-        self.proxy = FakeNefProxy()
+        self.proxy = mock.Mock()
         self.instance = jsonrpc.NefVolumes(self.proxy)
 
     def test_promote(self):
         name = 'parent/child'
         payload = {'key': 'value'}
-        path = '%s/%s' % (self.instance.path(name), 'promote')
+        expected = None
+        path = self.instance.path(name)
+        path = posixpath.join(path, 'promote')
+        self.proxy.post.return_value = expected
         result = self.instance.promote(name, payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
 
@@ -840,43 +945,40 @@ class TestNefFilesystems(test.TestCase):
 
     def setUp(self):
         super(TestNefFilesystems, self).setUp()
-        self.proxy = FakeNefProxy()
+        self.proxy = mock.Mock()
         self.instance = jsonrpc.NefFilesystems(self.proxy)
 
     def test_mount(self):
         name = 'parent/child'
         payload = {'key': 'value'}
-        path = '%s/%s' % (self.instance.path(name), 'mount')
+        expected = None
+        path = self.instance.path(name)
+        path = posixpath.join(path, 'mount')
+        self.proxy.post.return_value = expected
         result = self.instance.mount(name, payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
     def test_unmount(self):
         name = 'parent/child'
         payload = {'key': 'value'}
-        path = '%s/%s' % (self.instance.path(name), 'unmount')
+        expected = None
+        path = self.instance.path(name)
+        path = posixpath.join(path, 'unmount')
+        self.proxy.post.return_value = expected
         result = self.instance.unmount(name, payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
     def test_acl(self):
         name = 'parent/child'
         payload = {'key': 'value'}
-        path = '%s/%s' % (self.instance.path(name), 'acl')
+        expected = None
+        path = self.instance.path(name)
+        path = posixpath.join(path, 'acl')
+        self.proxy.post.return_value = expected
         result = self.instance.acl(name, payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
 
@@ -884,30 +986,26 @@ class TestNefHpr(test.TestCase):
 
     def setUp(self):
         super(TestNefHpr, self).setUp()
-        self.proxy = FakeNefProxy()
+        self.proxy = mock.Mock()
         self.instance = jsonrpc.NefHpr(self.proxy)
 
     def test_activate(self):
         payload = {'key': 'value'}
-        path = '%s/%s' % (self.instance.root, 'activate')
+        expected = None
+        path = posixpath.join(self.instance.root, 'activate')
+        self.proxy.post.return_value = expected
         result = self.instance.activate(payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
     def test_start(self):
         name = 'parent/child'
         payload = {'key': 'value'}
-        path = '%s/%s' % (self.instance.path(name), 'start')
+        expected = None
+        path = posixpath.join(self.instance.path(name), 'start')
+        self.proxy.post.return_value = expected
         result = self.instance.start(name, payload)
-        expected = {
-            'method': 'post',
-            'path': path,
-            'payload': payload
-        }
+        self.proxy.post.assert_called_with(path, payload)
         self.assertEqual(expected, result)
 
 
@@ -915,7 +1013,7 @@ class TestNefProxy(test.TestCase):
 
     def setUp(self):
         super(TestNefProxy, self).setUp()
-        self.cfg = Mock(spec=conf.Configuration)
+        self.cfg = mock.Mock(spec=conf.Configuration)
         self.cfg.nexenta_use_https = True
         self.cfg.driver_ssl_cert_verify = False
         self.cfg.nexenta_user = 'user'
@@ -927,7 +1025,7 @@ class TestNefProxy(test.TestCase):
         self.cfg.nexenta_rest_connect_timeout = 1
         self.cfg.nexenta_rest_read_timeout = 1
         self.cfg.nas_share_path = 'pool/path/to/share'
-        self.nef_mock = Mock()
+        self.nef_mock = mock.Mock()
         self.mock_object(jsonrpc, 'NefRequest',
                          return_value=self.nef_mock)
 
@@ -970,8 +1068,8 @@ class TestNefProxy(test.TestCase):
         host = 'nonexistent'
         self.assertIsNone(self.proxy.update_host(host))
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSettings.get')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSettings.get')
     def test_update_lock(self, get_settings):
         guid = uuid.uuid4().hex
         settings = {'value': guid}
@@ -992,7 +1090,7 @@ class TestNefProxy(test.TestCase):
                                      path)
         self.assertEqual(expected, result)
 
-    @patch('eventlet.greenthread.sleep')
+    @mock.patch('eventlet.greenthread.sleep')
     def test_delay(self, sleep):
         sleep.return_value = None
         for attempt in range(0, 10):

@@ -18,9 +18,7 @@ Unit tests for OpenStack Cinder volume driver
 import hashlib
 import os
 
-from mock import Mock
-from mock import patch
-
+import mock
 from oslo_utils import units
 
 from cinder import context
@@ -44,7 +42,7 @@ class TestNexentaNfsDriver(test.TestCase):
     def setUp(self):
         super(TestNexentaNfsDriver, self).setUp()
         self.ctxt = context.get_admin_context()
-        self.cfg = Mock(spec=conf.Configuration)
+        self.cfg = mock.Mock(spec=conf.Configuration)
         self.cfg.volume_backend_name = 'nexenta_nfs'
         self.cfg.nexenta_group_snapshot_template = 'group-snapshot-%s'
         self.cfg.nexenta_origin_snapshot_template = 'origin-snapshot-%s'
@@ -73,7 +71,7 @@ class TestNexentaNfsDriver(test.TestCase):
         self.cfg.nas_share_path = 'pool/share'
         self.cfg.nfs_mount_options = '-o vers=4'
         self.cfg.safe_get = self.fake_safe_get
-        self.nef_mock = Mock()
+        self.nef_mock = mock.Mock()
         self.mock_object(jsonrpc, 'NefRequest',
                          return_value=self.nef_mock)
         self.drv = nfs.NexentaNfsDriver(configuration=self.cfg)
@@ -90,14 +88,14 @@ class TestNexentaNfsDriver(test.TestCase):
     def test_do_setup(self):
         self.assertIsNone(self.drv.do_setup(self.ctxt))
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefNfs.get')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefServices.get')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.set')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.get')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefNfs.get')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefServices.get')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.set')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.get')
     def test_check_for_setup_error(self, get_filesystem,
                                    set_filesystem,
                                    get_service, get_nfs):
@@ -148,24 +146,24 @@ class TestNexentaNfsDriver(test.TestCase):
         self.assertRaises(jsonrpc.NefException,
                           self.drv.check_for_setup_error)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._unmount_volume')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.delete')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.set')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._create_regular_file')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._create_sparsed_file')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.local_path')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._mount_volume')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._set_volume_acl')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.create')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._unmount_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.delete')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.set')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._create_regular_file')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._create_sparsed_file')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.local_path')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._mount_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._set_volume_acl')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.create')
     def test_create_volume(self, create_volume, set_volume_acl,
                            mount_volume, get_volume_local_path,
                            create_sparsed_file, created_regular_file,
@@ -181,10 +179,10 @@ class TestNexentaNfsDriver(test.TestCase):
         set_volume.return_value = {}
         delete_volume.return_value = {}
         umount_volume.return_value = {}
-        with patch.object(self.drv, 'sparsed_volumes', True):
+        with mock.patch.object(self.drv, 'sparsed_volumes', True):
             self.assertIsNone(self.drv.create_volume(volume))
             create_sparsed_file.assert_called_with(local_path, volume['size'])
-        with patch.object(self.drv, 'sparsed_volumes', False):
+        with mock.patch.object(self.drv, 'sparsed_volumes', False):
             self.assertIsNone(self.drv.create_volume(volume))
             created_regular_file.assert_called_with(local_path, volume['size'])
         volume_path = self.drv._get_volume_path(volume)
@@ -198,12 +196,12 @@ class TestNexentaNfsDriver(test.TestCase):
         set_volume.assert_called_with(volume_path, payload)
         umount_volume.assert_called_with(volume)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._unmount_volume')
-    @patch('cinder.volume.drivers.remotefs.'
-           'RemoteFSDriver.copy_image_to_volume')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._mount_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._unmount_volume')
+    @mock.patch('cinder.volume.drivers.remotefs.'
+                'RemoteFSDriver.copy_image_to_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._mount_volume')
     def test_copy_image_to_volume(self, mount_volume,
                                   copy_image_to_volume,
                                   unmount_volume):
@@ -222,12 +220,12 @@ class TestNexentaNfsDriver(test.TestCase):
                                                 image['id'])
         unmount_volume.assert_called_with(volume)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._unmount_volume')
-    @patch('cinder.volume.drivers.remotefs.'
-           'RemoteFSSnapDriverDistributed.copy_volume_to_image')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._mount_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._unmount_volume')
+    @mock.patch('cinder.volume.drivers.remotefs.'
+                'RemoteFSSnapDriverDistributed.copy_volume_to_image')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._mount_volume')
     def test_copy_volume_to_image(self, mount_volume,
                                   copy_volume_to_image,
                                   unmount_volume):
@@ -244,12 +242,12 @@ class TestNexentaNfsDriver(test.TestCase):
                                                 image_service, image)
         unmount_volume.assert_called_with(volume)
 
-    @patch('os.rmdir')
-    @patch('cinder.privsep.fs.umount')
-    @patch('os_brick.remotefs.remotefs.'
-           'RemoteFsClient._read_mounts')
-    @patch('cinder.volume.drivers.nfs.'
-           'NfsDriver._get_mount_point_for_share')
+    @mock.patch('os.rmdir')
+    @mock.patch('cinder.privsep.fs.umount')
+    @mock.patch('os_brick.remotefs.remotefs.'
+                'RemoteFsClient._read_mounts')
+    @mock.patch('cinder.volume.drivers.nfs.'
+                'NfsDriver._get_mount_point_for_share')
     def test__ensure_share_unmounted(self, get_mount_point,
                                      list_mount_points,
                                      unmount_filesystem,
@@ -269,10 +267,10 @@ class TestNexentaNfsDriver(test.TestCase):
         unmount_filesystem.assert_called_with(mount_point)
         remove_mount_point.assert_called_with(mount_point)
 
-    @patch('cinder.volume.drivers.nfs.'
-           'NfsDriver._ensure_share_mounted')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.get')
+    @mock.patch('cinder.volume.drivers.nfs.'
+                'NfsDriver._ensure_share_mounted')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.get')
     def test__mount_volume(self, get_filesystem, mount_share):
         volume = fake_volume(self.ctxt)
         mount_point = '/path/to/volume'
@@ -288,10 +286,10 @@ class TestNexentaNfsDriver(test.TestCase):
         share = '%s:%s' % (self.drv.nas_host, mount_point)
         mount_share.assert_called_with(share)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._ensure_share_unmounted')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._get_volume_share')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._ensure_share_unmounted')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._get_volume_share')
     def test__unmount_volume(self, get_share, unmount_share):
         volume = fake_volume(self.ctxt)
         mount_point = '/path/to/volume'
@@ -302,33 +300,33 @@ class TestNexentaNfsDriver(test.TestCase):
         get_share.assert_called_with(volume)
         unmount_share.assert_called_with(share)
 
-    @patch('cinder.volume.drivers.remotefs.'
-           'RemoteFSDriver._create_qcow2_file')
-    @patch('cinder.volume.drivers.remotefs.'
-           'RemoteFSDriver._create_sparsed_file')
+    @mock.patch('cinder.volume.drivers.remotefs.'
+                'RemoteFSDriver._create_qcow2_file')
+    @mock.patch('cinder.volume.drivers.remotefs.'
+                'RemoteFSDriver._create_sparsed_file')
     def test__create_sparsed_file(self, create_sparsed_file,
                                   create_qcow2_file):
         create_sparsed_file.return_value = True
         create_qcow2_file.return_value = True
         path = '/path/to/file'
         size = 1
-        with patch.object(self.cfg, 'nexenta_qcow2_volumes', True):
+        with mock.patch.object(self.cfg, 'nexenta_qcow2_volumes', True):
             self.assertIsNone(self.drv._create_sparsed_file(path, size))
             create_qcow2_file.assert_called_with(path, size)
-        with patch.object(self.cfg, 'nexenta_qcow2_volumes', False):
+        with mock.patch.object(self.cfg, 'nexenta_qcow2_volumes', False):
             self.assertIsNone(self.drv._create_sparsed_file(path, size))
             create_sparsed_file.assert_called_with(path, size)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.delete_volume')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefHpr.delete')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefHpr.get')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefHpr.start')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefHpr.create')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.delete_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefHpr.delete')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefHpr.get')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefHpr.start')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefHpr.create')
     def test_migrate_volume(self, create_service,
                             start_service, get_service,
                             delete_service, delete_volume):
@@ -383,8 +381,8 @@ class TestNexentaNfsDriver(test.TestCase):
         delete_volume.assert_called_with(volume)
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._unmount_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._unmount_volume')
     def test_terminate_connection(self, unmount_volume):
         unmount_volume.return_value = True
         volume = fake_volume(self.ctxt)
@@ -395,8 +393,8 @@ class TestNexentaNfsDriver(test.TestCase):
         self.assertIsNone(self.drv.terminate_connection(volume, connector))
         unmount_volume.assert_called_with(volume)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._get_volume_share')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._get_volume_share')
     def test_initialize_connection(self, get_share):
         volume = fake_volume(self.ctxt)
         path = self.drv._get_volume_path(volume)
@@ -423,10 +421,10 @@ class TestNexentaNfsDriver(test.TestCase):
         volume = fake_volume(self.ctxt)
         self.assertIsNone(self.drv.ensure_export(self.ctxt, volume))
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.delete')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._unmount_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.delete')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._unmount_volume')
     def test_delete_volume(self, unmount_volume, delete_filesystem):
         volume = fake_volume(self.ctxt)
         path = self.drv._get_volume_path(volume)
@@ -437,21 +435,21 @@ class TestNexentaNfsDriver(test.TestCase):
         payload = {'force': True, 'snapshots': True}
         delete_filesystem.assert_called_with(path, payload)
 
-    @patch('os.rmdir')
+    @mock.patch('os.rmdir')
     def test__delete(self, rmdir):
         rmdir.return_value = True
         path = '/path/to/volume/mountpoint'
         self.assertIsNone(self.drv._delete(path))
         rmdir.assert_called_with(path)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._unmount_volume')
-    @patch('oslo_concurrency.processutils.execute')
-    @patch('cinder.privsep.fs.truncate')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.local_path')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._mount_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._unmount_volume')
+    @mock.patch('oslo_concurrency.processutils.execute')
+    @mock.patch('cinder.privsep.fs.truncate')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.local_path')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._mount_volume')
     def test_extend_volume(self, mount_volume, get_volume_local_path,
                            truncate_file, dd_command, unmount_volume):
         volume = fake_volume(self.ctxt)
@@ -464,7 +462,7 @@ class TestNexentaNfsDriver(test.TestCase):
         mount_volume.return_value = True
         get_volume_local_path.return_value = local_path
         unmount_volume.return_value = True
-        with patch.object(self.drv, 'sparsed_volumes', False):
+        with mock.patch.object(self.drv, 'sparsed_volumes', False):
             dd_command.return_value = True
             self.assertIsNone(self.drv.extend_volume(volume, new_size))
             dd_command.assert_called_with('dd', 'if=/dev/zero',
@@ -474,15 +472,15 @@ class TestNexentaNfsDriver(test.TestCase):
                                           'count=%d' % count,
                                           run_as_root=True,
                                           root_helper=root_helper)
-        with patch.object(self.drv, 'sparsed_volumes', True):
+        with mock.patch.object(self.drv, 'sparsed_volumes', True):
             truncate_file.return_value = True
             self.assertIsNone(self.drv.extend_volume(volume, new_size))
             truncate_file.assert_called_with('%dG' % new_size, local_path)
         mount_volume.assert_called_with(volume)
         unmount_volume.assert_called_with(volume)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.create')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.create')
     def test_create_snapshot(self, create_snapshot):
         volume = fake_volume(self.ctxt)
         snapshot = fake_snapshot(self.ctxt)
@@ -493,8 +491,8 @@ class TestNexentaNfsDriver(test.TestCase):
         payload = {'path': path}
         create_snapshot.assert_called_with(payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.delete')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.delete')
     def test_delete_snapshot(self, delete_snapshot):
         volume = fake_volume(self.ctxt)
         snapshot = fake_snapshot(self.ctxt)
@@ -510,8 +508,8 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = False
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.rollback')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.rollback')
     def test_revert_to_snapshot(self, rollback_volume):
         volume = fake_volume(self.ctxt)
         snapshot = fake_snapshot(self.ctxt)
@@ -524,14 +522,14 @@ class TestNexentaNfsDriver(test.TestCase):
         payload = {'snapshot': snapshot['name']}
         rollback_volume.assert_called_with(path, payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.extend_volume')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.mount')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.unmount')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.clone')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.extend_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.mount')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.unmount')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.clone')
     def test_create_volume_from_snapshot(self, clone_snapshot,
                                          unmount_filesystem,
                                          mount_filesystem,
@@ -560,12 +558,12 @@ class TestNexentaNfsDriver(test.TestCase):
         mount_filesystem.assert_called_with(clone_path)
         extend_volume.assert_called_with(clone, clone_size)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.delete_snapshot')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.create_volume_from_snapshot')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.create_snapshot')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.delete_snapshot')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.create_volume_from_snapshot')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.create_snapshot')
     def test_create_cloned_volume(self, create_snapshot, create_volume,
                                   delete_snapshot):
         volume = fake_volume(self.ctxt)
@@ -604,8 +602,8 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = {}
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.delete_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.delete_volume')
     def test_delete_consistencygroup(self, delete_volume):
         cgroup = fake_cgroup(self.ctxt)
         volume1 = fake_volume(self.ctxt)
@@ -637,12 +635,12 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = ({}, [], [])
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.delete')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.rename')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.create')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.delete')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.rename')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.create')
     def test_create_cgsnapshot(self, create_snapshot,
                                rename_snapshot,
                                delete_snapshot):
@@ -672,8 +670,8 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = ({}, [])
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.delete_snapshot')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.delete_snapshot')
     def test_delete_cgsnapshot(self, delete_snapshot):
         cgsnapshot = fake_cgsnapshot(self.ctxt)
         snapshot = fake_snapshot(self.ctxt)
@@ -688,8 +686,8 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = ({}, [])
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.create_volume_from_snapshot')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.create_volume_from_snapshot')
     def test_create_consistencygroup_from_src_snapshots(self, create_volume):
         cgroup = fake_cgroup(self.ctxt)
         cgsnapshot = fake_cgsnapshot(self.ctxt)
@@ -709,12 +707,12 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = ({}, [])
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.delete')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.create_volume_from_snapshot')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.create')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.delete')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.create_volume_from_snapshot')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.create')
     def test_create_consistencygroup_from_src_volumes(self, create_snapshot,
                                                       create_volume,
                                                       delete_snapshot):
@@ -752,8 +750,8 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = ({}, [])
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._get_volume_share')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._get_volume_share')
     def test__local_volume_dir(self, get_share):
         volume = fake_volume(self.ctxt)
         share = '1.1.1.1:/path/to/share'
@@ -765,8 +763,8 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = os.path.join(self.cfg.nexenta_mount_point_base, digest)
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._local_volume_dir')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._local_volume_dir')
     def test_local_path(self, get_local):
         volume = fake_volume(self.ctxt)
         local_dir = '/path/to'
@@ -776,8 +774,8 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = os.path.join(local_dir, 'volume')
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.acl')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.acl')
     def test__set_volume_acl(self, set_acl):
         volume = fake_volume(self.ctxt)
         set_acl.return_value = {}
@@ -791,8 +789,8 @@ class TestNexentaNfsDriver(test.TestCase):
         self.assertIsNone(self.drv._set_volume_acl(volume))
         set_acl.assert_called_with(path, payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.get')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.get')
     def test__get_volume_share(self, get_filesystem):
         volume = fake_volume(self.ctxt)
         path = self.drv._get_volume_path(volume)
@@ -820,8 +818,8 @@ class TestNexentaNfsDriver(test.TestCase):
                                  snapshot['name'])
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.get')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.get')
     def test_get_volume_stats(self, get_filesystem):
         available = 100
         used = 75
@@ -835,8 +833,8 @@ class TestNexentaNfsDriver(test.TestCase):
         get_filesystem.assert_called_with(self.drv.root_path, payload)
         self.assertEqual(self.drv._stats, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.get')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.get')
     def test_update_volume_stats(self, get_filesystem):
         available = 8
         used = 2
@@ -874,8 +872,8 @@ class TestNexentaNfsDriver(test.TestCase):
         self.assertIsNone(self.drv._update_volume_stats())
         self.assertEqual(expected, self.drv._stats)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.list')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.list')
     def test__get_existing_volume(self, list_filesystems):
         volume = fake_volume(self.ctxt)
         parent = self.drv.root_path
@@ -907,8 +905,8 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = False
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.list')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.list')
     def test__get_existing_snapshot(self, list_snapshots):
         volume = fake_volume(self.ctxt)
         snapshot = fake_snapshot(self.ctxt)
@@ -937,10 +935,10 @@ class TestNexentaNfsDriver(test.TestCase):
         }
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.rename')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._get_existing_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.rename')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._get_existing_volume')
     def test_manage_existing(self, get_existing_volume, rename_volume):
         existing_volume = fake_volume(self.ctxt)
         manage_volume_spec = {'id': fake.VOLUME2_ID}
@@ -959,17 +957,17 @@ class TestNexentaNfsDriver(test.TestCase):
         payload = {'newPath': manage_path}
         rename_volume.assert_called_with(existing_path, payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._unmount_volume')
-    @patch('os.path.getsize')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver.local_path')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._mount_volume')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._set_volume_acl')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._get_existing_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._unmount_volume')
+    @mock.patch('os.path.getsize')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver.local_path')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._mount_volume')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._set_volume_acl')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._get_existing_volume')
     def test_manage_existing_get_size(self, get_volume, set_acl,
                                       mount_volume, get_local,
                                       get_size, unmount_volume):
@@ -991,8 +989,8 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = size
         self.assertEqual(expected, result)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefFilesystems.list')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefFilesystems.list')
     def test_get_manageable_volumes(self, list_filesystems):
         volume = fake_volume(self.ctxt)
         volumes = [volume]
@@ -1031,10 +1029,10 @@ class TestNexentaNfsDriver(test.TestCase):
         volume = fake_volume(self.ctxt)
         self.assertIsNone(self.drv.unmanage(volume))
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.rename')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._get_existing_snapshot')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.rename')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._get_existing_snapshot')
     def test_manage_existing_snapshot(self, get_existing_snapshot,
                                       rename_snapshot):
         volume = fake_volume(self.ctxt)
@@ -1063,8 +1061,8 @@ class TestNexentaNfsDriver(test.TestCase):
         payload = {'newName': manage_name}
         rename_snapshot.assert_called_with(existing_path, payload)
 
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'nfs.NexentaNfsDriver._get_existing_snapshot')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._get_existing_snapshot')
     def test_manage_existing_snapshot_get_size(self, get_snapshot):
         volume = fake_volume(self.ctxt)
         snapshot = fake_snapshot(self.ctxt)
@@ -1084,9 +1082,9 @@ class TestNexentaNfsDriver(test.TestCase):
         expected = volume['size']
         self.assertEqual(expected, result)
 
-    @patch('cinder.objects.VolumeList.get_all_by_host')
-    @patch('cinder.volume.drivers.nexenta.ns5.'
-           'jsonrpc.NefSnapshots.list')
+    @mock.patch('cinder.objects.VolumeList.get_all_by_host')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefSnapshots.list')
     def test_get_manageable_snapshots(self, list_snapshots, list_volumes):
         volume = fake_volume(self.ctxt)
         volumes = [volume]
