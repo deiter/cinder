@@ -1,0 +1,4 @@
+---
+features:
+  - Added snapshot manage/unmanage support for NexentaStor5 iSCSI and NFS
+    drivers.

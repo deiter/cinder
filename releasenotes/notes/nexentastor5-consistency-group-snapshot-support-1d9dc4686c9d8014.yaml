@@ -1,0 +1,4 @@
+---
+features:
+  - Added support for taking, deleting, and restoring a consistency group
+    snapshots for NexentaStor5 iSCSI and NFS drivers.

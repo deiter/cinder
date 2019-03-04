@@ -1,0 +1,4 @@
+---
+features:
+  - Added support for creating, deleting, and updating consistency groups
+    for NexentaStor5 iSCSI and NFS drivers.

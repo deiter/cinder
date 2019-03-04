@@ -1,0 +1,4 @@
+---
+features:
+  - Added the ability to list manageable volumes and snapshots for
+    NexentaStor5 iSCSI and NFS drivers.

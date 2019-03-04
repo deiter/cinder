@@ -1,0 +1,3 @@
+---
+features:
+  - Add revert to snapshot support for NexentaStor5 iSCSI and NFS drivers.

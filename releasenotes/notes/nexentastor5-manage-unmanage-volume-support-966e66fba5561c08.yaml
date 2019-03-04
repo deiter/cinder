@@ -1,0 +1,4 @@
+---
+features:
+  - Added volume manage/unmanage support for NexentaStor5 iSCSI and NFS
+    drivers.
