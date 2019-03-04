@@ -16,6 +16,7 @@
 Unit tests for NexentaStor 5 REST API helper
 """
 
+import copy
 import hashlib
 import json
 import posixpath
@@ -749,6 +750,55 @@ class TestNefRequest(test.TestCase):
         expected = href
         self.assertEqual(expected, result)
 
+    def test_getpath_no_content(self):
+        method = 'get'
+        rel = 'next'
+        content = None
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        result = instance.getpath(content, rel)
+        expected = None
+        self.assertEqual(expected, result)
+
+    def test_getpath_no_links(self):
+        method = 'get'
+        rel = 'next'
+        content = {'a': 'b'}
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        result = instance.getpath(content, rel)
+        expected = None
+        self.assertEqual(expected, result)
+
+    def test_getpath_no_rel(self):
+        method = 'get'
+        rel = 'next'
+        content = {
+            'links': [
+                {
+                    'rel': 'monitor',
+                    'href': '/jobs/jobID'
+                }
+            ]
+        }
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        result = instance.getpath(content, rel)
+        expected = None
+        self.assertEqual(expected, result)
+
+    def test_getpath_no_href(self):
+        method = 'get'
+        rel = 'next'
+        content = {
+            'links': [
+                {
+                    'rel': rel
+                }
+            ]
+        }
+        instance = jsonrpc.NefRequest(self.proxy, method)
+        result = instance.getpath(content, rel)
+        expected = None
+        self.assertEqual(expected, result)
+
 
 class TestNefCollections(test.TestCase):
 
@@ -1015,15 +1065,16 @@ class TestNefProxy(test.TestCase):
         super(TestNefProxy, self).setUp()
         self.cfg = mock.Mock(spec=conf.Configuration)
         self.cfg.nexenta_use_https = True
-        self.cfg.driver_ssl_cert_verify = False
+        self.cfg.driver_ssl_cert_verify = True
         self.cfg.nexenta_user = 'user'
         self.cfg.nexenta_password = 'pass'
-        self.cfg.nexenta_rest_address = '1.1.1.1'
+        self.cfg.nexenta_rest_address = '1.1.1.1,2.2.2.2'
         self.cfg.nexenta_rest_port = 8443
         self.cfg.nexenta_rest_backoff_factor = 1
         self.cfg.nexenta_rest_retry_count = 3
         self.cfg.nexenta_rest_connect_timeout = 1
         self.cfg.nexenta_rest_read_timeout = 1
+        self.cfg.nas_host = '3.3.3.3'
         self.cfg.nas_share_path = 'pool/path/to/share'
         self.nef_mock = mock.Mock()
         self.mock_object(jsonrpc, 'NefRequest',
@@ -1033,6 +1084,66 @@ class TestNefProxy(test.TestCase):
         self.proxy = jsonrpc.NefProxy(self.proto,
                                       self.cfg.nas_share_path,
                                       self.cfg)
+
+    def test___init___http(self):
+        proto = 'nfs'
+        cfg = copy.deepcopy(self.cfg)
+        cfg.nexenta_use_https = False
+        result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
+        self.assertIsInstance(result, jsonrpc.NefProxy)
+
+    def test___init___no_rest_port_http(self):
+        proto = 'nfs'
+        cfg = copy.deepcopy(self.cfg)
+        cfg.nexenta_rest_port = 0
+        cfg.nexenta_use_https = False
+        result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
+        self.assertIsInstance(result, jsonrpc.NefProxy)
+
+    def test___init___no_rest_port_https(self):
+        proto = 'nfs'
+        cfg = copy.deepcopy(self.cfg)
+        cfg.nexenta_rest_port = 0
+        cfg.nexenta_use_https = True
+        result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
+        self.assertIsInstance(result, jsonrpc.NefProxy)
+
+    def test___init___iscsi(self):
+        proto = 'iscsi'
+        cfg = copy.deepcopy(self.cfg)
+        result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
+        self.assertIsInstance(result, jsonrpc.NefProxy)
+
+    def test___init___nfs_no_rest_address(self):
+        proto = 'nfs'
+        cfg = copy.deepcopy(self.cfg)
+        cfg.nexenta_rest_address = ''
+        result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
+        self.assertIsInstance(result, jsonrpc.NefProxy)
+
+    def test___init___iscsi_no_rest_address(self):
+        proto = 'iscsi'
+        cfg = copy.deepcopy(self.cfg)
+        cfg.nexenta_rest_address = ''
+        cfg.nexenta_host = '4.4.4.4'
+        result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
+        self.assertIsInstance(result, jsonrpc.NefProxy)
+
+    def test___init___invalid_storage_protocol(self):
+        proto = 'invalid'
+        cfg = copy.deepcopy(self.cfg)
+        self.assertRaises(jsonrpc.NefException, jsonrpc.NefProxy,
+                          proto, cfg.nas_share_path, cfg)
+
+    @mock.patch('requests.packages.urllib3.disable_warnings')
+    def test___init___no_ssl_cert_verify(self, disable_warnings):
+        proto = 'nfs'
+        cfg = copy.deepcopy(self.cfg)
+        cfg.driver_ssl_cert_verify = False
+        disable_warnings.return_value = None
+        result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
+        disable_warnings.assert_called()
+        self.assertIsInstance(result, jsonrpc.NefProxy)
 
     def test_delete_bearer(self):
         self.assertIsNone(self.proxy.delete_bearer())

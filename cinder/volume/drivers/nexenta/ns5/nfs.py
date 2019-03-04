@@ -242,6 +242,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         share = '%s:%s' % (self.nas_host, filesystem['mountPoint'])
         self._ensure_share_mounted(share)
 
+    def _remount_volume(self, volume):
+        """Workaround for NEX-16457."""
+        volume_path = self._get_volume_path(volume)
+        self.nef.filesystems.unmount(volume_path)
+        self.nef.filesystems.mount(volume_path)
+
     def _unmount_volume(self, volume):
         """Ensure that volume is unmounted on the host."""
         share = self._get_volume_share(volume)
@@ -515,8 +521,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         clone_path = self._get_volume_path(volume)
         payload = {'targetPath': clone_path}
         self.nef.snapshots.clone(snapshot_path, payload)
-        self.nef.filesystems.unmount(clone_path)
-        self.nef.filesystems.mount(clone_path)
+        self._remount_volume(volume)
         self._set_volume_acl(volume)
         if volume['size'] > snapshot['volume_size']:
             new_size = volume['size']
