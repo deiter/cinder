@@ -1087,14 +1087,14 @@ class TestNefProxy(test.TestCase):
 
     def test___init___http(self):
         proto = 'nfs'
-        cfg = copy.deepcopy(self.cfg)
+        cfg = copy.copy(self.cfg)
         cfg.nexenta_use_https = False
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         self.assertIsInstance(result, jsonrpc.NefProxy)
 
     def test___init___no_rest_port_http(self):
         proto = 'nfs'
-        cfg = copy.deepcopy(self.cfg)
+        cfg = copy.copy(self.cfg)
         cfg.nexenta_rest_port = 0
         cfg.nexenta_use_https = False
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
@@ -1102,7 +1102,7 @@ class TestNefProxy(test.TestCase):
 
     def test___init___no_rest_port_https(self):
         proto = 'nfs'
-        cfg = copy.deepcopy(self.cfg)
+        cfg = copy.copy(self.cfg)
         cfg.nexenta_rest_port = 0
         cfg.nexenta_use_https = True
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
@@ -1110,20 +1110,20 @@ class TestNefProxy(test.TestCase):
 
     def test___init___iscsi(self):
         proto = 'iscsi'
-        cfg = copy.deepcopy(self.cfg)
+        cfg = copy.copy(self.cfg)
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         self.assertIsInstance(result, jsonrpc.NefProxy)
 
     def test___init___nfs_no_rest_address(self):
         proto = 'nfs'
-        cfg = copy.deepcopy(self.cfg)
+        cfg = copy.copy(self.cfg)
         cfg.nexenta_rest_address = ''
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         self.assertIsInstance(result, jsonrpc.NefProxy)
 
     def test___init___iscsi_no_rest_address(self):
         proto = 'iscsi'
-        cfg = copy.deepcopy(self.cfg)
+        cfg = copy.copy(self.cfg)
         cfg.nexenta_rest_address = ''
         cfg.nexenta_host = '4.4.4.4'
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
@@ -1131,14 +1131,14 @@ class TestNefProxy(test.TestCase):
 
     def test___init___invalid_storage_protocol(self):
         proto = 'invalid'
-        cfg = copy.deepcopy(self.cfg)
+        cfg = copy.copy(self.cfg)
         self.assertRaises(jsonrpc.NefException, jsonrpc.NefProxy,
                           proto, cfg.nas_share_path, cfg)
 
     @mock.patch('requests.packages.urllib3.disable_warnings')
     def test___init___no_ssl_cert_verify(self, disable_warnings):
         proto = 'nfs'
-        cfg = copy.deepcopy(self.cfg)
+        cfg = copy.copy(self.cfg)
         cfg.driver_ssl_cert_verify = False
         disable_warnings.return_value = None
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
