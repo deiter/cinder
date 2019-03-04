@@ -1,0 +1,4 @@
+---
+features:
+  - Added consistency group capability to generic volume groups for
+    NexentaStor5 iSCSI and NFS drivers.

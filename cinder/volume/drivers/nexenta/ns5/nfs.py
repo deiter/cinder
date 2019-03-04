@@ -79,9 +79,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
               - Added coordination for dataset operations.
         1.8.1 - Support for NexentaStor tenants.
         1.8.2 - Added manage/unmanage/manageable-list volume/snapshot support.
+        1.8.3 - Added consistency group capability to generic volume group.
     """
 
-    VERSION = '1.8.2'
+    VERSION = '1.8.3'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -562,7 +563,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                            'error': error})
 
     def create_consistencygroup(self, context, group):
-        """Creates a consistencygroup.
+        """Creates a consistency group.
 
         :param context: the context of the caller.
         :param group: the dictionary of the consistency group to be created.
@@ -570,6 +571,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         group_model_update = {}
         return group_model_update
+
+    def create_group(self, context, group):
+        """Creates a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :returns: model_update
+        """
+        return self.create_consistencygroup(context, group)
 
     def delete_consistencygroup(self, context, group, volumes):
         """Deletes a consistency group.
@@ -585,8 +595,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.delete_volume(volume)
         return group_model_update, volumes_model_update
 
-    def update_consistencygroup(self, context, group,
-                                add_volumes=None,
+    def delete_group(self, context, group, volumes):
+        """Deletes a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :param volumes: a list of volume objects in the group.
+        :returns: model_update, volumes_model_update
+        """
+        return self.delete_consistencygroup(context, group, volumes)
+
+    def update_consistencygroup(self, context, group, add_volumes=None,
                                 remove_volumes=None):
         """Updates a consistency group.
 
@@ -600,6 +619,19 @@ class NexentaNfsDriver(nfs.NfsDriver):
         add_volumes_update = []
         remove_volumes_update = []
         return group_model_update, add_volumes_update, remove_volumes_update
+
+    def update_group(self, context, group, add_volumes=None,
+                     remove_volumes=None):
+        """Updates a group.
+
+        :param context: the context of the caller.
+        :param group: the group object.
+        :param add_volumes: a list of volume objects to be added.
+        :param remove_volumes: a list of volume objects to be removed.
+        :returns: model_update, add_volumes_update, remove_volumes_update
+        """
+        return self.update_consistencygroup(context, group, add_volumes,
+                                            remove_volumes)
 
     def create_cgsnapshot(self, context, cgsnapshot, snapshots):
         """Creates a consistency group snapshot.
@@ -626,6 +658,16 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.snapshots.delete(cgsnapshot_path, delete_payload)
         return group_model_update, snapshots_model_update
 
+    def create_group_snapshot(self, context, group_snapshot, snapshots):
+        """Creates a group_snapshot.
+
+        :param context: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be created.
+        :param snapshots: a list of Snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+        return self.create_cgsnapshot(context, group_snapshot, snapshots)
+
     def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
         """Deletes a consistency group snapshot.
 
@@ -639,6 +681,16 @@ class NexentaNfsDriver(nfs.NfsDriver):
         for snapshot in snapshots:
             self.delete_snapshot(snapshot)
         return group_model_update, snapshots_model_update
+
+    def delete_group_snapshot(self, context, group_snapshot, snapshots):
+        """Deletes a group_snapshot.
+
+        :param context: the context of the caller.
+        :param group_snapshot: the GroupSnapshot object to be deleted.
+        :param snapshots: a list of snapshot objects in the group_snapshot.
+        :returns: model_update, snapshots_model_update
+        """
+        return self.delete_cgsnapshot(context, group_snapshot, snapshots)
 
     def create_consistencygroup_from_src(self, context, group, volumes,
                                          cgsnapshot=None, snapshots=None,
@@ -675,6 +727,24 @@ class NexentaNfsDriver(nfs.NfsDriver):
             delete_payload = {'defer': True, 'recursive': True}
             self.nef.snapshots.delete(snapshot_path, delete_payload)
         return group_model_update, volumes_model_update
+
+    def create_group_from_src(self, context, group, volumes,
+                              group_snapshot=None, snapshots=None,
+                              source_group=None, source_vols=None):
+        """Creates a group from source.
+
+        :param context: the context of the caller.
+        :param group: the Group object to be created.
+        :param volumes: a list of Volume objects in the group.
+        :param group_snapshot: the GroupSnapshot object as source.
+        :param snapshots: a list of snapshot objects in group_snapshot.
+        :param source_group: the Group object as source.
+        :param source_vols: a list of volume objects in the source_group.
+        :returns: model_update, volumes_model_update
+        """
+        return self.create_consistencygroup_from_src(context, group, volumes,
+                                                     group_snapshot, snapshots,
+                                                     source_group, source_vols)
 
     def _local_volume_dir(self, volume):
         """Get volume dir (mounted locally fs path) for given volume.
