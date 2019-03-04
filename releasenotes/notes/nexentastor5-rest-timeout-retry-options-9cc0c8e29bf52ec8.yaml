@@ -1,5 +1,5 @@
 ---
-features:
+upgrade:
   - Added a new config option ``nexenta_rest_connect_timeout``. This option
     specifies the time limit (in seconds), within which the connection to
     NexentaStor management REST API server must be established.
