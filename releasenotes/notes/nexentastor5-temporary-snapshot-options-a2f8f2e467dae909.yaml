@@ -1,6 +1,0 @@
----
-upgrade:
-  - Added a new config option ``nexenta_origin_snapshot_template``.
-    This option specifies template string to generate origin name of clone.
-  - Added a new config option ``nexenta_group_snapshot_template``.
-    This option specifies template string to generate group snapshot name.
