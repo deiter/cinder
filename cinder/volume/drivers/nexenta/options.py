@@ -96,12 +96,12 @@ NEXENTA_CONNECTION_OPTS = [
                       'within which NexentaStor management '
                       'REST API server must send a response'),
     cfg.FloatOpt('nexenta_rest_backoff_factor',
-                 default=1,
+                 default=0.5,
                  help='Specifies the backoff factor to apply '
                       'between connection attempts to NexentaStor '
                       'management REST API server'),
     cfg.IntOpt('nexenta_rest_retry_count',
-               default=5,
+               default=3,
                help='Specifies the number of times to repeat NexentaStor '
                     'management REST API call in case of connection errors '
                     'and NexentaStor appliance EBUSY or ENOENT errors'),

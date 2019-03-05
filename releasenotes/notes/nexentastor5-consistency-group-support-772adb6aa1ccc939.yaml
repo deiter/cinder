@@ -2,5 +2,5 @@
 features:
   - Added support for creating, deleting, and updating consistency groups
     for NexentaStor5 iSCSI and NFS drivers.
-  - Added support for taking, deleting, and restoring a consistency group
+  - Added support for taking, deleting, and restoring consistency group
         snapshots for NexentaStor5 iSCSI and NFS drivers.
