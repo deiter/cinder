@@ -19,6 +19,7 @@ import random
 import uuid
 
 from oslo_log import log as logging
+from oslo_utils import strutils
 from oslo_utils import units
 import six
 
@@ -31,6 +32,7 @@ from cinder.volume import driver
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume import utils
+from cinder.volume import volume_types
 
 LOG = logging.getLogger(__name__)
 
@@ -70,9 +72,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         1.4.1 - Support for NexentaStor tenants.
         1.4.2 - Added manage/unmanage/manageable-list volume/snapshot support.
         1.4.3 - Added consistency group capability to generic volume group.
+        1.4.4 - Added storage assisted volume migration.
+                Added support for volume retype.
+                Added support for volume type extra specs.
+                Added vendor capabilities support.
     """
 
-    VERSION = '1.4.3'
+    VERSION = '1.4.4'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -95,9 +101,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.configuration.append_config_values(
             options.NEXENTA_DATASET_OPTS)
         self.nef = None
-        self.volume_backend_name = (
-            self.configuration.safe_get('volume_backend_name') or
-            '%s_%s' % (self.product_name, self.storage_protocol))
+        self.driver_name = self.__class__.__name__
         self.target_prefix = self.configuration.nexenta_target_prefix
         self.target_group_prefix = (
             self.configuration.nexenta_target_group_prefix)
@@ -110,18 +114,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.volume_group = self.configuration.nexenta_volume_group
         self.portal_port = self.configuration.nexenta_iscsi_target_portal_port
         self.portals = self.configuration.nexenta_iscsi_target_portals
-        self.sparsed_volumes = self.configuration.nexenta_sparse
-        self.deduplicated_volumes = self.configuration.nexenta_dataset_dedup
-        self.compressed_volumes = (
-            self.configuration.nexenta_dataset_compression)
-        self.dataset_description = (
-            self.configuration.nexenta_dataset_description)
         self.iscsi_target_portal_port = (
             self.configuration.nexenta_iscsi_target_portal_port)
         self.root_path = posixpath.join(self.pool, self.volume_group)
-        self.dataset_blocksize = self.configuration.nexenta_ns5_blocksize
-        if not self.configuration.nexenta_ns5_blocksize > 128:
-            self.dataset_blocksize *= units.Ki
         self.group_snapshot_template = (
             self.configuration.nexenta_group_snapshot_template)
         self.origin_snapshot_template = (
@@ -147,8 +142,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         except jsonrpc.NefException as error:
             if error.code != 'ENOENT':
                 raise
-            payload = {'path': self.root_path,
-                       'volumeBlockSize': self.dataset_blocksize}
+            block_size = self.configuration.nexenta_ns5_blocksize
+            if block_size < 512:
+                block_size *= units.Ki
+            payload = {
+                'path': self.root_path,
+                'volumeBlockSize': block_size
+            }
             self.nef.volumegroups.create(payload)
         service = self.nef.services.get('iscsit')
         if service['state'] != 'online':
@@ -162,13 +162,14 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param volume: volume reference
         :returns: model update dict for volume reference
         """
-        payload = {
-            'path': self._get_volume_path(volume),
-            'volumeSize': volume['size'] * units.Gi,
-            'volumeBlockSize': self.dataset_blocksize,
-            'compressionMode': self.compressed_volumes,
-            'sparseVolume': self.sparsed_volumes
-        }
+        volume_path = self._get_volume_path(volume)
+        volume_size = volume['size'] * units.Gi
+        properties = self.nef.volumes.properties
+        payload = self._get_vendor_properties(volume, properties)
+        payload.update({
+            'path': volume_path,
+            'volumeSize': volume_size
+        })
         self.nef.volumes.create(payload)
 
     @coordination.synchronized('{self.nef.lock}')
@@ -287,15 +288,15 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                            'error': error})
 
     def create_export(self, context, volume, connector):
-        """Export a volume."""
+        """Driver entry point to get the export info for a new volume."""
         pass
 
     def ensure_export(self, context, volume):
-        """Synchronously recreate an export for a volume."""
+        """Driver entry point to get the export info for an existing volume."""
         pass
 
     def remove_export(self, context, volume):
-        """Remove an export for a volume."""
+        """Driver entry point to remove an export for a volume."""
         pass
 
     def terminate_connection(self, volume, connector, **kwargs):
@@ -369,40 +370,84 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor appliance."""
-        LOG.debug('Updating volume backend %(volume_backend_name)s stats',
-                  {'volume_backend_name': self.volume_backend_name})
         payload = {'fields': 'bytesAvailable,bytesUsed'}
         dataset = self.nef.volumegroups.get(self.root_path, payload)
-        free = dataset['bytesAvailable'] // units.Gi
-        used = dataset['bytesUsed'] // units.Gi
-        total = free + used
+        free_capacity_gb = dataset['bytesAvailable'] // units.Gi
+        allocated_capacity_gb = dataset['bytesUsed'] // units.Gi
+        total_capacity_gb = free_capacity_gb + allocated_capacity_gb
+        provisioned_capacity_gb = total_volumes = 0
+        ctxt = context.get_admin_context()
+        volumes = objects.VolumeList.get_all_by_host(ctxt, self.host)
+        for volume in volumes:
+            provisioned_capacity_gb += volume['size']
+            total_volumes += 1
+        volume_backend_name = (
+            self.configuration.safe_get('volume_backend_name'))
+        if not volume_backend_name:
+            LOG.debug('Failed to get configured volume backend name')
+            volume_backend_name = '%(product)s_%(protocol)s' % {
+                'product': self.product_name,
+                'protocol': self.storage_protocol
+            }
+        description = (
+            self.configuration.safe_get('nexenta_dataset_description'))
+        if not description:
+            description = '%(product)s %(host)s:%(pool)s/%(group)s' % {
+                'product': self.product_name,
+                'host': self.configuration.nexenta_host,
+                'pool': self.configuration.nexenta_volume,
+                'group': self.configuration.nexenta_volume_group
+            }
+        max_over_subscription_ratio = utils.get_max_over_subscription_ratio(
+            self.configuration.safe_get('max_over_subscription_ratio'), True)
+        reserved_percentage = (
+            self.configuration.safe_get('reserved_percentage'))
+        if reserved_percentage is None:
+            reserved_percentage = 0
         location_info = '%(driver)s:%(host)s:%(pool)s/%(group)s' % {
-            'driver': self.__class__.__name__,
-            'host': self.iscsi_host,
-            'pool': self.pool,
-            'group': self.volume_group,
+            'driver': self.driver_name,
+            'host': self.configuration.nexenta_host,
+            'pool': self.configuration.nexenta_volume,
+            'group': self.configuration.nexenta_volume_group
         }
+        display_name = 'Capabilities of %(product)s %(protocol)s driver' % {
+            'product': self.product_name,
+            'protocol': self.storage_protocol
+        }
+        visibility = 'public'
         self._stats = {
-            'vendor_name': self.vendor_name,
-            'dedup': self.deduplicated_volumes,
-            'compression': self.compressed_volumes,
-            'description': self.dataset_description,
-            'nef_url': self.nef.host,
-            'nef_port': self.nef.port,
             'driver_version': self.VERSION,
+            'vendor_name': self.vendor_name,
             'storage_protocol': self.storage_protocol,
-            'sparsed_volumes': self.sparsed_volumes,
-            'total_capacity_gb': total,
-            'free_capacity_gb': free,
-            'reserved_percentage': self.configuration.reserved_percentage,
-            'QoS_support': False,
+            'volume_backend_name': volume_backend_name,
+            'location_info': location_info,
+            'description': description,
+            'display_name': display_name,
+            'pool_name': self.configuration.nexenta_volume,
             'multiattach': True,
+            'QoS_support': False,
             'consistencygroup_support': True,
             'consistent_group_snapshot_enabled': True,
-            'location_info': location_info,
-            'volume_backend_name': self.volume_backend_name,
-            'iscsi_target_portal_port': self.iscsi_target_portal_port
+            'online_extend_support': True,
+            'sparse_copy_volume': True,
+            'thin_provisioning_support': True,
+            'thick_provisioning_support': True,
+            'total_capacity_gb': total_capacity_gb,
+            'allocated_capacity_gb': allocated_capacity_gb,
+            'free_capacity_gb': free_capacity_gb,
+            'provisioned_capacity_gb': provisioned_capacity_gb,
+            'total_volumes': total_volumes,
+            'max_over_subscription_ratio': max_over_subscription_ratio,
+            'reserved_percentage': reserved_percentage,
+            'visibility': visibility,
+            'nef_port': self.nef.port,
+            'nef_url': self.nef.host
         }
+        LOG.debug('Updated volume backend statistics for host %(host)s '
+                  'and volume backend %(volume_backend_name)s: %(stats)s',
+                  {'host': self.host,
+                   'volume_backend_name': volume_backend_name,
+                   'stats': self._stats})
 
     def _get_volume_path(self, volume):
         """Return ZFS datset path for the volume."""
@@ -684,16 +729,19 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             props['target_iqn'] = props_iqns[index]
             props['target_lun'] = props_luns[index]
 
-        if not self.lu_writebackcache_disabled:
-            LOG.debug('Get LUN guid for volume %(volume)s',
-                      {'volume': volume_path})
-            payload = {'fields': 'guid', 'volume': volume_path}
-            data = self.nef.logicalunits.list(payload)
-            guid = data[0]['guid']
-            payload = {'writebackCacheDisabled': False}
-            self.nef.logicalunits.set(guid, payload)
+        LOG.debug('Set LUN properties for volume %(volume)s',
+                  {'volume': volume_path})
+        payload = {
+            'volume': volume_path,
+            'fields': 'guid'
+        }
+        logicalunits = self.nef.logicalunits.list(payload)
+        guid = logicalunits[0]['guid']
+        properties = self.nef.logicalunits.properties
+        payload = self._get_vendor_properties(volume, properties)
+        self.nef.logicalunits.set(guid, payload)
 
-        LOG.debug('Created new LUN mapping(s): %(props)s',
+        LOG.debug('Created new LUN mapping: %(props)s',
                   {'props': props})
         return {'driver_volume_type': self.driver_volume_type,
                 'data': props}
@@ -1431,3 +1479,425 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param snapshot: Cinder volume snapshot to unmanage
         """
         pass
+
+    def local_path(self, volume):
+        """Return local path to existing local volume."""
+        raise NotImplementedError()
+
+    def migrate_volume(self, context, volume, host):
+        """Migrate the volume to the specified host.
+
+        Returns a boolean indicating whether the migration occurred,
+        as well as model_update.
+
+        :param context: Security context
+        :param volume: A dictionary describing the volume to migrate
+        :param host: A dictionary describing the host to migrate to, where
+                     host['host'] is its name, and host['capabilities'] is a
+                     dictionary of its reported capabilities.
+        """
+        LOG.debug('Start storage assisted volume migration '
+                  'for volume %(volume)s to host %(host)s',
+                  {'volume': volume['name'],
+                   'host': host['host']})
+        false_ret = (False, None)
+        if 'capabilities' not in host:
+            LOG.debug('No host capabilities found for '
+                      'the destination host %(host)s',
+                      {'host': host['host']})
+            return false_ret
+        capabilities = host['capabilities']
+        required_capabilities = [
+            'vendor_name',
+            'location_info',
+            'storage_protocol',
+            'free_capacity_gb',
+            'nef_url',
+            'nef_port'
+        ]
+        for capability in required_capabilities:
+            if capability not in capabilities:
+                LOG.debug('Required host capability %(capability)s not '
+                          'found for the destination host %(host)s',
+                          {'capability': capability, 'host': host['host']})
+                return false_ret
+        vendor = capabilities['vendor_name']
+        if vendor != self.vendor_name:
+            LOG.debug('Unsupported vendor %(vendor)s found '
+                      'for the destination host %(host)s',
+                      {'vendor': vendor, 'host': host['host']})
+            return false_ret
+        location = capabilities['location_info']
+        try:
+            driver, san_host, san_path = location.split(':')
+        except ValueError as error:
+            LOG.debug('Failed to split location info %(location)s '
+                      'for the destination host %(host)s: %(error)s',
+                      {'location': location, 'host': host['host'],
+                       'error': error})
+            return false_ret
+        if not (driver and san_path):
+            LOG.debug('Incomplete location info %(location)s '
+                      'found for the destination host %(host)s',
+                      {'location': location, 'host': host['host']})
+            return false_ret
+        if driver != self.driver_name:
+            LOG.debug('Unsupported storage driver %(driver)s '
+                      'found for the destination host %(host)s',
+                      {'driver': driver, 'host': host['host']})
+            return false_ret
+        try:
+            payload = {'fields': 'name'}
+            self.nef.hpr.list(payload)
+        except jsonrpc.NefException as error:
+            LOG.debug('Storage assisted volume migration is unavailable '
+                      'for the destination host %(host)s: %(error)s',
+                      {'host': host['host'], 'error': error})
+            return false_ret
+        src_path = self._get_volume_path(volume)
+        dst_path = posixpath.join(san_path, volume['name'])
+        dst_port = capabilities['nef_port']
+        src_hosts = self._get_host_addresses()
+        dst_hosts = capabilities['nef_url'].split(',')
+        service_name = 'cinder-migrate-%s' % volume['name']
+        service_created = service_running = service_success = False
+        while dst_hosts and not service_created:
+            dst_host = dst_hosts.pop()
+            if dst_host is not None:
+                dst_host = dst_host.strip()
+            payload = {
+                'name': service_name,
+                'sourceDataset': src_path,
+                'destinationDataset': dst_path,
+                'type': 'scheduled'
+            }
+            if dst_host not in src_hosts:
+                payload['isSource'] = True
+                payload['remoteNode'] = {
+                    'host': dst_host,
+                    'port': dst_port
+                }
+            elif src_path == dst_path:
+                LOG.debug('Skip local to local replication: '
+                          'source volume %(src_path)s and '
+                          'destination volume %(dst_path)s '
+                          'are the same volume',
+                          {'src_path': src_path,
+                           'dst_path': dst_path})
+                return True, None
+            try:
+                self.nef.hpr.create(payload)
+                service_created = True
+            except jsonrpc.NefException as error:
+                LOG.debug('Failed to create replication service '
+                          'with payload %(payload)s: %(error)s',
+                          {'payload': payload, 'error': error})
+                if error.code not in ('ENOENT', 'EINVAL'):
+                    return false_ret
+        if service_created:
+            try:
+                self.nef.hpr.start(service_name)
+                service_running = True
+            except jsonrpc.NefException as error:
+                LOG.debug('Failed to start replication service '
+                          '%(service_name)s: %(error)s',
+                          {'service_name': service_name,
+                           'error': error})
+        retry_count = 0
+        while service_running and not service_success:
+            try:
+                service = self.nef.hpr.get(service_name)
+            except jsonrpc.NefException as error:
+                LOG.debug('Failed to stat replication service '
+                          '%(service_name)s: %(error)s',
+                          {'service_name': service_name,
+                           'error': error})
+                break
+            state = service['state']
+            if state == 'faulted':
+                service_error = service['lastError']
+                LOG.debug('Replication service %(service_name)s '
+                          'failed with error: %(service_error)s',
+                          {'service_name': service_name,
+                           'service_error': service_error})
+                break
+            elif state == 'disabled':
+                LOG.debug('Replication service %(service_name)s '
+                          'successfully replicated %(src_path)s '
+                          'to %(dst_host)s:%(dst_path)s',
+                          {'service_name': service_name,
+                           'src_path': src_path,
+                           'dst_host': dst_host,
+                           'dst_path': dst_path})
+                service_running = False
+                service_success = True
+                break
+            else:
+                progress = service['progress']
+                LOG.debug('Replication service %(service_name)s '
+                          'is running, progress %(progress)s%%',
+                          {'service_name': service_name,
+                           'progress': progress})
+                self.nef.delay(retry_count)
+                retry_count += 1
+        if service_created:
+            payload = {
+                'destroySourceSnapshots': True,
+                'destroyDestinationSnapshots': True,
+                'force': True
+            }
+            try:
+                self.nef.hpr.delete(service_name, payload)
+            except jsonrpc.NefException as error:
+                LOG.debug('Failed to delete replication service '
+                          '%(service_name)s: %(error)s',
+                          {'service_name': service_name,
+                           'error': error})
+        if not service_success:
+            return false_ret
+        try:
+            self.delete_volume(volume)
+        except jsonrpc.NefException as error:
+            LOG.debug('Failed to delete source '
+                      'volume %(volume)s: %(error)s',
+                      {'volume': volume['name'],
+                       'error': error})
+        return True, None
+
+    def update_migrated_volume(self, context, volume, new_volume,
+                               original_volume_status):
+        """Return model update for migrated volume.
+
+        This method should rename the back-end volume name on the
+        destination host back to its original name on the source host.
+
+        :param context: The context of the caller
+        :param volume: The original volume that was migrated to this backend
+        :param new_volume: The migration volume object that was created on
+                           this backend as part of the migration process
+        :param original_volume_status: The status of the original volume
+        :returns: model_update to update DB with any needed changes
+        """
+        name_id = None
+        path = self._get_volume_path(volume)
+        new_path = self._get_volume_path(new_volume)
+        payload = {'newPath': path}
+        try:
+            self.terminate_connection(new_volume, None)
+        except jsonrpc.NefException as error:
+            LOG.debug('Failed to terminate all connections '
+                      'to migrated volume %(volume)s before '
+                      'renaming: %(error)s',
+                      {'volume': new_volume['name'],
+                       'error': error})
+        try:
+            self.terminate_connection(new_volume, None)
+            self.nef.volumes.rename(new_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.debug('Failed to rename volume %(new_volume)s '
+                      'to %(volume)s after migration: %(error)s',
+                      {'new_volume': new_volume['name'],
+                       'volume': volume['name'],
+                       'error': error})
+            name_id = new_volume._name_id or new_volume.id
+        model_update = {'_name_id': name_id}
+        return model_update
+
+    def retype(self, context, volume, new_type, diff, host):
+        """Retype from one volume type to another."""
+        LOG.debug('Retype volume %(volume)s to host %(host)s '
+                  'and volume type %(type)s with diff %(diff)s',
+                  {'volume': volume['name'], 'host': host['host'],
+                   'type': new_type['name'], 'diff': diff})
+        retyped = False
+        migrated, model_update = self.migrate_volume(context, volume, host)
+        volume_path = self._get_volume_path(volume)
+        payload = {'source': True}
+        volume_specs = self.nef.volumes.get(volume_path, payload)
+        payload = {}
+        extra_specs = volume_types.get_volume_type_extra_specs(new_type['id'])
+        vendor_specs = self.nef.volumes.properties
+        for vendor_spec in vendor_specs:
+            property_name = vendor_spec['name']
+            api = vendor_spec['api']
+            if 'retype' in vendor_spec:
+                LOG.debug('Skip retype vendor volume property '
+                          '%(property_name)s. %(reason)s',
+                          {'property_name': property_name,
+                           'reason': vendor_spec['retype']})
+                continue
+            if property_name in extra_specs:
+                extra_spec = extra_specs[property_name]
+                value = self._get_vendor_value(extra_spec, vendor_spec)
+                payload[api] = value
+            elif (api in volume_specs and 'source' in volume_specs and
+                    api in volume_specs['source'] and
+                    volume_specs['source'][api] in ['local', 'received']):
+                if 'cfg' in vendor_spec:
+                    cfg = vendor_spec['cfg']
+                    value = self.configuration.safe_get(cfg)
+                    if volume_specs[api] != value:
+                        payload[api] = value
+                else:
+                    if 'inherit' in vendor_spec:
+                        LOG.debug('Skip inherit vendor volume property '
+                                  '%(property_name)s. %(reason)s',
+                                  {'property_name': property_name,
+                                   'reason': vendor_spec['inherit']})
+                        continue
+                    payload[api] = None
+        try:
+            self.nef.volumes.set(volume_path, payload)
+            retyped = True
+        except jsonrpc.NefException as error:
+            LOG.debug('Failed to retype volume %(volume)s: %(error)s',
+                      {'volume': volume['name'], 'error': error})
+        return retyped or migrated, model_update
+
+    def _init_vendor_properties(self):
+        """Create a dictionary of vendor unique properties.
+
+        This method creates a dictionary of vendor unique properties
+        and returns both created dictionary and vendor name.
+        Returned vendor name is used to check for name of vendor
+        unique properties.
+
+        - Vendor name shouldn't include colon(:) because of the separator
+          and it is automatically replaced by underscore(_).
+          ex. abc:d -> abc_d
+        - Vendor prefix is equal to vendor name.
+          ex. abcd
+        - Vendor unique properties must start with vendor prefix + ':'.
+          ex. abcd:maxIOPS
+
+        Each backend driver needs to override this method to expose
+        its own properties using _set_property() like this:
+
+        self._set_property(
+            properties,
+            "vendorPrefix:specific_property",
+            "Title of property",
+            _("Description of property"),
+            "type")
+
+        : return dictionary of vendor unique properties
+        : return vendor name
+        """
+        properties = {}
+        vendor_properties = []
+        namespace = self.nef.volumes.namespace
+        keys = ('enum', 'default', 'minimum', 'maximum')
+        vendor_properties += self.nef.volumes.properties
+        vendor_properties += self.nef.logicalunits.properties
+        for vendor_spec in vendor_properties:
+            property_spec = {}
+            for key in keys:
+                if key in vendor_spec:
+                    property_spec[key] = vendor_spec[key]
+            property_name = vendor_spec['name']
+            property_title = vendor_spec['title']
+            property_description = vendor_spec['description']
+            property_type = vendor_spec['type']
+            LOG.debug('Set %(product_name)s %(storage_protocol)s backend '
+                      '%(property_type)s property %(property_name)s: '
+                      '%(property_spec)s',
+                      {'product_name': self.product_name,
+                       'storage_protocol': self.storage_protocol,
+                       'property_type': property_type,
+                       'property_name': property_name,
+                       'property_spec': property_spec})
+            self._set_property(
+                properties,
+                property_name,
+                property_title,
+                property_description,
+                property_type,
+                **property_spec
+            )
+        return properties, namespace
+
+    def _get_vendor_properties(self, volume, vendor_specs):
+        properties = extra_specs = {}
+        type_id = volume.get('volume_type_id', None)
+        if type_id:
+            extra_specs = volume_types.get_volume_type_extra_specs(type_id)
+        for vendor_spec in vendor_specs:
+            property_name = vendor_spec['name']
+            if property_name in extra_specs:
+                extra_spec = extra_specs[property_name]
+                value = self._get_vendor_value(extra_spec, vendor_spec)
+            elif 'cfg' in vendor_spec:
+                cfg = vendor_spec['cfg']
+                value = self.configuration.safe_get(cfg)
+            else:
+                continue
+            api = vendor_spec['api']
+            if api == 'volumeBlockSize' and value < 512:
+                value *= units.Ki
+            properties[api] = value
+            LOG.debug('Get vendor property name %(property_name)s '
+                      'with API name %(api)s and %(type)s value '
+                      '%(value)s for volume %(volume)s',
+                      {'property_name': property_name,
+                       'api': api,
+                       'type': type(value).__name__,
+                       'value': value,
+                       'volume': volume['name']})
+        return properties
+
+    def _get_vendor_value(self, value, vendor_spec):
+        name = vendor_spec['name']
+        code = 'EINVAL'
+        if vendor_spec['type'] == 'integer':
+            try:
+                value = int(value)
+            except ValueError:
+                message = (_('Invalid non-integer value %(value)s for '
+                             'vendor property name %(name)s')
+                           % {'value': value, 'name': name})
+                raise jsonrpc.NefException(code=code, message=message)
+            if 'minimum' in vendor_spec:
+                minimum = vendor_spec['minimum']
+                if value < minimum:
+                    message = (_('Integer value %(value)s is less than '
+                                 'allowed minimum %(minimum)s for vendor '
+                                 'property name %(name)s')
+                               % {'value': value, 'minimum': minimum,
+                                  'name': name})
+                    raise jsonrpc.NefException(code=code, message=message)
+            if 'maximum' in vendor_spec:
+                maximum = vendor_spec['maximum']
+                if value > maximum:
+                    message = (_('Integer value %(value)s is greater than '
+                                 'allowed maximum %(maximum)s for vendor '
+                                 'property name %(name)s')
+                               % {'value': value, 'maximum': maximum,
+                                  'name': name})
+                    raise jsonrpc.NefException(code=code, message=message)
+        elif vendor_spec['type'] == 'string':
+            try:
+                value = str(value)
+            except UnicodeEncodeError:
+                message = (_('Invalid non-ASCII value %(value)s for vendor '
+                             'property name %(name)s')
+                           % {'value': value, 'name': name})
+                raise jsonrpc.NefException(code=code, message=message)
+        elif vendor_spec['type'] == 'boolean':
+            words = value.split()
+            if len(words) == 2 and words[0] == '<is>':
+                value = words[1]
+            try:
+                value = strutils.bool_from_string(value, strict=True)
+            except ValueError:
+                message = (_('Invalid non-boolean value %(value)s for vendor '
+                             'property name %(name)s')
+                           % {'value': value, 'name': name})
+                raise jsonrpc.NefException(code=code, message=message)
+        if 'enum' in vendor_spec:
+            enum = vendor_spec['enum']
+            if value not in enum:
+                message = (_('Value %(value)s is out of allowed enumeration '
+                             '%(enum)s for vendor property name %(name)s')
+                           % {'value': value, 'enum': enum, 'name': name})
+                raise jsonrpc.NefException(code=code, message=message)
+        return value

@@ -41,6 +41,7 @@ class TestNexentaISCSIDriver(test.TestCase):
         super(TestNexentaISCSIDriver, self).setUp()
         self.ctxt = context.get_admin_context()
         self.cfg = mock.Mock(spec=conf.Configuration)
+        self.cfg.max_over_subscription_ratio = 20.0
         self.cfg.volume_backend_name = 'nexenta_iscsi'
         self.cfg.nexenta_group_snapshot_template = 'group-snapshot-%s'
         self.cfg.nexenta_origin_snapshot_template = 'origin-snapshot-%s'
@@ -133,19 +134,25 @@ class TestNexentaISCSIDriver(test.TestCase):
 
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
                 'jsonrpc.NefVolumes.create')
-    def test_create_volume(self, create_volume):
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'iscsi.NexentaISCSIDriver._get_vendor_properties')
+    def test_create_volume(self, get_vendor_properties, create_volume):
         volume = fake_volume(self.ctxt)
+        spec = {
+            'sparseVolume': True,
+            'volumeBlockSize': 32768,
+            'compressionMode': 'on'
+        }
+        get_vendor_properties.return_value = spec
+        create_volume.return_value = {}
         self.assertIsNone(self.drv.create_volume(volume))
         path = self.drv._get_volume_path(volume)
         size = volume['size'] * units.Gi
-        bs = self.cfg.nexenta_ns5_blocksize * units.Ki
         payload = {
             'path': path,
-            'volumeSize': size,
-            'volumeBlockSize': bs,
-            'compressionMode': self.cfg.nexenta_dataset_compression,
-            'sparseVolume': self.cfg.nexenta_sparse
+            'volumeSize': size
         }
+        payload.update(spec)
         create_volume.assert_called_with(payload)
 
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
@@ -399,27 +406,45 @@ class TestNexentaISCSIDriver(test.TestCase):
             'driver': self.drv.__class__.__name__,
             'host': self.cfg.nexenta_host,
             'pool': self.cfg.nexenta_volume,
-            'group': self.cfg.nexenta_volume_group,
+            'group': self.cfg.nexenta_volume_group
         }
+        description = '%(product)s %(host)s:%(pool)s/%(group)s' % {
+            'product': self.drv.product_name,
+            'host': self.cfg.nexenta_host,
+            'pool': self.cfg.nexenta_volume,
+            'group': self.cfg.nexenta_volume_group
+        }
+        display_name = 'Capabilities of %(product)s %(proto)s driver' % {
+            'product': self.drv.product_name,
+            'proto': self.drv.storage_protocol
+        }
+        max_over_subscription_ratio = self.cfg.max_over_subscription_ratio
+        visibility = 'public'
         expected = {
             'vendor_name': 'Nexenta',
-            'dedup': self.cfg.nexenta_dataset_dedup,
-            'compression': self.cfg.nexenta_dataset_compression,
-            'description': self.cfg.nexenta_dataset_description,
+            'description': description,
+            'display_name': display_name,
             'driver_version': self.drv.VERSION,
-            'storage_protocol': 'iSCSI',
-            'sparsed_volumes': self.cfg.nexenta_sparse,
+            'storage_protocol': self.drv.storage_protocol,
+            'pool_name': self.drv.pool,
+            'visibility': visibility,
+            'allocated_capacity_gb': used,
             'total_capacity_gb': used + available,
+            'total_volumes': 0,
             'free_capacity_gb': available,
+            'provisioned_capacity_gb': 0,
             'reserved_percentage': self.cfg.reserved_percentage,
+            'max_over_subscription_ratio': max_over_subscription_ratio,
+            'thick_provisioning_support': True,
+            'thin_provisioning_support': True,
+            'sparse_copy_volume': True,
+            'online_extend_support': True,
             'QoS_support': False,
             'multiattach': True,
             'consistencygroup_support': True,
             'consistent_group_snapshot_enabled': True,
             'volume_backend_name': self.cfg.volume_backend_name,
             'location_info': location_info,
-            'iscsi_target_portal_port': (
-                self.cfg.nexenta_iscsi_target_portal_port),
             'nef_url': self.cfg.nexenta_rest_address,
             'nef_port': self.cfg.nexenta_rest_port
         }

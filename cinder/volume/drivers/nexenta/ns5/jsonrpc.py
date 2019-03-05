@@ -321,15 +321,21 @@ class NefRequest(object):
 
 
 class NefCollections(object):
-    subj = 'collection'
-    root = '/collections'
 
     def __init__(self, proxy):
         self.proxy = proxy
+        self.namespace = 'nexenta'
+        self.prefix = 'instance'
+        self.root = '/collections'
+        self.subj = 'collection'
+        self.properties = []
 
     def path(self, name):
         quoted_name = six.moves.urllib.parse.quote_plus(name)
         return posixpath.join(self.root, quoted_name)
+
+    def key(self, name):
+        return '%s:%s_%s' % (self.namespace, self.prefix, name)
 
     def get(self, name, payload=None):
         LOG.debug('Get properties of %(subj)s %(name)s: %(payload)s',
@@ -369,8 +375,11 @@ class NefCollections(object):
 
 
 class NefSettings(NefCollections):
-    subj = 'setting'
-    root = '/settings/properties'
+
+    def __init__(self, proxy):
+        super(NefSettings, self).__init__(proxy)
+        self.root = '/settings/properties'
+        self.subj = 'setting'
 
     def create(self, payload=None):
         return NotImplemented
@@ -380,8 +389,11 @@ class NefSettings(NefCollections):
 
 
 class NefDatasets(NefCollections):
-    subj = 'dataset'
-    root = '/storage/datasets'
+
+    def __init__(self, proxy):
+        super(NefDatasets, self).__init__(proxy)
+        self.root = '/storage/datasets'
+        self.subj = 'dataset'
 
     def rename(self, name, payload=None):
         LOG.debug('Rename %(subj)s %(name)s: %(payload)s',
@@ -391,8 +403,11 @@ class NefDatasets(NefCollections):
 
 
 class NefSnapshots(NefDatasets, NefCollections):
-    subj = 'snapshot'
-    root = '/storage/snapshots'
+
+    def __init__(self, proxy):
+        super(NefSnapshots, self).__init__(proxy)
+        self.root = '/storage/snapshots'
+        self.subj = 'snapshot'
 
     def clone(self, name, payload=None):
         LOG.debug('Clone %(subj)s %(name)s: %(payload)s',
@@ -402,8 +417,11 @@ class NefSnapshots(NefDatasets, NefCollections):
 
 
 class NefVolumeGroups(NefDatasets, NefCollections):
-    subj = 'volume group'
-    root = 'storage/volumeGroups'
+
+    def __init__(self, proxy):
+        super(NefVolumeGroups, self).__init__(proxy)
+        self.root = '/storage/volumeGroups'
+        self.subj = 'volume group'
 
     def rollback(self, name, payload=None):
         LOG.debug('Rollback %(subj)s %(name)s: %(payload)s',
@@ -413,8 +431,161 @@ class NefVolumeGroups(NefDatasets, NefCollections):
 
 
 class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
-    subj = 'volume'
-    root = '/storage/volumes'
+
+    def __init__(self, proxy):
+        super(NefVolumes, self).__init__(proxy)
+        self.prefix = 'volume'
+        self.root = '/storage/volumes'
+        self.subj = 'volume'
+        self.properties = [
+            {
+                'name': self.key('blocksize'),
+                'api': 'volumeBlockSize',
+                'cfg': 'nexenta_ns5_blocksize',
+                'title': 'Block size',
+                'retype': _('Volume block size cannot be changed after '
+                            'the volume has been created.'),
+                'description': _('Controls the block size of a volume.'),
+                'type': 'integer',
+                'enum': [512, 1024, 2048, 4096, 8192,
+                         16384, 32768, 65536, 131072],
+                'default': 32768
+            },
+            {
+                'name': self.key('checksum'),
+                'api': 'checksumMode',
+                'title': 'Data integrity mode',
+                'description': _('Controls the checksum algorithm used to '
+                                 'verify volume data integrity.'),
+                'type': 'string',
+                'enum': ['on', 'off', 'fletcher2', 'fletcher4', 'sha256'],
+                'default': 'on'
+            },
+            {
+                'name': self.key('compression'),
+                'api': 'compressionMode',
+                'cfg': 'nexenta_dataset_compression',
+                'title': 'Data compression mode',
+                'description': _('Controls the compression algorithm used '
+                                 'to compress volume data.'),
+                'type': 'string',
+                'enum': ['off', 'on', 'lz4', 'lzjb', 'zle', 'gzip', 'gzip-1',
+                         'gzip-2', 'gzip-3', 'gzip-4', 'gzip-5', 'gzip-6',
+                         'gzip-7', 'gzip-8', 'gzip-9'],
+                'default': 'lz4'
+            },
+            {
+                'name': self.key('copies'),
+                'api': 'dataCopies',
+                'title': 'Number of data copies',
+                'description': _('Controls the number of copies of volume '
+                                 'data.'),
+                'type': 'integer',
+                'enum': [1, 2, 3],
+                'default': 1
+            },
+            {
+                'name': self.key('dedup'),
+                'api': 'dedupMode',
+                'cfg': 'nexenta_dataset_dedup',
+                'title': 'Data deduplication mode',
+                'description': _('Controls the deduplication algorithm used '
+                                 'to verify volume data integrity.'),
+                'type': 'string',
+                'enum': ['off', 'on', 'verify', 'sha256', 'sha256,verify'],
+                'default': 'off'
+            },
+            {
+                'name': self.key('logbias'),
+                'api': 'logBiasMode',
+                'title': 'Log bias mode',
+                'description': _('Provides a hint about handling of '
+                                 'synchronous requests for a volume.'),
+                'type': 'string',
+                'enum': ['latency', 'throughput'],
+                'default': 'latency'
+            },
+            {
+                'name': self.key('primarycache'),
+                'api': 'primaryCacheMode',
+                'title': 'Primary cache mode',
+                'description': _('Controls what is cached in the primary '
+                                 'cache (ARC).'),
+                'type': 'string',
+                'enum': ['all', 'none', 'metadata'],
+                'default': 'all'
+            },
+            {
+                'name': self.key('readonly'),
+                'api': 'readOnly',
+                'title': 'Read-only mode',
+                'description': _('Controls whether a volume can be modified.'),
+                'type': 'boolean',
+                'default': False
+            },
+            {
+                'name': self.key('redundant_metadata'),
+                'api': 'redundantMetadata',
+                'title': 'Metadata redundancy mode',
+                'description': _('Controls what types of metadata are stored '
+                                 'redundantly.'),
+                'type': 'string',
+                'enum': ['all', 'most'],
+                'default': 'all'
+            },
+            {
+                'name': self.key('secondarycache'),
+                'api': 'secondaryCache',
+                'title': 'Secondary cache',
+                'description': _('Controls what is cached in the secondary '
+                                 'cache (L2ARC).'),
+                'type': 'string',
+                'enum': ['all', 'none', 'metadata'],
+                'default': 'all'
+            },
+            {
+                'name': self.key('thin_provisioning'),
+                'api': 'sparseVolume',
+                'cfg': 'nexenta_sparse',
+                'title': 'Thin provisioning',
+                'retype': _('Volume provisioning type cannot be changed '
+                            'after the volume has been created.'),
+                'description': _('Controls if a volume is created sparse '
+                                 '(with no space reservation).'),
+                'type': 'boolean',
+                'default': False
+            },
+            {
+                'name': self.key('sync'),
+                'api': 'syncMode',
+                'title': 'Sync mode',
+                'description': _('Controls the behavior of synchronous '
+                                 'requests to a volume.'),
+                'type': 'string',
+                'enum': ['standard', 'always', 'disabled'],
+                'default': 'standard'
+            },
+            {
+                'name': self.key('write_back_cache'),
+                'api': 'writeBackCache',
+                'title': 'Write-back cache mode',
+                'inherit': _('Write-back cache mode cannot be inherit.'),
+                'description': _('Controls if the ZFS write-back cache '
+                                 'is enabled for a volume.'),
+                'type': 'boolean',
+                'default': False
+            },
+            {
+                'name': self.key('zpl_meta_to_metadev'),
+                'api': 'zplMetaToMetadev',
+                'title': 'ZPL metadata placement behavior',
+                'description': _('Control ZFS POSIX metadata placement '
+                                 'to a special virtual device.'),
+                'type': 'string',
+                'enum': ['off', 'on', 'dual'],
+                'default': 'off'
+            }
+        ]
 
     def promote(self, name, payload=None):
         LOG.debug('Promote %(subj)s %(name)s: %(payload)s',
@@ -424,8 +595,41 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
 
 
 class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
-    subj = 'filesystem'
-    root = '/storage/filesystems'
+
+    def __init__(self, proxy):
+        super(NefFilesystems, self).__init__(proxy)
+        self.root = '/storage/filesystems'
+        self.subj = 'filesystem'
+        for prop in self.properties:
+            if prop['name'] == 'blocksize':
+                prop['api'] = 'recordSize'
+                prop['description'] = _('Specifies a suggested block size '
+                                        'for a volume.')
+                prop['enum'] = [512, 1024, 2048, 4096, 8192, 16384, 32768,
+                                65536, 131072, 262144, 524288, 1048576]
+                prop['default'] = 131072
+            elif prop['name'] == 'thin_provisioning':
+                prop['cfg'] = 'nexenta_sparsed_volumes'
+                prop['default'] = True
+        self.properties.append({
+            'name': self.key('rate_limit'),
+            'api': 'rateLimit',
+            'title': 'Transfer rate limit',
+            'description': _('Controls a transfer rate limit '
+                             '(bytes per second) for a volume.'),
+            'type': 'integer',
+            'default': 0
+        })
+        self.properties.append({
+            'name': self.key('snapdir'),
+            'api': 'snapshotDirectory',
+            'title': '.zfs directory visibility',
+            'description': _('Controls whether the .zfs directory '
+                             'is hidden or visible in the root of '
+                             'the volume file system.'),
+            'type': 'boolean',
+            'default': False
+        })
 
     def mount(self, name, payload=None):
         LOG.debug('Mount %(subj)s %(name)s: %(payload)s',
@@ -447,13 +651,17 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
 
 
 class NefHpr(NefCollections):
-    subj = 'HPR service'
-    root = '/hpr'
+
+    def __init__(self, proxy):
+        super(NefHpr, self).__init__(proxy)
+        self.root = '/hpr/services'
+        self.subj = 'HPR service'
 
     def activate(self, payload=None):
         LOG.debug('Activate %(payload)s',
                   {'payload': payload})
-        path = posixpath.join(self.root, 'activate')
+        root = posixpath.dirname(self.root)
+        path = posixpath.join(root, 'activate')
         return self.proxy.post(path, payload)
 
     def start(self, name, payload=None):
@@ -464,43 +672,89 @@ class NefHpr(NefCollections):
 
 
 class NefServices(NefCollections):
-    subj = 'service'
-    root = '/services'
+
+    def __init__(self, proxy):
+        super(NefServices, self).__init__(proxy)
+        self.root = '/services'
+        self.subj = 'service'
 
 
 class NefNfs(NefCollections):
-    subj = 'NFS'
-    root = '/nas/nfs'
+
+    def __init__(self, proxy):
+        super(NefNfs, self).__init__(proxy)
+        self.root = '/nas/nfs'
+        self.subj = 'NFS'
 
 
 class NefTargets(NefCollections):
-    subj = 'iSCSI target'
-    root = '/san/iscsi/targets'
+
+    def __init__(self, proxy):
+        super(NefTargets, self).__init__(proxy)
+        self.root = '/san/iscsi/targets'
+        self.subj = 'iSCSI target'
 
 
 class NefHostGroups(NefCollections):
-    subj = 'host group'
-    root = '/san/hostgroups'
+
+    def __init__(self, proxy):
+        super(NefHostGroups, self).__init__(proxy)
+        self.root = '/san/hostgroups'
+        self.subj = 'host group'
 
 
 class NefTargetsGroups(NefCollections):
-    subj = 'target group'
-    root = '/san/targetgroups'
+
+    def __init__(self, proxy):
+        super(NefTargetsGroups, self).__init__(proxy)
+        self.root = '/san/targetgroups'
+        self.subj = 'target group'
 
 
 class NefLunMappings(NefCollections):
-    subj = 'LUN mapping'
-    root = '/san/lunMappings'
+
+    def __init__(self, proxy):
+        super(NefLunMappings, self).__init__(proxy)
+        self.root = '/san/lunMappings'
+        self.subj = 'LUN mapping'
 
 
 class NefLogicalUnits(NefCollections):
-    subj = 'LU'
-    root = 'san/logicalUnits'
+
+    def __init__(self, proxy):
+        super(NefLogicalUnits, self).__init__(proxy)
+        self.prefix = 'logical_unit'
+        self.root = '/san/logicalUnits'
+        self.subj = 'logical unit'
+        self.properties = [
+            {
+                'name': self.key('writeback_cache_disabled'),
+                'api': 'writebackCacheDisabled',
+                'cfg': 'nexenta_lu_writebackcache_disabled',
+                'title': 'Logical unit write-back cache disable mode',
+                'description': _('Controls logical unit write-back '
+                                 'cache disable behavior.'),
+                'type': 'boolean',
+                'default': False
+            },
+            {
+                'name': self.key('write_protect'),
+                'api': 'writeProtect',
+                'title': 'Logical unit write protect mode',
+                'description': _('Controls logical unit write '
+                                 'protection behavior.'),
+                'type': 'boolean',
+                'default': False
+            }
+        ]
 
 
 class NefNetAddresses(NefCollections):
-    subj = 'network address'
-    root = '/network/addresses'
+
+    def __init__(self, proxy):
+        super(NefNetAddresses, self).__init__(proxy)
+        self.root = '/network/addresses'
+        self.subj = 'network address'
 
 
 class NefProxy(object):
@@ -604,8 +858,11 @@ class NefProxy(object):
         self.lock = hashlib.md5(path).hexdigest()
 
     def url(self, path):
-        netloc = '%s:%d' % (self.host, int(self.port))
-        components = (self.scheme, netloc, str(path), None, None)
+        if not path:
+            message = _('NEF API url requires path')
+            raise NefException(code='EINVAL', message=message)
+        netloc = '%s:%d' % (self.host, self.port)
+        components = (self.scheme, netloc, path, None, None)
         url = six.moves.urllib.parse.urlunsplit(components)
         return url
 

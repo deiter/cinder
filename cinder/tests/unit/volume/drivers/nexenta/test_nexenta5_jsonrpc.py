@@ -1042,7 +1042,8 @@ class TestNefHpr(test.TestCase):
     def test_activate(self):
         payload = {'key': 'value'}
         expected = None
-        path = posixpath.join(self.instance.root, 'activate')
+        root = posixpath.dirname(self.instance.root)
+        path = posixpath.join(root, 'activate')
         self.proxy.post.return_value = expected
         result = self.instance.activate(payload)
         self.proxy.post.assert_called_with(path, payload)
