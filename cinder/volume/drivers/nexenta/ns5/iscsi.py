@@ -127,6 +127,14 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.origin_snapshot_template = (
             self.configuration.nexenta_origin_snapshot_template)
 
+    @staticmethod
+    def get_driver_options():
+        return (
+            options.NEXENTA_CONNECTION_OPTS +
+            options.NEXENTA_ISCSI_OPTS +
+            options.NEXENTA_DATASET_OPTS
+        )
+
     def do_setup(self, context):
         self.nef = jsonrpc.NefProxy(self.driver_volume_type,
                                     self.root_path,
