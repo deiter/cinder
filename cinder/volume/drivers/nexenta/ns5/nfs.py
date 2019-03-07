@@ -463,7 +463,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._mount_volume(volume)
         volume_file = self.local_path(volume)
         if self.sparsed_volumes:
-            fs.truncate('%dG' % new_size, volume_file)
+            self._execute('truncate', '-s',
+                          '%dG' % new_size,
+                          volume_file,
+                          run_as_root=True)
         else:
             seek = volume['size'] * units.Ki
             count = (new_size - volume['size']) * units.Ki
