@@ -80,16 +80,16 @@ class NefRequest(object):
         LOG.debug('NEF request start: %(method)s %(path)s %(payload)s',
                   {'method': self.method, 'path': path, 'payload': payload})
         if self.method not in ['get', 'delete', 'put', 'post']:
-            message = (_('NEF API does not support %(method)s method'),
-                       {'method': self.method})
+            message = (_('NEF API does not support %(method)s method')
+                       % {'method': self.method})
             raise NefException(code='EINVAL', message=message)
         if not path:
-            message = (_('NEF API call requires collection path'))
+            message = _('NEF API call requires collection path')
             raise NefException(code='EINVAL', message=message)
         self.path = path
         if payload:
             if not isinstance(payload, dict):
-                message = (_('NEF API call payload must be a dictionary'))
+                message = _('NEF API call payload must be a dictionary')
                 raise NefException(code='EINVAL', message=message)
             if self.method in ['get', 'delete']:
                 self.payload = {'params': payload}
