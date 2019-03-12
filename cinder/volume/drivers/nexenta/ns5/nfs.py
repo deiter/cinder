@@ -146,8 +146,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
             message = (_('NFS root filesystem %(path)s is not mounted')
                        % {'path': filesystem['mountPoint']})
             raise jsonrpc.NefException(code='ENOTDIR', message=message)
+        payload = {}
         if filesystem['nonBlockingMandatoryMode']:
-            payload = {'nonBlockingMandatoryMode': False}
+            payload['nonBlockingMandatoryMode'] = False
+        if filesystem['smartCompression']:
+            payload['smartCompression'] = False
+        if payload:
             self.nef.filesystems.set(self.root_path, payload)
         service = self.nef.services.get('nfs')
         if service['state'] != 'online':
