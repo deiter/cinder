@@ -1691,7 +1691,6 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                       {'volume': new_volume['name'],
                        'error': error})
         try:
-            self.terminate_connection(new_volume, None)
             self.nef.volumes.rename(new_path, payload)
         except jsonrpc.NefException as error:
             LOG.debug('Failed to rename volume %(new_volume)s '

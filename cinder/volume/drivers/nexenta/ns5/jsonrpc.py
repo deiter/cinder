@@ -601,14 +601,15 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
         self.root = '/storage/filesystems'
         self.subj = 'filesystem'
         for prop in self.properties:
-            if prop['name'] == 'blocksize':
+            if prop['name'] == self.key('blocksize'):
+                del prop['cfg']
                 prop['api'] = 'recordSize'
                 prop['description'] = _('Specifies a suggested block size '
                                         'for a volume.')
                 prop['enum'] = [512, 1024, 2048, 4096, 8192, 16384, 32768,
                                 65536, 131072, 262144, 524288, 1048576]
                 prop['default'] = 131072
-            elif prop['name'] == 'thin_provisioning':
+            elif prop['name'] == self.key('thin_provisioning'):
                 prop['cfg'] = 'nexenta_sparsed_volumes'
                 prop['default'] = True
         self.properties.append({
