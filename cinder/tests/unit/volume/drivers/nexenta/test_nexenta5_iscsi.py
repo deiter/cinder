@@ -324,6 +324,7 @@ class TestNexentaISCSIDriver(test.TestCase):
         expected = {
             'driver_volume_type': 'iscsi',
             'data': {
+                'discard': True,
                 'target_discovered': False,
                 'encrypted': False,
                 'qos_specs': None,

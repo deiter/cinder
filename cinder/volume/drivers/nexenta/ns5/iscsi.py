@@ -76,9 +76,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 Added support for volume retype.
                 Added support for volume type extra specs.
                 Added vendor capabilities support.
+        1.4.5 - Added report discard support.
     """
 
-    VERSION = '1.4.4'
+    VERSION = '1.4.5'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -629,6 +630,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 props_luns += [mapping_lu] * len(target_portals)
 
         props = {}
+        props['discard'] = True
         props['target_discovered'] = False
         props['encrypted'] = False
         props['qos_specs'] = None
