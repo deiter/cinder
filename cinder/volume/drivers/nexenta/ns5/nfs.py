@@ -87,9 +87,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 Added support for volume retype.
                 Added support for volume type extra specs.
                 Added vendor capabilities support.
+        1.8.5 - Fixed NFS protocol version for generic volume migration.
     """
 
-    VERSION = '1.8.4'
+    VERSION = '1.8.5'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -498,14 +499,29 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Initialize volume connection for %(volume)s',
                   {'volume': volume['name']})
         share = self._get_volume_share(volume)
-        return {
+        data = {
+            'export': share,
+            'name': 'volume'
+        }
+        nfs_options = self.configuration.safe_get('nfs_mount_options')
+        nas_options = self.configuration.safe_get('nas_mount_options')
+        if nfs_options and nas_options:
+            LOG.debug('Overriding NFS mount options for volume %(volume)s: '
+                      'nfs_mount_options = "%(nfs_options)s" with '
+                      'nas_mount_options = "%(nas_options)s"',
+                      {'volume': volume['name'],
+                       'nfs_options': nfs_options,
+                       'nas_options': nas_options})
+        if nas_options:
+            data['options'] = '-o %s' % nas_options
+        elif nfs_options:
+            data['options'] = '-o %s' % nfs_options
+        info = {
             'driver_volume_type': self.driver_volume_type,
             'mount_point_base': self.mount_point_base,
-            'data': {
-                'export': share,
-                'name': 'volume'
-            }
+            'data': data
         }
+        return info
 
     @coordination.synchronized('{self.nef.lock}')
     def delete_volume(self, volume):

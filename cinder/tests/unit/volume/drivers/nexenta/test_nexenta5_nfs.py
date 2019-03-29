@@ -515,10 +515,12 @@ class TestNexentaNfsDriver(test.TestCase):
         result = self.drv.initialize_connection(volume, connector)
         get_share.assert_called_with(volume)
         base = self.cfg.nexenta_mount_point_base
+        options = '-o %s' % self.cfg.nas_mount_options
         expected = {
             'driver_volume_type': 'nfs',
             'mount_point_base': base,
             'data': {
+                'options': options,
                 'export': share,
                 'name': 'volume'
             }
