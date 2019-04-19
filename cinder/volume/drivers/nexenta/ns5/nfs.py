@@ -967,8 +967,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 'host': self.configuration.nas_host,
                 'path': self.configuration.nas_share_path
             }
-        max_over_subscription_ratio = utils.get_max_over_subscription_ratio(
-            self.configuration.safe_get('max_over_subscription_ratio'), True)
+        max_over_subscription_ratio = (
+            self.configuration.safe_get('max_over_subscription_ratio'))
         reserved_percentage = (
             self.configuration.safe_get('reserved_percentage'))
         if reserved_percentage is None:
