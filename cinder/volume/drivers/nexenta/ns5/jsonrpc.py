@@ -815,9 +815,8 @@ class NefProxy(object):
         self.path = path
         self.backoff_factor = conf.nexenta_rest_backoff_factor
         self.retries = len(self.hosts) * conf.nexenta_rest_retry_count
-        self.timeout = requests.packages.urllib3.util.timeout.Timeout(
-            connect=conf.nexenta_rest_connect_timeout,
-            read=conf.nexenta_rest_read_timeout)
+        self.timeout = (conf.nexenta_rest_connect_timeout,
+                        conf.nexenta_rest_read_timeout)
         max_retries = requests.packages.urllib3.util.retry.Retry(
             total=conf.nexenta_rest_retry_count,
             backoff_factor=conf.nexenta_rest_backoff_factor)
