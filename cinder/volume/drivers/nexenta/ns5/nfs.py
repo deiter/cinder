@@ -166,6 +166,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'state': share['shareState']})
             raise jsonrpc.NefException(code='ESRCH', message=message)
 
+    @coordination.synchronized('{self.nef.lock}')
     def create_volume(self, volume):
         """Creates a volume.
 
