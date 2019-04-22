@@ -40,7 +40,9 @@ from cinder.volume.drivers.nexenta.ns5 import nfs
 
 class TestNexentaNfsDriver(test.TestCase):
 
-    def setUp(self):
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
+    @mock.patch.object(jsonrpc, 'NefRequest')
+    def setUp(self, nef_request, update_lock):
         super(TestNexentaNfsDriver, self).setUp()
         self.ctxt = context.get_admin_context()
         self.cfg = mock.Mock(spec=conf.Configuration)
@@ -73,9 +75,6 @@ class TestNexentaNfsDriver(test.TestCase):
         self.cfg.nas_share_path = 'pool/share'
         self.cfg.nfs_mount_options = '-o vers=4'
         self.cfg.safe_get = self.fake_safe_get
-        self.nef_mock = mock.Mock()
-        self.mock_object(jsonrpc, 'NefRequest',
-                         return_value=self.nef_mock)
         self.drv = nfs.NexentaNfsDriver(configuration=self.cfg)
         self.drv.db = db
         self.drv.do_setup(self.ctxt)
@@ -87,8 +86,11 @@ class TestNexentaNfsDriver(test.TestCase):
             value = None
         return value
 
-    def test_do_setup(self):
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefProxy.update_lock')
+    def test_do_setup(self, update_lock):
         self.assertIsNone(self.drv.do_setup(self.ctxt))
+        update_lock.return_value = True
 
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
                 'jsonrpc.NefNfs.get')
@@ -432,15 +434,18 @@ class TestNexentaNfsDriver(test.TestCase):
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
                 'jsonrpc.NefHpr.create')
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefHpr.list')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
                 'nfs.NexentaNfsDriver._get_host_addresses')
-    def test_migrate_volume(self, get_host_addresses, create_service,
-                            start_service, get_service, delete_service,
-                            delete_volume):
+    def test_migrate_volume(self, get_host_addresses, list_services,
+                            create_service, start_service, get_service,
+                            delete_service, delete_volume):
         host_addresses = [
             self.cfg.nas_host,
             self.cfg.nexenta_rest_address
         ]
         get_host_addresses.return_value = host_addresses
+        list_services.return_value = []
         create_service.return_value = {}
         start_service.return_value = {}
         get_service.return_value = {
@@ -669,6 +674,8 @@ class TestNexentaNfsDriver(test.TestCase):
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
                 'nfs.NexentaNfsDriver.extend_volume')
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'nfs.NexentaNfsDriver._set_volume_acl')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
                 'jsonrpc.NefFilesystems.mount')
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
                 'jsonrpc.NefFilesystems.unmount')
@@ -677,6 +684,7 @@ class TestNexentaNfsDriver(test.TestCase):
     def test_create_volume_from_snapshot(self, clone_snapshot,
                                          unmount_filesystem,
                                          mount_filesystem,
+                                         set_acl,
                                          extend_volume):
         volume = fake_volume(self.ctxt)
         snapshot = fake_snapshot(self.ctxt)
@@ -692,6 +700,7 @@ class TestNexentaNfsDriver(test.TestCase):
         clone_snapshot.return_value = {}
         unmount_filesystem.return_value = {}
         mount_filesystem.return_value = {}
+        set_acl.return_value = {}
         extend_volume.return_value = None
         self.assertIsNone(
             self.drv.create_volume_from_snapshot(clone, snapshot)
