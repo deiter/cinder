@@ -1062,7 +1062,9 @@ class TestNefHpr(test.TestCase):
 
 class TestNefProxy(test.TestCase):
 
-    def setUp(self):
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
+    @mock.patch.object(jsonrpc, 'NefRequest')
+    def setUp(self, nef_request, update_lock):
         super(TestNefProxy, self).setUp()
         self.cfg = mock.Mock(spec=conf.Configuration)
         self.cfg.nexenta_use_https = True
@@ -1077,56 +1079,64 @@ class TestNefProxy(test.TestCase):
         self.cfg.nexenta_rest_read_timeout = 1
         self.cfg.nas_host = '3.3.3.3'
         self.cfg.nas_share_path = 'pool/path/to/share'
-        self.nef_mock = mock.Mock()
-        self.mock_object(jsonrpc, 'NefRequest',
-                         return_value=self.nef_mock)
-
         self.proto = 'nfs'
         self.proxy = jsonrpc.NefProxy(self.proto,
                                       self.cfg.nas_share_path,
                                       self.cfg)
 
-    def test___init___http(self):
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
+    def test___init___http(self, update_lock):
         proto = 'nfs'
         cfg = copy.copy(self.cfg)
         cfg.nexenta_use_https = False
+        update_lock.return_value = None
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         self.assertIsInstance(result, jsonrpc.NefProxy)
 
-    def test___init___no_rest_port_http(self):
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
+    def test___init___no_rest_port_http(self, update_lock):
         proto = 'nfs'
         cfg = copy.copy(self.cfg)
         cfg.nexenta_rest_port = 0
         cfg.nexenta_use_https = False
+        update_lock.return_value = None
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         self.assertIsInstance(result, jsonrpc.NefProxy)
 
-    def test___init___no_rest_port_https(self):
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
+    def test___init___no_rest_port_https(self, update_lock):
         proto = 'nfs'
         cfg = copy.copy(self.cfg)
         cfg.nexenta_rest_port = 0
         cfg.nexenta_use_https = True
+        update_lock.return_value = None
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         self.assertIsInstance(result, jsonrpc.NefProxy)
 
-    def test___init___iscsi(self):
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
+    def test___init___iscsi(self, update_lock):
         proto = 'iscsi'
         cfg = copy.copy(self.cfg)
+        update_lock.return_value = None
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         self.assertIsInstance(result, jsonrpc.NefProxy)
 
-    def test___init___nfs_no_rest_address(self):
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
+    def test___init___nfs_no_rest_address(self, update_lock):
         proto = 'nfs'
         cfg = copy.copy(self.cfg)
         cfg.nexenta_rest_address = ''
+        update_lock.return_value = None
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         self.assertIsInstance(result, jsonrpc.NefProxy)
 
-    def test___init___iscsi_no_rest_address(self):
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
+    def test___init___iscsi_no_rest_address(self, update_lock):
         proto = 'iscsi'
         cfg = copy.copy(self.cfg)
         cfg.nexenta_rest_address = ''
         cfg.nexenta_host = '4.4.4.4'
+        update_lock.return_value = None
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         self.assertIsInstance(result, jsonrpc.NefProxy)
 
@@ -1136,12 +1146,14 @@ class TestNefProxy(test.TestCase):
         self.assertRaises(jsonrpc.NefException, jsonrpc.NefProxy,
                           proto, cfg.nas_share_path, cfg)
 
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
     @mock.patch('requests.packages.urllib3.disable_warnings')
-    def test___init___no_ssl_cert_verify(self, disable_warnings):
+    def test___init___no_ssl_cert_verify(self, disable_warnings, update_lock):
         proto = 'nfs'
         cfg = copy.copy(self.cfg)
         cfg.driver_ssl_cert_verify = False
         disable_warnings.return_value = None
+        update_lock.return_value = None
         result = jsonrpc.NefProxy(proto, cfg.nas_share_path, cfg)
         disable_warnings.assert_called()
         self.assertIsInstance(result, jsonrpc.NefProxy)
@@ -1181,16 +1193,34 @@ class TestNefProxy(test.TestCase):
         self.assertIsNone(self.proxy.update_host(host))
 
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefRsf.list')
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
                 'jsonrpc.NefSettings.get')
-    def test_update_lock(self, get_settings):
-        guid = uuid.uuid4().hex
-        settings = {'value': guid}
+    def test_update_lock(self, get_settings, list_clusters):
+        guid1 = uuid.uuid4().hex
+        guid2 = uuid.uuid4().hex
+        settings = {'value': guid1}
+        clusters = [
+            {
+                'nodes': [
+                    {
+                        'machineId': guid1
+                    },
+                    {
+                        'machineId': guid2
+                    }
+                ]
+            }
+        ]
         get_settings.return_value = settings
+        list_clusters.return_value = clusters
         self.assertIsNone(self.proxy.update_lock())
-        path = '%s:%s' % (guid, self.proxy.path)
-        if isinstance(path, six.text_type):
-            path = path.encode('utf-8')
-        expected = hashlib.md5(path).hexdigest()
+        guids = [guid1, guid2]
+        guid = ':'.join(sorted(guids))
+        lock = '%s:%s' % (guid, self.proxy.path)
+        if six.PY3:
+            lock = lock.encode('utf-8')
+        expected = hashlib.md5(lock).hexdigest()
         self.assertEqual(expected, self.proxy.lock)
 
     def test_url(self):
