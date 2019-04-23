@@ -37,7 +37,9 @@ from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 
 class TestNexentaISCSIDriver(test.TestCase):
 
-    def setUp(self):
+    @mock.patch.object(jsonrpc.NefProxy, 'update_lock')
+    @mock.patch.object(jsonrpc, 'NefRequest')
+    def setUp(self, nef_request, update_lock):
         super(TestNexentaISCSIDriver, self).setUp()
         self.ctxt = context.get_admin_context()
         self.cfg = mock.Mock(spec=conf.Configuration)
@@ -75,9 +77,6 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.cfg.nexenta_rest_read_timeout = 1
         self.cfg.nexenta_volume_group = 'vg'
         self.cfg.safe_get = self.fake_safe_get
-        self.nef_mock = mock.Mock()
-        self.mock_object(jsonrpc, 'NefRequest',
-                         return_value=self.nef_mock)
         self.drv = iscsi.NexentaISCSIDriver(
             configuration=self.cfg)
         self.drv.db = db
@@ -93,7 +92,10 @@ class TestNexentaISCSIDriver(test.TestCase):
     def fake_uuid4():
         return uuid.UUID('38d18a48-b791-4046-b523-a84aad966310')
 
-    def test_do_setup(self):
+    @mock.patch('cinder.volume.drivers.nexenta.ns5.'
+                'jsonrpc.NefProxy.update_lock')
+    def test_do_setup(self, update_lock):
+        update_lock.return_value = True
         self.assertIsNone(self.drv.do_setup(self.ctxt))
 
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'
