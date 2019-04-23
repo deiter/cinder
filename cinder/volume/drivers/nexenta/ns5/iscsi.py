@@ -148,6 +148,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                        % {'state': service['state']})
             raise jsonrpc.NefException(code='ESRCH', message=message)
 
+    @coordination.synchronized('{self.nef.lock}')
     def create_volume(self, volume):
         """Create a zfs volume on appliance.
 

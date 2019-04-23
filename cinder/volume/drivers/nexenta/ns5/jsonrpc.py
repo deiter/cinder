@@ -298,7 +298,6 @@ class NefRequest(object):
                 LOG.debug('Successful failover path '
                           '%(root)s to host %(host)s',
                           {'root': root, 'host': host})
-                self.proxy.update_lock()
                 result = True
                 break
             else:
@@ -672,6 +671,14 @@ class NefHpr(NefCollections):
         return self.proxy.post(path, payload)
 
 
+class NefRsf(NefCollections):
+
+    def __init__(self, proxy):
+        super(NefRsf, self).__init__(proxy)
+        self.root = 'rsf/clusters'
+        self.subj = 'RSF Clusters'
+
+
 class NefServices(NefCollections):
 
     def __init__(self, proxy):
@@ -768,6 +775,7 @@ class NefProxy(object):
         self.snapshots = NefSnapshots(self)
         self.services = NefServices(self)
         self.hpr = NefHpr(self)
+        self.rsf = NefRsf(self)
         self.nfs = NefNfs(self)
         self.targets = NefTargets(self)
         self.hostgroups = NefHostGroups(self)
@@ -850,12 +858,46 @@ class NefProxy(object):
             self.update_bearer(token)
 
     def update_lock(self):
-        prop = self.settings.get('system.guid')
-        guid = prop.get('value')
-        path = '%s:%s' % (guid, self.path)
-        if isinstance(path, six.text_type):
-            path = path.encode('utf-8')
-        self.lock = hashlib.md5(path).hexdigest()
+        settings = {}
+        guid = None
+        try:
+            settings = self.settings.get('system.guid')
+        except NefException as error:
+            LOG.error('Unable to get host settings: %(error)s',
+                      {'error': error})
+        if settings and 'value' in settings:
+            guid = settings['value']
+            LOG.debug('Host guid: %(guid)s', {'guid': guid})
+        else:
+            LOG.error('Unable to get host guid: %(settings)s',
+                      {'settings': settings})
+        guids = []
+        clusters = []
+        payload = {'fields': 'nodes'}
+        try:
+            clusters = self.rsf.list(payload)
+        except NefException as error:
+            LOG.error('Unable to get HA cluster guid: %(error)s',
+                      {'error': error})
+        for cluster in clusters:
+            if 'nodes' not in cluster:
+                continue
+            nodes = cluster['nodes']
+            for node in nodes:
+                if 'machineId' in node:
+                    guids.append(node['machineId'])
+        if guid in guids:
+            guid = ':'.join(sorted(guids))
+            LOG.debug('HA cluster guid: %(guid)s',
+                      {'guid': guid})
+        if not guid:
+            guid = ':'.join(sorted(self.hosts))
+        lock = '%s:%s' % (guid, self.path)
+        if six.PY3:
+            lock = lock.encode('utf-8')
+        self.lock = hashlib.md5(lock).hexdigest()
+        LOG.debug('NEF coordination lock: %(lock)s',
+                  {'lock': self.lock})
 
     def url(self, path):
         if not path:
