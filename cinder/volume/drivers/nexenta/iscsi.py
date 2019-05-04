@@ -70,6 +70,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
               - Refactored storage assisted volume migration.
               - Added deferred deletion for snapshots.
               - Added revert to snapshot support.
+              - Added volume multi-attach.
               - Added report discard support.
               - Added informative exception messages for REST API.
               - Added configuration parameters for REST API connect/read.
@@ -139,7 +140,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         )
 
     def do_setup(self, context):
-        self.nms = jsonrpc.NmsProxy(self.root_path,
+        self.nms = jsonrpc.NmsProxy(self.driver_volume_type,
+                                    self.root_path,
                                     self.configuration)
 
     def check_for_setup_error(self):
@@ -239,25 +241,24 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """
         volume_path = self._get_volume_path(volume)
         try:
-            props = self.nms.zvol.get_child_props(volume_path, 'origin')
+            origin = self.nms.zvol.get_child_prop(volume_path, 'origin')
         except jsonrpc.NmsException as error:
             if error.code == 'ENOENT':
                 return
             raise
         self.nms.zvol.destroy(volume_path, '-r')
-        origin_path = props.get('origin')
-        if not origin_path:
+        if not origin:
             return
         template = self.origin_snapshot_template
-        parent_path, snapshot_name = origin_path.split('@')
+        parent_path, snapshot_name = origin.split('@')
         if not self._match_template(template, snapshot_name):
             return
         try:
-            self.nms.snapshot.destroy(origin_path, '-d')
+            self.nms.snapshot.destroy(origin, '-d')
         except jsonrpc.NmsException as error:
             LOG.error('Failed to delete origin snapshot %(origin)s '
                       'of volume %(volume)s: %(error)s',
-                      {'origin': origin_path,
+                      {'origin': origin,
                        'volume': volume['name'],
                        'error': error})
 
@@ -1037,7 +1038,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 props['target_iqns'] = props_iqns
                 props['target_luns'] = props_luns
             else:
-                index = random.randrange(0, len(props_luns))
+                index = random.randrange(len(props_luns))
                 props['target_portal'] = props_portals[index]
                 props['target_iqn'] = props_iqns[index]
                 props['target_lun'] = props_luns[index]
@@ -1114,7 +1115,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             props['target_iqns'] = props_iqns
             props['target_luns'] = props_luns
         else:
-            index = random.randrange(0, len(props_luns))
+            index = random.randrange(len(props_luns))
             props['target_portal'] = props_portals[index]
             props['target_iqn'] = props_iqns[index]
             props['target_lun'] = props_luns[index]
@@ -1163,7 +1164,25 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         host_groups = []
         host_iqn = None
         if isinstance(connector, dict) and 'initiator' in connector:
-            host_iqn = connector.get('initiator')
+            connectors = []
+            if 'volume_attachment' in volume:
+                if isinstance(volume['volume_attachment'], list):
+                    for attachment in volume['volume_attachment']:
+                        if not isinstance(attachment, dict):
+                            continue
+                        if 'connector' not in attachment:
+                            continue
+                        connectors.append(attachment['connector'])
+            if connectors.count(connector) > 1:
+                LOG.debug('Detected %(count)s connections from host '
+                          '%(host_name)s (IP:%(host_ip)s) to volume '
+                          '%(volume)s, skip terminating connection',
+                          {'count': connectors.count(connector),
+                           'host_name': connector.get('host', 'unknown'),
+                           'host_ip': connector.get('ip', 'unknown'),
+                           'volume': volume['name']})
+                return True
+            host_iqn = connector['initiator']
             host_groups.append('All')
             host_group = self._get_host_group(host_iqn)
             if host_group is not None:
@@ -1330,7 +1349,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'description': description,
             'display_name': display_name,
             'pool_name': self.configuration.nexenta_volume,
-            'multiattach': False,
+            'multiattach': True,
             'QoS_support': False,
             'consistencygroup_support': False,
             'consistent_group_snapshot_enabled': False,

@@ -186,7 +186,8 @@ class NmsRequest(object):
                 'create_lu',
                 'create_snapshot',
                 'create_target',
-                'create_targetgroup'
+                'create_targetgroup',
+                'create_with_props'
             ],
             'ENOENT': [
                 'delete_lu',
@@ -223,7 +224,7 @@ class NmsObject(object):
 
 class NmsProxy(object):
 
-    def __init__(self, path, conf):
+    def __init__(self, proto, path, conf):
         self.path = path
         self.lock = 'nms'
         self.auto = False
@@ -231,10 +232,22 @@ class NmsProxy(object):
         if self.scheme == 'auto':
             self.auto = True
             self.scheme = 'http'
-        self.host = conf.nexenta_host
-        self.port = 8457
+        if conf.nexenta_rest_address:
+            self.host = conf.nexenta_rest_address
+        elif conf.nexenta_host:
+            self.host = conf.nexenta_host
+        elif proto == 'nfs' and conf.nas_host:
+            self.host = conf.nas_host
+        else:
+            message = (_('NexentaStor Rest API address is not defined, '
+                         'please check the Cinder configuration file for '
+                         'NexentaStor backend and nexenta_rest_address, '
+                         'nexenta_host or nas_host configuration options'))
+            raise NmsException(code='EINVAL', message=message)
         if conf.nexenta_rest_port:
             self.port = conf.nexenta_rest_port
+        else:
+            self.port = 8457
         self.headers = {
             'Content-Type': 'application/json',
             'X-Requested-With': 'XMLHttpRequest'

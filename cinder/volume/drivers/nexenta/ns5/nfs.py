@@ -237,7 +237,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             LOG.debug('NFS share %(share)s is not mounted at %(path)s',
                       {'share': share, 'path': path})
             return
-        for attempt in range(0, attempts):
+        for attempt in range(attempts):
             try:
                 fs.umount(path)
                 LOG.debug('NFS share %(share)s has been unmounted at %(path)s',
