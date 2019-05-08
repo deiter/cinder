@@ -14,12 +14,12 @@
 #    under the License.
 
 import hashlib
-import html.parser
 import json
 
 from oslo_log import log as logging
 import requests
 import six
+from six.moves import html_parser
 
 from cinder import coordination
 from cinder import exception
@@ -59,10 +59,10 @@ class NmsException(exception.VolumeDriverException):
         super(NmsException, self).__init__(message, **kwargs)
 
 
-class NmsParser(html.parser.HTMLParser):
+class NmsParser(html_parser.HTMLParser, object):
 
     def __init__(self):
-        html.parser.HTMLParser.__init__(self)
+        super(NmsParser, self).__init__()
         self.data = []
 
     def handle_data(self, data):
@@ -131,7 +131,7 @@ class NmsRequest(object):
                 parser = NmsParser()
                 parser.feed(response.content)
                 message = ', '.join(parser.data)
-            except html.parser.HTMLParseError as error:
+            except html_parser.HTMLParseError as error:
                 LOG.debug('Failed to parse HTML %(content)s: %(error)s',
                           {'content': response.content, 'error': error})
                 message = response.content
