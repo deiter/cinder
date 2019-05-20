@@ -71,9 +71,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
               - Disabled non-blocking mandatory locks.
               - Added informative exception messages for REST API.
               - Improved collection of backend statistics.
+        1.4.1 - Added retries on timeouts, network connection errors,
+                SSL errors, proxy and NMS errors.
     """
 
-    VERSION = '1.4.0'
+    VERSION = '1.4.1'
     CI_WIKI_NAME = 'Nexenta_CI'
 
     vendor_name = 'Nexenta'
@@ -88,12 +90,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
                          'backend configuration not found')
                        % {'product_name': self.product_name,
                           'storage_protocol': self.storage_protocol})
-            raise jsonrpc.NmsException(code='ENODATA', message=message)
+            raise jsonrpc.NmsException(code='EINVAL', message=message)
         self.configuration.append_config_values(
             options.NEXENTA_CONNECTION_OPTS)
         self.configuration.append_config_values(options.NEXENTA_NFS_OPTS)
         self.configuration.append_config_values(options.NEXENTA_DATASET_OPTS)
-        self.configuration.append_config_values(options.NEXENTA_RRMGR_OPTS)
+        required_options = ['nas_host', 'nas_share_path', 'nexenta_user',
+                            'nexenta_password']
+        for option in required_options:
+            if not self.configuration.safe_get(option):
+                message = (_('%(product_name)s %(storage_protocol)s '
+                             'backend configuration is missing '
+                             'required option: %(option)s')
+                           % {'product_name': self.product_name,
+                              'storage_protocol': self.storage_protocol,
+                              'option': option})
+                raise jsonrpc.NmsException(code='EINVAL', message=message)
         self.nms = None
         self.driver_name = self.__class__.__name__
         self.nas_host = self.configuration.nas_host
@@ -116,8 +128,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         return (
             options.NEXENTA_CONNECTION_OPTS +
             options.NEXENTA_NFS_OPTS +
-            options.NEXENTA_DATASET_OPTS +
-            options.NEXENTA_RRMGR_OPTS
+            options.NEXENTA_DATASET_OPTS
         )
 
     def do_setup(self, context):
@@ -915,7 +926,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def revert_to_snapshot(self, context, volume, snapshot):
         """Revert volume to snapshot."""
         snapshot_path = self._get_snapshot_path(snapshot)
-        self.nms.snapshot.rollback(snapshot_path, '')
+        self.nms.snapshot.rollback(snapshot_path, '-Rf')
 
     def _set_volume_acl(self, volume):
         volume_path = self._get_volume_path(volume)
