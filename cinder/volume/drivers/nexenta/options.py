@@ -101,6 +101,10 @@ NEXENTA_CONNECTION_OPTS = [
                 default=False,
                 help='If set to True the http client will validate the SSL '
                      'certificate of the backend endpoint.'),
+    cfg.StrOpt('driver_ssl_cert_path',
+               help='Can be used to specify a non default path to a '
+                    'CA_BUNDLE file or directory with certificates of '
+                    'trusted CAs, which will be used to validate the backend'),
     cfg.BoolOpt('nexenta_lu_writebackcache_disabled',
                 default=False,
                 help='Postponed write to backing store or not'),
