@@ -89,9 +89,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 Added vendor capabilities support.
         1.8.5 - Fixed NFS protocol version for generic volume migration.
         1.8.6 - Fixed post-migration volume mount.
+        1.8.7 - Added workaround for pagination.
     """
 
-    VERSION = '1.8.6'
+    VERSION = '1.8.7'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'

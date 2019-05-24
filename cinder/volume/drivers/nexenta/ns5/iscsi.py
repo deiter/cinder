@@ -77,9 +77,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 Added support for volume type extra specs.
                 Added vendor capabilities support.
         1.4.5 - Added report discard support.
+        1.4.6 - Added workaround for pagination.
     """
 
-    VERSION = '1.4.5'
+    VERSION = '1.4.6'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -1740,8 +1741,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 value = self._get_vendor_value(extra_spec, vendor_spec)
                 payload[api] = value
             elif (api in volume_specs and 'source' in volume_specs and
-                    api in volume_specs['source'] and
-                    volume_specs['source'][api] in ['local', 'received']):
+                  api in volume_specs['source'] and
+                  volume_specs['source'][api] in ['local', 'received']):
                 if 'cfg' in vendor_spec:
                     cfg = vendor_spec['cfg']
                     value = self.configuration.safe_get(cfg)
