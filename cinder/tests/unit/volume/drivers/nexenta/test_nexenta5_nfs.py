@@ -50,6 +50,8 @@ class TestNexentaNfsDriver(test.TestCase):
         self.cfg.volume_backend_name = 'nexenta_nfs'
         self.cfg.nexenta_group_snapshot_template = 'group-snapshot-%s'
         self.cfg.nexenta_origin_snapshot_template = 'origin-snapshot-%s'
+        self.cfg.nexenta_migration_service_prefix = 'cinder-migration'
+        self.cfg.nexenta_migration_throttle = 100
         self.cfg.nexenta_dataset_description = ''
         self.cfg.nexenta_mount_point_base = '$state_path/mnt'
         self.cfg.nexenta_sparsed_volumes = True
@@ -446,7 +448,9 @@ class TestNexentaNfsDriver(test.TestCase):
         create_service.return_value = {}
         start_service.return_value = {}
         get_service.return_value = {
-            'state': 'disabled'
+            'state': 'disabled',
+            'progress': 0,
+            'runNumber': 1
         }
         delete_service.return_value = {}
         delete_volume.return_value = {}
@@ -468,23 +472,32 @@ class TestNexentaNfsDriver(test.TestCase):
         }
         result = self.drv.migrate_volume(self.ctxt, volume, host)
         expected = (True, None)
-        svc = 'cinder-migrate-%s' % volume['name']
+        svc = '%(prefix)s-%(volume)s' % {
+            'prefix': self.cfg.nexenta_migration_service_prefix,
+            'volume': volume['name']
+        }
         src = self.drv._get_volume_path(volume)
         dst = '%s/%s' % (dst_path, volume['name'])
+        throttle = self.cfg.nexenta_migration_throttle * units.Mi
         payload = {
             'name': svc,
             'sourceDataset': src,
             'destinationDataset': dst,
             'type': 'scheduled',
             'isSource': True,
+            'transportOptions': {
+                'throttle': throttle
+            },
             'remoteNode': {
                 'host': dst_host,
-                'port': dst_port
+                'port': dst_port,
+                'proto': 'http'
             }
         }
         create_service.assert_called_with(payload)
         start_service.assert_called_with(svc)
-        get_service.assert_called_with(svc)
+        payload = {'fields': 'state,progress,runNumber'}
+        get_service.assert_called_with(svc, payload)
         payload = {
             'destroySourceSnapshots': True,
             'destroyDestinationSnapshots': True,
@@ -978,11 +991,10 @@ class TestNexentaNfsDriver(test.TestCase):
         used = 75
         get_filesystem.return_value = {
             'bytesAvailable': available * units.Gi,
-            'bytesUsed': used * units.Gi,
-            'pool': posixpath.dirname(self.cfg.nas_share_path)
+            'bytesUsed': used * units.Gi
         }
         result = self.drv.get_volume_stats(True)
-        payload = {'fields': 'bytesAvailable,bytesUsed,pool'}
+        payload = {'fields': 'bytesAvailable,bytesUsed'}
         get_filesystem.assert_called_with(self.drv.root_path, payload)
         self.assertEqual(self.drv._stats, result)
 
@@ -1013,6 +1025,11 @@ class TestNexentaNfsDriver(test.TestCase):
         }
         max_over_subscription_ratio = self.cfg.max_over_subscription_ratio
         visibility = 'public'
+        if self.cfg.nexenta_use_https:
+            nef_scheme = 'https'
+        else:
+            nef_scheme = 'http'
+        nef_url = self.drv.nef.url()
         expected = {
             'vendor_name': 'Nexenta',
             'description': description,
@@ -1038,12 +1055,14 @@ class TestNexentaNfsDriver(test.TestCase):
             'consistent_group_snapshot_enabled': True,
             'volume_backend_name': self.cfg.volume_backend_name,
             'location_info': location_info,
-            'nef_url': self.cfg.nexenta_rest_address,
-            'nef_port': self.cfg.nexenta_rest_port
+            'nef_scheme': nef_scheme,
+            'nef_hosts': self.cfg.nexenta_rest_address,
+            'nef_port': self.cfg.nexenta_rest_port,
+            'nef_url': nef_url
         }
         self.assertIsNone(self.drv._update_volume_stats())
         self.assertEqual(expected, self.drv._stats)
-        payload = {'fields': 'bytesAvailable,bytesUsed,pool'}
+        payload = {'fields': 'bytesAvailable,bytesUsed'}
         get_filesystem.assert_called_with(self.drv.root_path, payload)
 
     @mock.patch('cinder.volume.drivers.nexenta.ns5.'

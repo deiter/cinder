@@ -194,7 +194,7 @@ class NefRequest(object):
                 message = (_('Monitor path not found for %(text)s')
                            % {'text': text})
                 raise NefException(code='ENODATA', message=message)
-            self.proxy.delay(1)
+            self.proxy.delay(attempt)
             return self.request(method, path, payload)
         elif response.status_code == requests.codes.ok:
             if not ('data' in content and content['data']):
@@ -860,10 +860,7 @@ class NefProxy(object):
         LOG.debug('NEF coordination lock: %(lock)s',
                   {'lock': self.lock})
 
-    def url(self, path):
-        if not path:
-            message = _('NEF API url requires path')
-            raise NefException(code='EINVAL', message=message)
+    def url(self, path=''):
         netloc = '%s:%d' % (self.host, self.port)
         components = (self.scheme, netloc, path, None, None)
         url = six.moves.urllib.parse.urlunsplit(components)

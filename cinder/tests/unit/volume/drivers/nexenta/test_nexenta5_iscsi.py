@@ -47,6 +47,8 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.cfg.volume_backend_name = 'nexenta_iscsi'
         self.cfg.nexenta_group_snapshot_template = 'group-snapshot-%s'
         self.cfg.nexenta_origin_snapshot_template = 'origin-snapshot-%s'
+        self.cfg.nexenta_migration_service_prefix = 'cinder-migration'
+        self.cfg.nexenta_migration_throttle = 100
         self.cfg.nexenta_dataset_description = ''
         self.cfg.nexenta_host = '1.1.1.1'
         self.cfg.nexenta_user = 'admin'
@@ -423,6 +425,11 @@ class TestNexentaISCSIDriver(test.TestCase):
         }
         max_over_subscription_ratio = self.cfg.max_over_subscription_ratio
         visibility = 'public'
+        if self.cfg.nexenta_use_https:
+            nef_scheme = 'https'
+        else:
+            nef_scheme = 'http'
+        nef_url = self.drv.nef.url()
         expected = {
             'vendor_name': 'Nexenta',
             'description': description,
@@ -448,8 +455,10 @@ class TestNexentaISCSIDriver(test.TestCase):
             'consistent_group_snapshot_enabled': True,
             'volume_backend_name': self.cfg.volume_backend_name,
             'location_info': location_info,
-            'nef_url': self.cfg.nexenta_rest_address,
-            'nef_port': self.cfg.nexenta_rest_port
+            'nef_scheme': nef_scheme,
+            'nef_hosts': self.cfg.nexenta_rest_address,
+            'nef_port': self.cfg.nexenta_rest_port,
+            'nef_url': nef_url
         }
         self.assertIsNone(self.drv._update_volume_stats())
         self.assertEqual(expected, self.drv._stats)

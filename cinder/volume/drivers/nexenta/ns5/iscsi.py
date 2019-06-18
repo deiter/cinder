@@ -78,9 +78,12 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 Added vendor capabilities support.
         1.4.5 - Added report discard support.
         1.4.6 - Added workaround for pagination.
+        1.4.7 - Improved error messages.
+              - Improved compatibility with initial driver versions.
+              - Added throttle for storage assisted volume migration.
     """
 
-    VERSION = '1.4.6'
+    VERSION = '1.4.7'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -123,6 +126,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.configuration.nexenta_group_snapshot_template)
         self.origin_snapshot_template = (
             self.configuration.nexenta_origin_snapshot_template)
+        self.migration_service_prefix = (
+            self.configuration.nexenta_migration_service_prefix)
+        self.migration_throttle = (
+            self.configuration.nexenta_migration_throttle)
 
     @staticmethod
     def get_driver_options():
@@ -274,7 +281,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         try:
             self.create_volume_from_snapshot(volume, snapshot)
         except jsonrpc.NefException as error:
-            LOG.debug('Failed to create clone %(clone)s '
+            LOG.error('Failed to create clone %(clone)s '
                       'from volume %(volume)s: %(error)s',
                       {'clone': volume['name'],
                        'volume': src_vref['name'],
@@ -284,7 +291,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             try:
                 self.delete_snapshot(snapshot)
             except jsonrpc.NefException as error:
-                LOG.debug('Failed to delete temporary snapshot '
+                LOG.error('Failed to delete temporary snapshot '
                           '%(volume)s@%(snapshot)s: %(error)s',
                           {'volume': src_vref['name'],
                            'snapshot': snapshot['name'],
@@ -324,13 +331,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                             continue
                         connectors.append(attachment['connector'])
             if connectors.count(connector) > 1:
-                LOG.debug('Detected %(count)s connections from host '
-                          '%(host_name)s (IP:%(host_ip)s) to volume '
-                          '%(volume)s, skip terminating connection',
-                          {'count': connectors.count(connector),
-                           'host_name': connector.get('host', 'unknown'),
-                           'host_ip': connector.get('ip', 'unknown'),
-                           'volume': volume['name']})
+                LOG.info('Detected %(count)s connections from host '
+                         '%(host_name)s (IP:%(host_ip)s) to volume '
+                         '%(volume)s, skip terminating connection',
+                         {'count': connectors.count(connector),
+                          'host_name': connector.get('host', 'unknown'),
+                          'host_ip': connector.get('ip', 'unknown'),
+                          'volume': volume['name']})
                 return True
             host_iqn = connector['initiator']
             host_groups.append(options.DEFAULT_HOST_GROUP)
@@ -394,7 +401,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         volume_backend_name = (
             self.configuration.safe_get('volume_backend_name'))
         if not volume_backend_name:
-            LOG.debug('Failed to get configured volume backend name')
+            LOG.error('Failed to get configured volume backend name')
             volume_backend_name = '%(product)s_%(protocol)s' % {
                 'product': self.product_name,
                 'protocol': self.storage_protocol
@@ -450,8 +457,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'max_over_subscription_ratio': max_over_subscription_ratio,
             'reserved_percentage': reserved_percentage,
             'visibility': visibility,
+            'nef_scheme': self.nef.scheme,
+            'nef_hosts': ','.join(self.nef.hosts),
             'nef_port': self.nef.port,
-            'nef_url': self.nef.host
+            'nef_url': self.nef.url()
         }
         LOG.debug('Updated volume backend statistics for host %(host)s '
                   'and volume backend %(volume_backend_name)s: %(stats)s',
@@ -1495,6 +1504,134 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """Return local path to existing local volume."""
         raise NotImplementedError()
 
+    def _migrate_volume(self, volume, scheme, hosts, port, path):
+        """Storage assisted volume migration."""
+        src_hosts = self._get_host_addresses()
+        src_path = self._get_volume_path(volume)
+        dst_path = posixpath.join(path, volume['name'])
+        for dst_host in hosts:
+            if dst_host in src_hosts and src_path == dst_path:
+                LOG.info('Skip local migration for host %(dst_host)s: '
+                         'source volume %(src_path)s and destination '
+                         'volume %(dst_path)s are the same volume',
+                         {'dst_host': dst_host, 'src_path': src_path,
+                          'dst_path': dst_path})
+                return True
+        payload = {'fields': 'name'}
+        try:
+            self.nef.hpr.list(payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Storage assisted volume migration '
+                      'is unavailable: %(error)s',
+                      {'error': error})
+            return False
+        service_name = '%(prefix)s-%(volume)s' % {
+            'prefix': self.migration_service_prefix,
+            'volume': volume['name']
+        }
+        service_created = False
+        for dst_host in hosts:
+            payload = {
+                'name': service_name,
+                'sourceDataset': src_path,
+                'destinationDataset': dst_path,
+                'type': 'scheduled'
+            }
+            if dst_host not in src_hosts:
+                payload['isSource'] = True
+                payload['remoteNode'] = {
+                    'host': dst_host,
+                    'port': port,
+                    'proto': scheme
+                }
+                if self.migration_throttle:
+                    payload['transportOptions'] = {
+                        'throttle': self.migration_throttle * units.Mi
+                    }
+            try:
+                self.nef.hpr.create(payload)
+                service_created = True
+                break
+            except jsonrpc.NefException as error:
+                LOG.error('Failed to create migration service '
+                          'with payload %(payload)s: %(error)s',
+                          {'payload': payload, 'error': error})
+        service_running = False
+        if service_created:
+            try:
+                self.nef.hpr.start(service_name)
+                service_running = True
+            except jsonrpc.NefException as error:
+                LOG.error('Failed to start migration service '
+                          '%(service_name)s: %(error)s',
+                          {'service_name': service_name,
+                           'error': error})
+        service_success = False
+        service_retries = 0
+        while service_running:
+            self.nef.delay(service_retries)
+            service_retries += 1
+            payload = {'fields': 'state,progress,runNumber'}
+            try:
+                service = self.nef.hpr.get(service_name, payload)
+            except jsonrpc.NefException as error:
+                LOG.error('Failed to stat migration service '
+                          '%(service_name)s: %(error)s',
+                          {'service_name': service_name,
+                           'error': error})
+                if service_retries > self.nef.retries:
+                    break
+            service_state = service['state']
+            service_counter = service['runNumber']
+            service_progress = service['progress']
+            if service_state == 'faulted':
+                service_error = service['lastError']
+                LOG.error('Migration service %(service_name)s '
+                          'failed with error: %(service_error)s',
+                          {'service_name': service_name,
+                           'service_error': service_error})
+                service_running = False
+            elif service_state == 'disabled' and service_counter > 0:
+                LOG.info('Migration service %(service_name)s '
+                         'successfully replicated %(src_path)s '
+                         'to %(dst_host)s:%(dst_path)s',
+                         {'service_name': service_name,
+                          'src_path': src_path,
+                          'dst_host': dst_host,
+                          'dst_path': dst_path})
+                service_running = False
+                service_success = True
+            else:
+                LOG.info('Migration service %(service_name)s '
+                         'is %(service_state)s, progress '
+                         '%(service_progress)s%%',
+                         {'service_name': service_name,
+                          'service_state': service_state,
+                          'service_progress': service_progress})
+        if service_created:
+            payload = {
+                'destroySourceSnapshots': True,
+                'destroyDestinationSnapshots': True,
+                'force': True
+            }
+            try:
+                self.nef.hpr.delete(service_name, payload)
+            except jsonrpc.NefException as error:
+                LOG.error('Failed to delete migration service '
+                          '%(service_name)s: %(error)s',
+                          {'service_name': service_name,
+                           'error': error})
+        if not service_success:
+            return False
+        try:
+            self.delete_volume(volume)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to delete source '
+                      'volume %(volume)s: %(error)s',
+                      {'volume': volume['name'],
+                       'error': error})
+        return True
+
     def migrate_volume(self, context, volume, host):
         """Migrate the volume to the specified host.
 
@@ -1507,13 +1644,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                      host['host'] is its name, and host['capabilities'] is a
                      dictionary of its reported capabilities.
         """
-        LOG.debug('Start storage assisted volume migration '
-                  'for volume %(volume)s to host %(host)s',
-                  {'volume': volume['name'],
-                   'host': host['host']})
+        LOG.info('Start storage assisted volume migration '
+                 'for volume %(volume)s to host %(host)s',
+                 {'volume': volume['name'],
+                  'host': host['host']})
         false_ret = (False, None)
         if 'capabilities' not in host:
-            LOG.debug('No host capabilities found for '
+            LOG.error('No host capabilities found for '
                       'the destination host %(host)s',
                       {'host': host['host']})
             return false_ret
@@ -1522,19 +1659,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'vendor_name',
             'location_info',
             'storage_protocol',
-            'free_capacity_gb',
-            'nef_url',
-            'nef_port'
+            'free_capacity_gb'
         ]
         for capability in required_capabilities:
-            if capability not in capabilities:
-                LOG.debug('Required host capability %(capability)s not '
+            if not (capability in capabilities and capabilities[capability]):
+                LOG.error('Required host capability %(capability)s not '
                           'found for the destination host %(host)s',
                           {'capability': capability, 'host': host['host']})
                 return false_ret
         vendor = capabilities['vendor_name']
         if vendor != self.vendor_name:
-            LOG.debug('Unsupported vendor %(vendor)s found '
+            LOG.error('Unsupported vendor %(vendor)s found '
                       'for the destination host %(host)s',
                       {'vendor': vendor, 'host': host['host']})
             return false_ret
@@ -1542,138 +1677,78 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         try:
             driver, san_host, san_path = location.split(':')
         except ValueError as error:
-            LOG.debug('Failed to split location info %(location)s '
+            LOG.error('Failed to parse location info %(location)s '
                       'for the destination host %(host)s: %(error)s',
                       {'location': location, 'host': host['host'],
                        'error': error})
             return false_ret
-        if not (driver and san_path):
-            LOG.debug('Incomplete location info %(location)s '
+        if not (driver and san_host and san_path):
+            LOG.error('Incomplete location info %(location)s '
                       'found for the destination host %(host)s',
                       {'location': location, 'host': host['host']})
             return false_ret
         if driver != self.driver_name:
-            LOG.debug('Unsupported storage driver %(driver)s '
+            LOG.error('Unsupported storage driver %(driver)s '
                       'found for the destination host %(host)s',
                       {'driver': driver, 'host': host['host']})
             return false_ret
-        try:
-            payload = {'fields': 'name'}
-            self.nef.hpr.list(payload)
-        except jsonrpc.NefException as error:
-            LOG.debug('Storage assisted volume migration is unavailable '
-                      'for the destination host %(host)s: %(error)s',
-                      {'host': host['host'], 'error': error})
+        storage_protocol = capabilities['storage_protocol']
+        if storage_protocol != self.storage_protocol:
+            LOG.error('Unsupported storage protocol %(protocol)s '
+                      'found for the destination host %(host)s',
+                      {'protocol': storage_protocol,
+                       'host': host['host']})
             return false_ret
-        src_path = self._get_volume_path(volume)
-        dst_path = posixpath.join(san_path, volume['name'])
-        dst_port = capabilities['nef_port']
-        src_hosts = self._get_host_addresses()
-        dst_hosts = capabilities['nef_url'].split(',')
-        service_name = 'cinder-migrate-%s' % volume['name']
-        service_created = service_running = service_success = False
-        while dst_hosts and not service_created:
-            dst_host = dst_hosts.pop()
-            if dst_host is not None:
-                dst_host = dst_host.strip()
-            payload = {
-                'name': service_name,
-                'sourceDataset': src_path,
-                'destinationDataset': dst_path,
-                'type': 'scheduled'
-            }
-            if dst_host not in src_hosts:
-                payload['isSource'] = True
-                payload['remoteNode'] = {
-                    'host': dst_host,
-                    'port': dst_port
-                }
-            elif src_path == dst_path:
-                LOG.debug('Skip local to local replication: '
-                          'source volume %(src_path)s and '
-                          'destination volume %(dst_path)s '
-                          'are the same volume',
-                          {'src_path': src_path,
-                           'dst_path': dst_path})
-                return True, None
-            try:
-                self.nef.hpr.create(payload)
-                service_created = True
-            except jsonrpc.NefException as error:
-                LOG.debug('Failed to create replication service '
-                          'with payload %(payload)s: %(error)s',
-                          {'payload': payload, 'error': error})
-                if error.code not in ('ENOENT', 'EINVAL'):
-                    return false_ret
-        if service_created:
-            try:
-                self.nef.hpr.start(service_name)
-                service_running = True
-            except jsonrpc.NefException as error:
-                LOG.debug('Failed to start replication service '
-                          '%(service_name)s: %(error)s',
-                          {'service_name': service_name,
-                           'error': error})
-        retry_count = 0
-        while service_running and not service_success:
-            try:
-                service = self.nef.hpr.get(service_name)
-            except jsonrpc.NefException as error:
-                LOG.debug('Failed to stat replication service '
-                          '%(service_name)s: %(error)s',
-                          {'service_name': service_name,
-                           'error': error})
-                break
-            state = service['state']
-            if state == 'faulted':
-                service_error = service['lastError']
-                LOG.debug('Replication service %(service_name)s '
-                          'failed with error: %(service_error)s',
-                          {'service_name': service_name,
-                           'service_error': service_error})
-                break
-            elif state == 'disabled':
-                LOG.debug('Replication service %(service_name)s '
-                          'successfully replicated %(src_path)s '
-                          'to %(dst_host)s:%(dst_path)s',
-                          {'service_name': service_name,
-                           'src_path': src_path,
-                           'dst_host': dst_host,
-                           'dst_path': dst_path})
-                service_running = False
-                service_success = True
-                break
+        free_capacity_gb = capabilities['free_capacity_gb']
+        if free_capacity_gb < volume['size']:
+            LOG.error('There is not enough space available on the '
+                      'destination host %(host)s to migrate volume '
+                      '%(volume)s, available space: %(free)sG, '
+                      'required space: %(required)sG',
+                      {'host': host['host'],
+                       'volume': volume['name'],
+                       'free': free_capacity_gb,
+                       'required': volume['size']})
+            return false_ret
+        nef_scheme = None
+        nef_hosts = []
+        nef_port = None
+        if 'nef_hosts' in capabilities and capabilities['nef_hosts']:
+            for nef_host in capabilities['nef_hosts'].split(','):
+                nef_host = nef_host.strip()
+                if nef_host:
+                    nef_hosts.append(nef_host)
+        elif 'nef_url' in capabilities and capabilities['nef_url']:
+            url = six.moves.urllib.parse.urlparse(capabilities['nef_url'])
+            if url.scheme and url.hostname and url.port:
+                nef_scheme = url.scheme
+                nef_hosts.append(url.hostname)
+                nef_port = url.port
             else:
-                progress = service['progress']
-                LOG.debug('Replication service %(service_name)s '
-                          'is running, progress %(progress)s%%',
-                          {'service_name': service_name,
-                           'progress': progress})
-                self.nef.delay(retry_count)
-                retry_count += 1
-        if service_created:
-            payload = {
-                'destroySourceSnapshots': True,
-                'destroyDestinationSnapshots': True,
-                'force': True
-            }
-            try:
-                self.nef.hpr.delete(service_name, payload)
-            except jsonrpc.NefException as error:
-                LOG.debug('Failed to delete replication service '
-                          '%(service_name)s: %(error)s',
-                          {'service_name': service_name,
-                           'error': error})
-        if not service_success:
+                for nef_host in capabilities['nef_url'].split(','):
+                    nef_host = nef_host.strip()
+                    if nef_host:
+                        nef_hosts.append(nef_host)
+        if not nef_hosts:
+            LOG.error('NEF management address not found for the '
+                      'destination host %(host)s: %(capabilities)s',
+                      {'host': host['host'],
+                       'capabilities': capabilities})
             return false_ret
-        try:
-            self.delete_volume(volume)
-        except jsonrpc.NefException as error:
-            LOG.debug('Failed to delete source '
-                      'volume %(volume)s: %(error)s',
-                      {'volume': volume['name'],
-                       'error': error})
-        return True, None
+        if not nef_scheme:
+            if 'nef_scheme' in capabilities and capabilities['nef_scheme']:
+                nef_scheme = capabilities['nef_scheme']
+            else:
+                nef_scheme = self.nef.scheme
+        if not nef_port:
+            if 'nef_port' in capabilities and capabilities['nef_port']:
+                nef_port = capabilities['nef_port']
+            else:
+                nef_port = self.nef.port
+        if self._migrate_volume(volume, nef_scheme, nef_hosts, nef_port,
+                                san_path):
+            return (True, None)
+        return false_ret
 
     def update_migrated_volume(self, context, volume, new_volume,
                                original_volume_status):
@@ -1696,7 +1771,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         try:
             self.terminate_connection(new_volume, None)
         except jsonrpc.NefException as error:
-            LOG.debug('Failed to terminate all connections '
+            LOG.error('Failed to terminate all connections '
                       'to migrated volume %(volume)s before '
                       'renaming: %(error)s',
                       {'volume': new_volume['name'],
@@ -1704,7 +1779,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         try:
             self.nef.volumes.rename(new_path, payload)
         except jsonrpc.NefException as error:
-            LOG.debug('Failed to rename volume %(new_volume)s '
+            LOG.error('Failed to rename volume %(new_volume)s '
                       'to %(volume)s after migration: %(error)s',
                       {'new_volume': new_volume['name'],
                        'volume': volume['name'],
@@ -1760,7 +1835,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.nef.volumes.set(volume_path, payload)
             retyped = True
         except jsonrpc.NefException as error:
-            LOG.debug('Failed to retype volume %(volume)s: %(error)s',
+            LOG.error('Failed to retype volume %(volume)s: %(error)s',
                       {'volume': volume['name'], 'error': error})
         return retyped or migrated, model_update
 

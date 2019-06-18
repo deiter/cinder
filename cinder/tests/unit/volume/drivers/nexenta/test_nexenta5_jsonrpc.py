@@ -1420,15 +1420,22 @@ class TestNefProxy(test.TestCase):
     def test_url(self):
         path = '/path/to/api'
         result = self.proxy.url(path)
-        expected = '%s://%s:%s%s' % (self.proxy.scheme,
-                                     self.proxy.host,
-                                     self.proxy.port,
-                                     path)
+        expected = '%(scheme)s://%(host)s:%(port)s%(path)s' % {
+            'scheme': self.proxy.scheme,
+            'host': self.proxy.host,
+            'port': self.proxy.port,
+            'path': path
+        }
         self.assertEqual(expected, result)
 
     def test_url_no_path(self):
-        path = ''
-        self.assertRaises(jsonrpc.NefException, self.proxy.url, path)
+        result = self.proxy.url()
+        expected = '%(scheme)s://%(host)s:%(port)s' % {
+            'scheme': self.proxy.scheme,
+            'host': self.proxy.host,
+            'port': self.proxy.port
+        }
+        self.assertEqual(expected, result)
 
     @mock.patch('eventlet.greenthread.sleep')
     def test_delay(self, sleep):
