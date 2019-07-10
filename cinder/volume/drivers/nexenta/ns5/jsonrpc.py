@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -26,6 +25,14 @@ from cinder import exception
 from cinder.i18n import _
 
 LOG = logging.getLogger(__name__)
+
+HTTPS_PORT = 8443
+HTTP_PORT = 8080
+HTTPS = 'https'
+HTTP = 'http'
+AUTO = 'auto'
+NFS = 'nfs'
+ISCSI = 'iscsi'
 
 
 class NefException(exception.VolumeDriverException):
@@ -398,7 +405,7 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
             {
                 'name': self.key('blocksize'),
                 'api': 'volumeBlockSize',
-                'cfg': 'nexenta_ns5_blocksize',
+                'cfg': 'nexenta_blocksize',
                 'title': 'Block size',
                 'retype': _('Volume block size cannot be changed after '
                             'the volume has been created.'),
@@ -503,14 +510,13 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
             {
                 'name': self.key('thin_provisioning'),
                 'api': 'sparseVolume',
-                'cfg': 'nexenta_sparse',
+                'cfg': 'nexenta_sparsed_volumes',
                 'title': 'Thin provisioning',
-                'retype': _('Volume provisioning type cannot be changed '
-                            'after the volume has been created.'),
+                'inherit': _('Provisioning type cannot be inherit.'),
                 'description': _('Controls if a volume is created sparse '
                                  '(with no space reservation).'),
                 'type': 'boolean',
-                'default': False
+                'default': True
             },
             {
                 'name': self.key('sync'),
@@ -559,16 +565,12 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
         self.subj = 'filesystem'
         for prop in self.properties:
             if prop['name'] == self.key('blocksize'):
-                del prop['cfg']
+                del prop['retype']
                 prop['api'] = 'recordSize'
                 prop['description'] = _('Specifies a suggested block size '
                                         'for a volume.')
                 prop['enum'] = [512, 1024, 2048, 4096, 8192, 16384, 32768,
                                 65536, 131072, 262144, 524288, 1048576]
-                prop['default'] = 131072
-            elif prop['name'] == self.key('thin_provisioning'):
-                prop['cfg'] = 'nexenta_sparsed_volumes'
-                prop['default'] = True
         self.properties.append({
             'name': self.key('rate_limit'),
             'api': 'rateLimit',
@@ -579,6 +581,25 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
             'default': 0
         })
         self.properties.append({
+            'name': self.key('nbmand'),
+            'api': 'nonBlockingMandatoryMode',
+            'title': 'Non-blocking mandatory locking',
+            'description': _('Allow or disallow non-blocking mandatory '
+                             'locking semantics for a volume.'),
+            'type': 'boolean',
+            'default': False
+        })
+        self.properties.append({
+            'name': self.key('smart_compression'),
+            'api': 'smartCompression',
+            'title': 'Smart compression',
+            'description': _('Allow or disallow dynamically tracks volume '
+                             'compression ratios to determine if a volume '
+                             'data is compressible or not.'),
+            'type': 'boolean',
+            'default': False
+        })
+        self.properties.append({
             'name': self.key('snapdir'),
             'api': 'snapshotDirectory',
             'title': '.zfs directory visibility',
@@ -587,6 +608,17 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
                              'the volume file system.'),
             'type': 'boolean',
             'default': False
+        })
+        self.properties.append({
+            'name': self.key('format'),
+            'api': 'volumeFormat',
+            'cfg': 'nexenta_volume_format',
+            'title': 'Volume format',
+            'description': _('Controls volume format.'),
+            'enum': ['raw', 'qcow', 'qcow2', 'parallels',
+                     'vdi', 'vhdx', 'vmdk', 'vpc', 'qed'],
+            'type': 'string',
+            'default': 'raw'
         })
 
     def mount(self, name, payload=None):
@@ -741,32 +773,46 @@ class NefProxy(object):
         self.logicalunits = NefLogicalUnits(self)
         self.netaddrs = NefNetAddresses(self)
         self.lock = None
+        self.auto = False
         self.tokens = {}
         self.headers = {
             'Content-Type': 'application/json',
             'X-XSS-Protection': '1'
         }
-        if proto == 'nfs':
+        if proto == NFS:
             self.root = self.filesystems.root
-        elif proto == 'iscsi':
+        elif proto == ISCSI:
             self.root = self.volumegroups.root
         else:
             message = (_('Storage protocol %(proto)s not supported')
                        % {'proto': proto})
             raise NefException(code='EPROTO', message=message)
-        if conf.nexenta_use_https:
-            self.scheme = 'https'
+        if conf.nexenta_use_https is None:
+            self.scheme = conf.nexenta_rest_protocol
+            if self.scheme == AUTO:
+                self.auto = True
+                self.scheme = HTTPS
         else:
-            self.scheme = 'http'
+            if conf.nexenta_use_https:
+                self.scheme = HTTPS
+            else:
+                self.scheme = HTTP
+        if conf.nexenta_rest_port:
+            self.port = conf.nexenta_rest_port
+        else:
+            if self.scheme == HTTPS:
+                self.port = HTTPS_PORT
+            else:
+                self.port = HTTP_PORT
         self.username = conf.nexenta_user
         self.password = conf.nexenta_password
         self.hosts = []
         if conf.nexenta_rest_address:
             for host in conf.nexenta_rest_address.split(','):
                 self.hosts.append(host.strip())
-        elif conf.nexenta_host:
+        elif proto == ISCSI and conf.nexenta_host:
             self.hosts.append(conf.nexenta_host)
-        elif proto == 'nfs' and conf.nas_host:
+        elif proto == NFS and conf.nas_host:
             self.hosts.append(conf.nas_host)
         else:
             message = (_('NexentaStor Rest API address is not defined, '
@@ -775,15 +821,7 @@ class NefProxy(object):
                          'nexenta_host or nas_host configuration options'))
             raise NefException(code='EINVAL', message=message)
         self.host = self.hosts[0]
-        if conf.nexenta_rest_port:
-            self.port = conf.nexenta_rest_port
-        else:
-            if conf.nexenta_use_https:
-                self.port = 8443
-            else:
-                self.port = 8080
         self.path = path
-        self.proto = proto
         self.retries = conf.nexenta_rest_retry_count
         self.backoff_factor = conf.nexenta_rest_backoff_factor
         self.timeout = (conf.nexenta_rest_connect_timeout,

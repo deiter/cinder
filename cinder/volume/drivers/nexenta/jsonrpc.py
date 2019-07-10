@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -27,6 +26,13 @@ from cinder import exception
 from cinder.i18n import _
 
 LOG = logging.getLogger(__name__)
+
+DEFAULT_REST_PORT = 8457
+HTTPS = 'https'
+HTTP = 'http'
+AUTO = 'auto'
+NFS = 'nfs'
+ISCSI = 'iscsi'
 
 
 class NmsException(exception.VolumeDriverException):
@@ -269,14 +275,14 @@ class NmsProxy(object):
         self.lock = 'nms'
         self.auto = False
         self.scheme = conf.nexenta_rest_protocol
-        if self.scheme == 'auto':
+        if self.scheme == AUTO:
             self.auto = True
-            self.scheme = 'http'
+            self.scheme = HTTP
         if conf.nexenta_rest_address:
             self.host = conf.nexenta_rest_address
-        elif conf.nexenta_host:
+        elif proto == ISCSI and conf.nexenta_host:
             self.host = conf.nexenta_host
-        elif proto == 'nfs' and conf.nas_host:
+        elif proto == NFS and conf.nas_host:
             self.host = conf.nas_host
         else:
             message = (_('NexentaStor Rest API address is not defined, '
@@ -287,7 +293,7 @@ class NmsProxy(object):
         if conf.nexenta_rest_port:
             self.port = conf.nexenta_rest_port
         else:
-            self.port = 8457
+            self.port = DEFAULT_REST_PORT
         self.headers = {
             'Content-Type': 'application/json',
             'X-Requested-With': 'XMLHttpRequest'

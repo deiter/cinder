@@ -1,4 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc. All Rights Reserved.
+# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -35,6 +35,9 @@ from cinder.volume.drivers.nexenta import jsonrpc
 from cinder.volume.drivers.nexenta import options
 
 LOG = logging.getLogger(__name__)
+
+DEFAULT_HOST_GROUP = 'All'
+DEFAULT_TARGET_GROUP = 'All'
 
 
 @interface.volumedriver
@@ -98,9 +101,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                           'storage_protocol': self.storage_protocol})
             raise jsonrpc.NmsException(code='EINVAL', message=message)
         self.configuration.append_config_values(
-            options.NEXENTA_CONNECTION_OPTS)
-        self.configuration.append_config_values(options.NEXENTA_ISCSI_OPTS)
-        self.configuration.append_config_values(options.NEXENTA_DATASET_OPTS)
+            options.NEXENTASTOR4_ISCSI_OPTS)
         required_options = ['nexenta_host', 'nexenta_volume', 'nexenta_user',
                             'nexenta_password']
         for option in required_options:
@@ -113,6 +114,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                               'option': option})
                 raise jsonrpc.NmsException(code='EINVAL', message=message)
         self.nms = None
+        self.san_stat = None
         self.mappings = {}
         self.driver_name = self.__class__.__name__
         self.san_host = self.configuration.nexenta_host
@@ -120,6 +122,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.folder = self.configuration.nexenta_folder
         self.volume_compression = (
             self.configuration.nexenta_dataset_compression)
+        self.volume_dedup = self.configuration.nexenta_dataset_dedup
         self.volume_blocksize = self.configuration.nexenta_blocksize
         self.volume_sparse = self.configuration.nexenta_sparse
         self.tpgs = self.configuration.nexenta_iscsi_target_portal_groups
@@ -128,7 +131,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.configuration.nexenta_target_group_prefix)
         self.host_group_prefix = self.configuration.nexenta_host_group_prefix
         self.lpt = self.configuration.nexenta_luns_per_target
-        self.portal_port = self.configuration.nexenta_iscsi_target_portal_port
+        self.san_port = self.configuration.nexenta_iscsi_target_portal_port
         self.origin_snapshot_template = (
             self.configuration.nexenta_origin_snapshot_template)
         self.migration_snapshot_prefix = (
@@ -138,21 +141,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.migration_throttle = (
             self.configuration.nexenta_migration_throttle)
         if self.folder:
-            self.root_path = posixpath.join(self.volume, self.folder)
+            self.san_path = posixpath.join(self.volume, self.folder)
         else:
-            self.root_path = self.volume
+            self.san_path = self.volume
 
     @staticmethod
     def get_driver_options():
-        return (
-            options.NEXENTA_CONNECTION_OPTS +
-            options.NEXENTA_ISCSI_OPTS +
-            options.NEXENTA_DATASET_OPTS
-        )
+        return options.NEXENTASTOR4_ISCSI_OPTS
 
     def do_setup(self, context):
         self.nms = jsonrpc.NmsProxy(self.driver_volume_type,
-                                    self.root_path,
+                                    self.san_path,
                                     self.configuration)
 
     def check_for_setup_error(self):
@@ -161,10 +160,11 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             message = (_('Volume %(volume)s not found')
                        % {'volume': self.volume})
             raise jsonrpc.NmsException(code='ENOENT', message=message)
-        if not self.nms.folder.object_exists(self.root_path):
+        if not self.nms.folder.object_exists(self.san_path):
             message = (_('Folder %(folder)s not found')
-                       % {'folder': self.root_path})
+                       % {'folder': self.san_path})
             raise jsonrpc.NmsException(code='ENOENT', message=message)
+        self.san_stat = self.nms.folder.get_child_props(self.san_path, '')
         host_tpgs = self.nms.iscsitarget.list_tpg()
         for tpg in self.tpgs:
             if tpg in host_tpgs:
@@ -175,14 +175,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
     def _get_volume_path(self, volume):
         """Return ZFS datset path for the volume."""
-        return posixpath.join(self.root_path, volume['name'])
+        volume_name = volume['name']
+        volume_path = posixpath.join(self.san_path, volume_name)
+        return volume_path
 
     def _get_snapshot_path(self, snapshot):
         """Return ZFS snapshot path for the snapshot."""
         volume_name = snapshot['volume_name']
         snapshot_name = snapshot['name']
-        volume_path = posixpath.join(self.root_path, volume_name)
-        return '%s@%s' % (volume_path, snapshot_name)
+        volume_path = posixpath.join(self.san_path, volume_name)
+        snapshot_path = '%s@%s' % (volume_path, snapshot_name)
+        return snapshot_path
 
     @staticmethod
     def _match_template(template, name):
@@ -229,7 +232,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         volume_size = '%sG' % volume['size']
         volume_blocksize = six.text_type(self.volume_blocksize)
         volume_sparsed = self.volume_sparse
-        volume_options = {'compression': self.volume_compression}
+        volume_options = {}
+        if self.volume_compression:
+            volume_options['compression'] = self.volume_compression
         self.nms.zvol.create_with_props(volume_path, volume_size,
                                         volume_blocksize,
                                         volume_sparsed,
@@ -858,7 +863,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         portals = []
         addresses = self._get_host_addresses()
         for address in addresses:
-            portal = '%s:%s' % (address, self.portal_port)
+            portal = '%s:%s' % (address, self.san_port)
             portals.append(portal)
         LOG.debug('Configured iSCSI portals: %(portals)s',
                   {'portals': portals})
@@ -867,7 +872,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
     def _get_host_portal_groups(self):
         """Return NexentaStor iSCSI portal groups dictionary."""
         portal_groups = {}
-        default_portal = '%s:%s' % (self.san_host, self.portal_port)
+        default_portal = '%s:%s' % (self.san_host, self.san_port)
         host_portals = self._get_host_portals()
         host_portal_groups = self.nms.iscsitarget.list_tpg()
         for group in host_portal_groups:
@@ -903,7 +908,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
     def _get_host_targets(self):
         """Return NexentaStor iSCSI targets dictionary."""
         targets = {}
-        default_portal = '%s:%s' % (self.san_host, self.portal_port)
+        default_portal = '%s:%s' % (self.san_host, self.san_port)
         host_portal_groups = self._get_host_portal_groups()
         stmf_targets = self.nms.stmf.list_targets()
         for name in stmf_targets:
@@ -998,7 +1003,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                   {'volume': volume['name'], 'initiator': host_iqn})
         suffix = uuid.uuid4().hex
         host_targets = self._get_host_targets()
-        host_groups = ['All']
+        host_groups = [DEFAULT_HOST_GROUP]
         host_group = self._get_host_group(host_iqn)
         if host_group:
             host_groups.append(host_group)
@@ -1013,7 +1018,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             mapping_hg = mapping['host_group']
             mapping_tg = mapping['target_group']
             mapping_id = mapping['entry_number']
-            if mapping_tg == 'All':
+            if mapping_tg == DEFAULT_TARGET_GROUP:
                 LOG.debug('Delete LUN mapping %(id)s for target group %(tg)s',
                           {'id': mapping_id, 'tg': mapping_tg})
                 self.nms.scsidisk.remove_lun_mapping_entry(volume_path,
@@ -1194,7 +1199,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                            'volume': volume['name']})
                 return True
             host_iqn = connector['initiator']
-            host_groups.append('All')
+            host_groups.append(DEFAULT_HOST_GROUP)
             host_group = self._get_host_group(host_iqn)
             if host_group is not None:
                 host_groups.append(host_group)
@@ -1289,17 +1294,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """Retrieve stats info for NexentaStor appliance."""
         stats = {'available': None, 'used': None}
         payload = '|'.join(stats.keys())
-        props = self.nms.folder.get_child_props(self.root_path, payload)
+        props = self.nms.folder.get_child_props(self.san_path, payload)
         for key in stats:
             if not props.get(key):
                 LOG.error('Unable to get %(key)s statistics for %(path)s '
                           'from properties %(props)s',
-                          {'path': self.root_path, 'props': props})
+                          {'path': self.san_path, 'props': props})
                 continue
             text = '%sB' % props[key]
             try:
                 value = strutils.string_to_bytes(text, return_int=True)
-                stats[key] = value
+                stats[key] = value // units.Gi
             except ValueError as error:
                 LOG.error('Failed to convert text value %(text)s to '
                           'bytes for the %(key)s property: %(error)s',
@@ -1309,15 +1314,27 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             free_capacity_gb = 'unknown'
             total_capacity_gb = 'unknown'
         else:
-            free_capacity_gb = stats['available'] // units.Gi
-            allocated_capacity_gb = stats['used'] // units.Gi
+            free_capacity_gb = stats['available']
+            allocated_capacity_gb = stats['used']
             total_capacity_gb = free_capacity_gb + allocated_capacity_gb
-        provisioned_capacity_gb = total_volumes = 0
+        provisioned_capacity_gb = total_volumes = total_snapshots = 0
         ctxt = context.get_admin_context()
         volumes = objects.VolumeList.get_all_by_host(ctxt, self.host)
         for volume in volumes:
             provisioned_capacity_gb += volume['size']
             total_volumes += 1
+        snapshots = objects.SnapshotList.get_by_host(ctxt, self.host)
+        for snapshot in snapshots:
+            provisioned_capacity_gb += snapshot['volume_size']
+            total_snapshots += 1
+        if self.volume_compression:
+            compression = self.volume_compression
+        else:
+            compression = self.san_stat['compression']
+        if self.volume_dedup:
+            dedup = self.volume_dedup
+        else:
+            dedup = self.san_stat['dedup']
         volume_backend_name = (
             self.configuration.safe_get('volume_backend_name'))
         if not volume_backend_name:
@@ -1343,8 +1360,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             reserved_percentage = 0
         location_info = '%(driver)s:%(host)s:%(path)s' % {
             'driver': self.driver_name,
-            'host': self.configuration.nexenta_host,
-            'path': self.root_path
+            'host': self.san_host,
+            'path': self.san_path
         }
         display_name = 'Capabilities of %(product)s %(protocol)s driver' % {
             'product': self.product_name,
@@ -1373,12 +1390,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'free_capacity_gb': free_capacity_gb,
             'provisioned_capacity_gb': provisioned_capacity_gb,
             'total_volumes': total_volumes,
+            'total_snapshots': total_snapshots,
             'max_over_subscription_ratio': max_over_subscription_ratio,
             'reserved_percentage': reserved_percentage,
             'visibility': visibility,
-            'dedup': self.configuration.nexenta_dataset_dedup,
-            'compression': self.configuration.nexenta_dataset_compression,
-            'iscsi_target_portal_port': self.portal_port,
+            'dedup': dedup,
+            'compression': compression,
+            'iscsi_target_portal_port': self.san_port,
             'nms_url': self.nms.url
         }
         LOG.debug('Updated volume backend statistics for host %(host)s '

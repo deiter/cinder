@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -21,6 +20,8 @@ import os
 import posixpath
 
 from eventlet import greenthread
+from os_brick.remotefs import remotefs
+from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_utils import strutils
 from oslo_utils import timeutils
@@ -32,6 +33,7 @@ from cinder.i18n import _
 from cinder import interface
 from cinder import objects
 from cinder.privsep import fs
+from cinder import utils as cinder_utils
 from cinder.volume.drivers.nexenta import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers import nfs
@@ -83,7 +85,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
     storage_protocol = 'NFS'
     driver_volume_type = 'nfs'
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, execute=processutils.execute, *args, **kwargs):
+        self._remotefsclient = None
         super(NexentaNfsDriver, self).__init__(*args, **kwargs)
         if not self.configuration:
             message = (_('%(product_name)s %(storage_protocol)s '
@@ -91,10 +94,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        % {'product_name': self.product_name,
                           'storage_protocol': self.storage_protocol})
             raise jsonrpc.NmsException(code='EINVAL', message=message)
-        self.configuration.append_config_values(
-            options.NEXENTA_CONNECTION_OPTS)
-        self.configuration.append_config_values(options.NEXENTA_NFS_OPTS)
-        self.configuration.append_config_values(options.NEXENTA_DATASET_OPTS)
+        self.configuration.append_config_values(options.NEXENTASTOR4_NFS_OPTS)
         required_options = ['nas_host', 'nas_share_path', 'nexenta_user',
                             'nexenta_password']
         for option in required_options:
@@ -106,13 +106,36 @@ class NexentaNfsDriver(nfs.NfsDriver):
                               'storage_protocol': self.storage_protocol,
                               'option': option})
                 raise jsonrpc.NmsException(code='EINVAL', message=message)
-        self.nms = None
+        root_helper = cinder_utils.get_root_helper()
+        mount_point_base = self.configuration.nexenta_mount_point_base
+        self.mount_point_base = os.path.realpath(mount_point_base)
+        nfs_options = self.configuration.safe_get('nfs_mount_options')
+        nas_options = self.configuration.safe_get('nas_mount_options')
+        if nfs_options and nas_options:
+            LOG.debug('Overriding NFS mount options: '
+                      'nfs_mount_options = "%(nfs_options)s" with '
+                      'nas_mount_options = "%(nas_options)s"',
+                      {'nfs_options': nfs_options,
+                       'nas_options': nas_options})
+        if nas_options:
+            self.mount_options = nas_options
+        elif nfs_options:
+            self.mount_options = nfs_options
+        else:
+            self.mount_options = None
+        self._remotefsclient = remotefs.RemoteFsClient(
+            self.driver_volume_type,
+            root_helper, execute=execute,
+            nfs_mount_point_base=self.mount_point_base,
+            nfs_mount_options=self.mount_options)
         self.driver_name = self.__class__.__name__
+        self.nms = None
+        self.nas_stat = None
         self.nas_host = self.configuration.nas_host
-        self.root_path = self.configuration.nas_share_path
-        self.mount_point_base = self.configuration.nexenta_mount_point_base
+        self.nas_path = self.configuration.nas_share_path
         self.volume_compression = (
             self.configuration.nexenta_dataset_compression)
+        self.volume_dedup = self.configuration.nexenta_dataset_dedup
         self.sparsed_volumes = self.configuration.nexenta_sparsed_volumes
         self.origin_snapshot_template = (
             self.configuration.nexenta_origin_snapshot_template)
@@ -122,47 +145,46 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.configuration.nexenta_migration_service_prefix)
         self.migration_throttle = (
             self.configuration.nexenta_migration_throttle)
+        self.nbmand = 'on' if self.configuration.nexenta_nbmand else 'off'
 
     @staticmethod
     def get_driver_options():
-        return (
-            options.NEXENTA_CONNECTION_OPTS +
-            options.NEXENTA_NFS_OPTS +
-            options.NEXENTA_DATASET_OPTS
-        )
+        return options.NEXENTASTOR4_NFS_OPTS
 
     def do_setup(self, context):
         self.nms = jsonrpc.NmsProxy(self.driver_volume_type,
-                                    self.root_path,
+                                    self.nas_path,
                                     self.configuration)
 
     def check_for_setup_error(self):
         """Check root filesystem, NFS service and NFS share."""
-        if not self.nms.folder.object_exists(self.root_path):
+        if not self.nms.folder.object_exists(self.nas_path):
             message = (_('NFS root filesystem %(path)s not found')
-                       % {'path': self.root_path})
+                       % {'path': self.nas_path})
             raise jsonrpc.NmsException(code='ENOENT', message=message)
-        filesystem = self.nms.folder.get_child_props(self.root_path, '')
-        if filesystem['mountpoint'] == 'none':
+        self.nas_stat = self.nms.folder.get_child_props(self.nas_path, '')
+        if self.nas_stat['mountpoint'] == 'none':
             message = (_('NFS root filesystem %(path)s is not writable')
-                       % {'path': self.root_path})
+                       % {'path': self.nas_path})
             raise jsonrpc.NefException(code='ENOENT', message=message)
-        if filesystem['mounted'] == 'no':
+        if self.nas_stat['mounted'] == 'no':
             message = (_('NFS root filesystem %(path)s is not mounted')
-                       % {'path': self.root_path})
+                       % {'path': self.nas_path})
             raise jsonrpc.NefException(code='ENOTDIR', message=message)
-        if filesystem['nbmand'] == 'on':
-            self.nms.folder.set_child_prop(self.root_path, 'nbmand', 'off')
+        if self.nas_stat['nbmand'] != self.nbmand:
+            self.nms.folder.set_child_prop(self.nas_path, 'nbmand',
+                                           self.nbmand)
+            self.nas_stat['nbmand'] = self.nbmand
         fmri = 'svc:/network/nfs/server:default'
         state = self.nms.netsvc.get_state(fmri)
         if state != 'online':
             message = (_('NFS service is not online: %(state)s')
                        % {'state': state})
             raise jsonrpc.NmsException(code='ESRCH', message=message)
-        shared = self.nms.netstorsvc.is_folder_shared(fmri, self.root_path)
+        shared = self.nms.netstorsvc.is_folder_shared(fmri, self.nas_path)
         if not shared:
             message = (_('NFS root filesystem %(path)s is not shared')
-                       % {'path': self.root_path})
+                       % {'path': self.nas_path})
             raise jsonrpc.NmsException(code='ENOENT', message=message)
 
     def create_volume(self, volume):
@@ -172,10 +194,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :return: model update dict for volume reference
         """
         volume_path = self._get_volume_path(volume)
-        volume_options = {
-            'compression': self.volume_compression
-        }
-        self.nms.folder.create_with_props(self.root_path,
+        volume_options = {}
+        if self.volume_compression:
+            volume_options['compression'] = self.volume_compression
+        self.nms.folder.create_with_props(self.nas_path,
                                           volume['name'],
                                           volume_options)
         try:
@@ -418,19 +440,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'export': share,
             'name': 'volume'
         }
-        nfs_options = self.configuration.safe_get('nfs_mount_options')
-        nas_options = self.configuration.safe_get('nas_mount_options')
-        if nfs_options and nas_options:
-            LOG.debug('Overriding NFS mount options for volume %(volume)s: '
-                      'nfs_mount_options = "%(nfs_options)s" with '
-                      'nas_mount_options = "%(nas_options)s"',
-                      {'volume': volume['name'],
-                       'nfs_options': nfs_options,
-                       'nas_options': nas_options})
-        if nas_options:
-            data['options'] = '-o %s' % nas_options
-        elif nfs_options:
-            data['options'] = '-o %s' % nfs_options
+        if self.mount_options:
+            data['options'] = '-o %s' % self.mount_options
         info = {
             'driver_volume_type': self.driver_volume_type,
             'mount_point_base': self.mount_point_base,
@@ -983,20 +994,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor appliance."""
-        pool_name = self.root_path.split('/')[0]
+        pool_name = self.nas_path.split('/')[0]
         stats = {'available': None, 'used': None}
         payload = '|'.join(stats.keys())
-        props = self.nms.folder.get_child_props(self.root_path, payload)
+        props = self.nms.folder.get_child_props(self.nas_path, payload)
         for key in stats:
             if not props.get(key):
                 LOG.error('Unable to get %(key)s statistics for %(path)s '
                           'from properties %(props)s',
-                          {'path': self.root_path, 'props': props})
+                          {'path': self.nas_path, 'props': props})
                 continue
             text = '%sB' % props[key]
             try:
                 value = strutils.string_to_bytes(text, return_int=True)
-                stats[key] = value
+                stats[key] = value // units.Gi
             except ValueError as error:
                 LOG.error('Failed to convert text value %(text)s to '
                           'bytes for the %(key)s property: %(error)s',
@@ -1006,15 +1017,27 @@ class NexentaNfsDriver(nfs.NfsDriver):
             free_capacity_gb = 'unknown'
             total_capacity_gb = 'unknown'
         else:
-            free_capacity_gb = stats['available'] // units.Gi
-            allocated_capacity_gb = stats['used'] // units.Gi
+            free_capacity_gb = stats['available']
+            allocated_capacity_gb = stats['used']
             total_capacity_gb = free_capacity_gb + allocated_capacity_gb
-        provisioned_capacity_gb = total_volumes = 0
+        provisioned_capacity_gb = total_volumes = total_snapshots = 0
         ctxt = context.get_admin_context()
         volumes = objects.VolumeList.get_all_by_host(ctxt, self.host)
         for volume in volumes:
             provisioned_capacity_gb += volume['size']
             total_volumes += 1
+        snapshots = objects.SnapshotList.get_by_host(ctxt, self.host)
+        for snapshot in snapshots:
+            provisioned_capacity_gb += snapshot['volume_size']
+            total_snapshots += 1
+        if self.volume_compression:
+            compression = self.volume_compression
+        else:
+            compression = self.nas_stat['compression']
+        if self.volume_dedup:
+            dedup = self.volume_dedup
+        else:
+            dedup = self.nas_stat['dedup']
         volume_backend_name = (
             self.configuration.safe_get('volume_backend_name'))
         if not volume_backend_name:
@@ -1028,8 +1051,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if not description:
             description = '%(product)s %(host)s:%(path)s' % {
                 'product': self.product_name,
-                'host': self.configuration.nas_host,
-                'path': self.configuration.nas_share_path
+                'host': self.nas_host,
+                'path': self.nas_path
             }
         max_over_subscription_ratio = (
             self.configuration.safe_get('max_over_subscription_ratio'))
@@ -1039,8 +1062,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             reserved_percentage = 0
         location_info = '%(driver)s:%(host)s:%(path)s' % {
             'driver': self.driver_name,
-            'host': self.configuration.nas_host,
-            'path': self.configuration.nas_share_path
+            'host': self.nas_host,
+            'path': self.nas_path
         }
         display_name = 'Capabilities of %(product)s %(protocol)s driver' % {
             'product': self.product_name,
@@ -1069,11 +1092,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'free_capacity_gb': free_capacity_gb,
             'provisioned_capacity_gb': provisioned_capacity_gb,
             'total_volumes': total_volumes,
+            'total_snapshots': total_snapshots,
             'max_over_subscription_ratio': max_over_subscription_ratio,
             'reserved_percentage': reserved_percentage,
             'visibility': visibility,
-            'dedup': self.configuration.nexenta_dataset_dedup,
-            'compression': self.configuration.nexenta_dataset_compression,
+            'dedup': dedup,
+            'compression': compression,
             'nms_url': self.nms.url
         }
         LOG.debug('Updated volume backend statistics for host %(host)s '
@@ -1084,14 +1108,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def _get_volume_path(self, volume):
         """Return ZFS datset path for the volume."""
-        return posixpath.join(self.root_path, volume['name'])
+        volume_name = volume['name']
+        volume_path = posixpath.join(self.nas_path, volume_name)
+        return volume_path
 
     def _get_snapshot_path(self, snapshot):
         """Return ZFS snapshot path for the snapshot."""
         volume_name = snapshot['volume_name']
         snapshot_name = snapshot['name']
-        volume_path = posixpath.join(self.root_path, volume_name)
-        return '%s@%s' % (volume_path, snapshot_name)
+        volume_path = posixpath.join(self.nas_path, volume_name)
+        snapshot_path = '%s@%s' % (volume_path, snapshot_name)
+        return snapshot_path
 
     def _get_host_addresses(self):
         """Return NexentaStor IP addresses list."""
