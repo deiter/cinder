@@ -192,7 +192,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         sparsed_volume = payload.pop('sparseVolume')
         volume_format = payload.pop('volumeFileFormat')
         extra_options = payload.pop('volumeFormatOptions')
-        format_options = 'size=%d' % volume['size'] * units.Gi
+        format_options = 'size=%dG' % volume['size']
         if extra_options:
             format_options = '%s,%s' % (extra_options, format_options)
         payload.update({'path': volume_path})
