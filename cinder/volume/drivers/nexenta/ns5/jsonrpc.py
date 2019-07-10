@@ -606,7 +606,7 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
             'title': 'Volume format options',
             'description': _('Controls volume format options'),
             'type': 'string',
-            'default': None
+            'default': ''
         })
 
     def mount(self, name, payload=None):
