@@ -84,18 +84,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.8.2 - Added manage/unmanage/manageable-list volume/snapshot support.
         1.8.3 - Added consistency group capability to generic volume group.
         1.8.4 - Refactored storage assisted volume migration.
-                Added support for volume retype.
-                Added support for volume type extra specs.
-                Added vendor capabilities support.
+              - Added support for volume retype.
+              - Added support for volume type extra specs.
+              - Added vendor capabilities support.
         1.8.5 - Fixed NFS protocol version for generic volume migration.
         1.8.6 - Fixed post-migration volume mount.
         1.8.7 - Added workaround for pagination.
         1.8.8 - Improved error messages.
               - Improved compatibility with initial driver versions.
               - Added throttle for storage assisted volume migration.
+        1.8.9 - Added qcow2 format support.
+              - Fixed space reservation calculation.
     """
 
-    VERSION = '1.8.8'
+    VERSION = '1.8.9'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -174,6 +176,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'state': share['shareState']})
             raise jsonrpc.NefException(code='ESRCH', message=message)
 
+    def _create_volume_file(self, path, fmt, opts):
+        self._execute('qemu-img', 'create', '-f', fmt, '-o', opts,
+                      path, run_as_root=self._execute_as_root)
+
     @coordination.synchronized('{self.nef.lock}')
     def create_volume(self, volume):
         """Creates a volume.
@@ -183,30 +189,19 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_path = self._get_volume_path(volume)
         properties = self.nef.filesystems.properties
         payload = self._get_vendor_properties(volume, properties)
-        sparsed_volume = payload.pop('sparseVolume', True)
+        sparsed_volume = payload.pop('sparseVolume')
+        volume_format = payload.pop('volumeFileFormat')
+        extra_options = payload.pop('volumeFormatOptions')
+        format_options = 'size=%d' % volume['size'] * units.Gi
+        if extra_options:
+            format_options = '%s,%s' % (extra_options, format_options)
         payload.update({'path': volume_path})
         self.nef.filesystems.create(payload)
         try:
             self._set_volume_acl(volume)
             self._mount_volume(volume)
             volume_file = self.local_path(volume)
-            if sparsed_volume:
-                self._create_sparsed_file(volume_file, volume['size'])
-            else:
-                payload = {'source': True}
-                filesystem = self.nef.filesystems.get(volume_path, payload)
-                compression = filesystem['compressionMode']
-                source = filesystem['source']['compressionMode']
-                if compression != 'off':
-                    payload = {'compressionMode': 'off'}
-                    self.nef.filesystems.set(volume_path, payload)
-                self._create_regular_file(volume_file, volume['size'])
-                if compression != 'off':
-                    if source in ['local', 'received']:
-                        payload = {'compressionMode': compression}
-                    else:
-                        payload = {'compressionMode': None}
-                    self.nef.filesystems.set(volume_path, payload)
+            self._create_volume_file(volume_file, volume_format, format_options)
         except jsonrpc.NefException as create_error:
             try:
                 payload = {'force': True}

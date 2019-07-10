@@ -588,6 +588,26 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
             'type': 'boolean',
             'default': False
         })
+        self.properties.append({
+            'name': self.key('file_format'),
+            'api': 'volumeFileFormat',
+            'cfg': 'nexenta_volume_file_format',
+            'title': 'Volume file format',
+            'description': _('Controls volume format'),
+            'enum': ['raw', 'qcow', 'qcow2', 'parallels',
+                     'vdi', 'vhdx', 'vmdk', 'vpc', 'qed'],
+            'type': 'string',
+            'default': 'raw'
+        })
+        self.properties.append({
+            'name': self.key('format_options'),
+            'api': 'volumeFormatOptions',
+            'cfg': 'nexenta_volume_format_options',
+            'title': 'Volume format options',
+            'description': _('Controls volume format options'),
+            'type': 'string',
+            'default': None
+        })
 
     def mount(self, name, payload=None):
         LOG.debug('Mount %(subj)s %(name)s: %(payload)s',
