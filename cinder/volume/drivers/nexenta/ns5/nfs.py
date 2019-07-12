@@ -187,21 +187,21 @@ class NexentaNfsDriver(nfs.NfsDriver):
         properties = self.nef.filesystems.properties
         payload = self._get_vendor_properties(volume, properties)
         sparsed_volume = payload.pop('sparseVolume')
-        volume_format = payload.pop('volumeFileFormat')
-        extra_options = payload.pop('volumeFormatOptions')
-        volume_options = 'size=%dG' % volume['size']
-        if extra_options:
-            format_options = '%s,%s' % (extra_options, format_options)
+        file_format = payload.pop('fileFormat')
+        file_options = payload.pop('fileOptions')
+        size_options = 'size=%dG' % volume['size']
+        if file_options:
+            file_options = '%s,%s' % (file_options, size_options)
         payload.update({'path': volume_path})
         self.nef.filesystems.create(payload)
         try:
-            volume_file = self.local_path(volume)
+            file_path = self.local_path(volume)
             self._set_volume_acl(volume)
             self._mount_volume(volume)
             self._execute('qemu-img', 'create',
-                          '-f', volume_format,
-                          '-o', volume_options,
-                          volume_file,
+                          '-f', file_format,
+                          '-o', file_options,
+                          file_path,
                           run_as_root=True)
         except jsonrpc.NefException as create_error:
             try:

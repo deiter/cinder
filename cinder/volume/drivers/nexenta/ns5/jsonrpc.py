@@ -585,9 +585,10 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
         })
         self.properties.append({
             'name': self.key('file_format'),
+            'api': 'fileFormat',
             'cfg': 'nexenta_volume_file_format',
             'title': 'Volume file format',
-            'description': _('Controls volume file format'),
+            'description': _('Controls volume file format.'),
             'enum': ['raw', 'qcow', 'qcow2', 'parallels',
                      'vdi', 'vhdx', 'vmdk', 'vpc', 'qed'],
             'type': 'string',
@@ -595,9 +596,10 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
         })
         self.properties.append({
             'name': self.key('file_options'),
+            'api': 'fileOptions',
             'cfg': 'nexenta_volume_file_options',
             'title': 'Volume file options',
-            'description': _('Controls volume file options'),
+            'description': _('Controls volume file options.'),
             'type': 'string',
             'default': ''
         })
