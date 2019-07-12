@@ -398,7 +398,7 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
             {
                 'name': self.key('blocksize'),
                 'api': 'volumeBlockSize',
-                'cfg': 'nexenta_ns5_blocksize',
+                'cfg': 'nexenta_blocksize',
                 'title': 'Block size',
                 'retype': _('Volume block size cannot be changed after '
                             'the volume has been created.'),
@@ -503,14 +503,14 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
             {
                 'name': self.key('thin_provisioning'),
                 'api': 'sparseVolume',
-                'cfg': 'nexenta_sparse',
+                'cfg': 'nexenta_sparsed_volumes',
                 'title': 'Thin provisioning',
                 'retype': _('Volume provisioning type cannot be changed '
                             'after the volume has been created.'),
                 'description': _('Controls if a volume is created sparse '
                                  '(with no space reservation).'),
                 'type': 'boolean',
-                'default': False
+                'default': True
             },
             {
                 'name': self.key('sync'),
@@ -559,16 +559,11 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
         self.subj = 'filesystem'
         for prop in self.properties:
             if prop['name'] == self.key('blocksize'):
-                del prop['cfg']
                 prop['api'] = 'recordSize'
                 prop['description'] = _('Specifies a suggested block size '
                                         'for a volume.')
                 prop['enum'] = [512, 1024, 2048, 4096, 8192, 16384, 32768,
                                 65536, 131072, 262144, 524288, 1048576]
-                prop['default'] = 131072
-            elif prop['name'] == self.key('thin_provisioning'):
-                prop['cfg'] = 'nexenta_sparsed_volumes'
-                prop['default'] = True
         self.properties.append({
             'name': self.key('rate_limit'),
             'api': 'rateLimit',
@@ -590,21 +585,19 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
         })
         self.properties.append({
             'name': self.key('file_format'),
-            'api': 'volumeFileFormat',
             'cfg': 'nexenta_volume_file_format',
             'title': 'Volume file format',
-            'description': _('Controls volume format'),
+            'description': _('Controls volume file format'),
             'enum': ['raw', 'qcow', 'qcow2', 'parallels',
                      'vdi', 'vhdx', 'vmdk', 'vpc', 'qed'],
             'type': 'string',
             'default': 'raw'
         })
         self.properties.append({
-            'name': self.key('format_options'),
-            'api': 'volumeFormatOptions',
-            'cfg': 'nexenta_volume_format_options',
-            'title': 'Volume format options',
-            'description': _('Controls volume format options'),
+            'name': self.key('file_options'),
+            'cfg': 'nexenta_volume_file_options',
+            'title': 'Volume file options',
+            'description': _('Controls volume file options'),
             'type': 'string',
             'default': ''
         })
@@ -803,7 +796,6 @@ class NefProxy(object):
             else:
                 self.port = 8080
         self.path = path
-        self.proto = proto
         self.retries = conf.nexenta_rest_retry_count
         self.backoff_factor = conf.nexenta_rest_backoff_factor
         self.timeout = (conf.nexenta_rest_connect_timeout,

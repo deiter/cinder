@@ -120,9 +120,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.configuration.append_config_values(
             options.NEXENTA_DATASET_OPTS)
         self.nef = None
+        self.root = None
         self.driver_name = self.__class__.__name__
         self.nas_host = self.configuration.nas_host
-        self.root_path = self.configuration.nas_share_path
+        self.path = self.configuration.nas_share_path
         self.mount_point_base = self.configuration.nexenta_mount_point_base
         self.group_snapshot_template = (
             self.configuration.nexenta_group_snapshot_template)
@@ -143,42 +144,38 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def do_setup(self, context):
         self.nef = jsonrpc.NefProxy(self.driver_volume_type,
-                                    self.root_path,
+                                    self.path,
                                     self.configuration)
 
     def check_for_setup_error(self):
         """Check root filesystem, NFS service and NFS share."""
-        filesystem = self.nef.filesystems.get(self.root_path)
-        if filesystem['mountPoint'] == 'none':
+        self.root = self.nef.filesystems.get(self.path)
+        if self.root['mountPoint'] == 'none':
             message = (_('NFS root filesystem %(path)s is not writable')
-                       % {'path': filesystem['mountPoint']})
+                       % {'path': self.root['mountPoint']})
             raise jsonrpc.NefException(code='ENOENT', message=message)
-        if not filesystem['isMounted']:
+        if not self.root['isMounted']:
             message = (_('NFS root filesystem %(path)s is not mounted')
-                       % {'path': filesystem['mountPoint']})
+                       % {'path': self.root['mountPoint']})
             raise jsonrpc.NefException(code='ENOTDIR', message=message)
         payload = {}
-        if filesystem['nonBlockingMandatoryMode']:
+        if self.root['nonBlockingMandatoryMode']:
             payload['nonBlockingMandatoryMode'] = False
-        if filesystem['smartCompression']:
+        if self.root['smartCompression']:
             payload['smartCompression'] = False
         if payload:
-            self.nef.filesystems.set(self.root_path, payload)
+            self.nef.filesystems.set(self.path, payload)
         service = self.nef.services.get('nfs')
         if service['state'] != 'online':
             message = (_('NFS server service is not online: %(state)s')
                        % {'state': service['state']})
             raise jsonrpc.NefException(code='ESRCH', message=message)
-        share = self.nef.nfs.get(self.root_path)
+        share = self.nef.nfs.get(self.path)
         if share['shareState'] != 'online':
             message = (_('NFS share %(share)s is not online: %(state)s')
-                       % {'share': self.root_path,
+                       % {'share': self.path,
                           'state': share['shareState']})
             raise jsonrpc.NefException(code='ESRCH', message=message)
-
-    def _create_volume_file(self, path, fmt, opts):
-        self._execute('qemu-img', 'create', '-f', fmt, '-o', opts,
-                      path, run_as_root=self._execute_as_root)
 
     @coordination.synchronized('{self.nef.lock}')
     def create_volume(self, volume):
@@ -192,16 +189,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         sparsed_volume = payload.pop('sparseVolume')
         volume_format = payload.pop('volumeFileFormat')
         extra_options = payload.pop('volumeFormatOptions')
-        format_options = 'size=%dG' % volume['size']
+        volume_options = 'size=%dG' % volume['size']
         if extra_options:
             format_options = '%s,%s' % (extra_options, format_options)
         payload.update({'path': volume_path})
         self.nef.filesystems.create(payload)
         try:
+            volume_file = self.local_path(volume)
             self._set_volume_acl(volume)
             self._mount_volume(volume)
-            volume_file = self.local_path(volume)
-            self._create_volume_file(volume_file, volume_format, format_options)
+            self._execute('qemu-img', 'create',
+                          '-f', volume_format,
+                          '-o', volume_options,
+                          volume_file,
+                          run_as_root=True)
         except jsonrpc.NefException as create_error:
             try:
                 payload = {'force': True}
@@ -824,12 +825,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         group_model_update = {}
         snapshots_model_update = []
         cgsnapshot_name = self.group_snapshot_template % cgsnapshot['id']
-        cgsnapshot_path = '%s@%s' % (self.root_path, cgsnapshot_name)
+        cgsnapshot_path = '%s@%s' % (self.path, cgsnapshot_name)
         create_payload = {'path': cgsnapshot_path, 'recursive': True}
         self.nef.snapshots.create(create_payload)
         for snapshot in snapshots:
             volume_name = snapshot['volume_name']
-            volume_path = posixpath.join(self.root_path, volume_name)
+            volume_path = posixpath.join(self.path, volume_name)
             snapshot_name = snapshot['name']
             snapshot_path = '%s@%s' % (volume_path, cgsnapshot_name)
             rename_payload = {'newName': snapshot_name}
@@ -893,7 +894,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 self.create_volume_from_snapshot(volume, snapshot)
         elif source_cg and source_vols:
             snapshot_name = self.origin_snapshot_template % group['id']
-            snapshot_path = '%s@%s' % (self.root_path, snapshot_name)
+            snapshot_path = '%s@%s' % (self.path, snapshot_name)
             create_payload = {'path': snapshot_path, 'recursive': True}
             self.nef.snapshots.create(create_payload)
             for volume, source_vol in zip(volumes, source_vols):
@@ -980,13 +981,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def _get_volume_path(self, volume):
         """Return ZFS dataset path for the volume."""
-        return posixpath.join(self.root_path, volume['name'])
+        return posixpath.join(self.path, volume['name'])
 
     def _get_snapshot_path(self, snapshot):
         """Return ZFS snapshot path for the snapshot."""
         volume_name = snapshot['volume_name']
         snapshot_name = snapshot['name']
-        volume_path = posixpath.join(self.root_path, volume_name)
+        volume_path = posixpath.join(self.path, volume_name)
         return '%s@%s' % (volume_path, snapshot_name)
 
     def get_volume_stats(self, refresh=False):
@@ -1002,7 +1003,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor Appliance."""
         payload = {'fields': 'bytesAvailable,bytesUsed'}
-        dataset = self.nef.filesystems.get(self.root_path, payload)
+        dataset = self.nef.filesystems.get(self.path, payload)
         free_capacity_gb = dataset['bytesAvailable'] // units.Gi
         allocated_capacity_gb = dataset['bytesUsed'] // units.Gi
         total_capacity_gb = free_capacity_gb + allocated_capacity_gb
@@ -1052,7 +1053,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'location_info': location_info,
             'description': description,
             'display_name': display_name,
-            'pool_name': self.root_path.split(posixpath.sep)[0],
+            'pool_name': self.path.split(posixpath.sep)[0],
             'multiattach': True,
             'QoS_support': False,
             'consistencygroup_support': True,
@@ -1094,14 +1095,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        % {'keys': keys})
             raise jsonrpc.NefException(code='EINVAL', message=message)
         payload = {
-            'parent': self.root_path,
+            'parent': self.path,
             'fields': 'path',
             'recursive': False
         }
         for key, value in types.items():
             if key in existing_ref:
                 if value == 'path':
-                    path = posixpath.join(self.root_path,
+                    path = posixpath.join(self.path,
                                           existing_ref[key])
                 else:
                     path = existing_ref[key]
@@ -1304,7 +1305,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             value = cinder_volume['id']
             cinder_volume_names[key] = value
         payload = {
-            'parent': self.root_path,
+            'parent': self.path,
             'fields': 'guid,parent,path,bytesUsed',
             'recursive': False
         }
@@ -1319,9 +1320,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
             parent = volume['parent']
             size = volume['bytesUsed'] // units.Gi
             name = posixpath.basename(path)
-            if path == self.root_path:
+            if path == self.path:
                 continue
-            if parent != self.root_path:
+            if parent != self.path:
                 continue
             if name in cinder_volume_names:
                 cinder_id = cinder_volume_names[name]
@@ -1457,7 +1458,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             }
             cinder_snapshot_names[key] = value
         payload = {
-            'parent': self.root_path,
+            'parent': self.path,
             'fields': 'name,guid,path,parent,hprService,snaplistId',
             'recursive': True
         }
@@ -1653,15 +1654,18 @@ class NexentaNfsDriver(nfs.NfsDriver):
         : return vendor name
         """
         properties = {}
-        vendor_properties = []
         namespace = self.nef.filesystems.namespace
-        keys = ('enum', 'default', 'minimum', 'maximum')
-        vendor_properties += self.nef.filesystems.properties
+        vendor_properties = self.nef.filesystems.properties
+        keys = ['enum', 'default', 'minimum', 'maximum']
         for vendor_spec in vendor_properties:
             property_spec = {}
             for key in keys:
                 if key in vendor_spec:
                     property_spec[key] = vendor_spec[key]
+            if 'api' in vendor_spec:
+                api = vendor_spec['api']
+                if api in self.root:
+                    property_spec['default'] = self.root[api]
             property_name = vendor_spec['name']
             property_title = vendor_spec['title']
             property_description = vendor_spec['description']
@@ -1685,7 +1689,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         return properties, namespace
 
     def _get_vendor_properties(self, volume, vendor_specs):
-        properties = extra_specs = {}
+        properties = {}
+        extra_specs = {}
         type_id = volume.get('volume_type_id', None)
         if type_id:
             extra_specs = volume_types.get_volume_type_extra_specs(type_id)

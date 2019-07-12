@@ -1902,7 +1902,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         return properties, namespace
 
     def _get_vendor_properties(self, volume, vendor_specs):
-        properties = extra_specs = {}
+        properties = {}
+        extra_specs = {}
         type_id = volume.get('volume_type_id', None)
         if type_id:
             extra_specs = volume_types.get_volume_type_extra_specs(type_id)
