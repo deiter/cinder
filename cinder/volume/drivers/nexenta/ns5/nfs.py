@@ -188,10 +188,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = self._get_vendor_properties(volume, properties)
         sparsed_volume = payload.pop('sparseVolume')
         file_format = payload.pop('fileFormat')
-        file_options = payload.pop('fileOptions')
-        size_options = 'size=%dG' % volume['size']
-        if file_options:
-            file_options = '%s,%s' % (file_options, size_options)
+        file_options = 'size=%dG' % volume['size']
+        if file_format == 'qcow2':
+            file_options += ',preallocation=metadata'
+        if not sparsed_volume:
+            if file_format == 'raw':
+                reservation = volume['size'] * units.Gi
+            elif file_format == 'qcow':
+                reservation = volume['size'] * units.Gi
+            elif file_format == 'qcow2':
+                reservation = volume['size'] * units.Gi
+            payload.update({'referencedReservationSize': reservation})
         payload.update({'path': volume_path})
         self.nef.filesystems.create(payload)
         try:

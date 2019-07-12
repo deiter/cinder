@@ -594,15 +594,6 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
             'type': 'string',
             'default': 'raw'
         })
-        self.properties.append({
-            'name': self.key('file_options'),
-            'api': 'fileOptions',
-            'cfg': 'nexenta_volume_file_options',
-            'title': 'Volume file options',
-            'description': _('Controls volume file options.'),
-            'type': 'string',
-            'default': ''
-        })
 
     def mount(self, name, payload=None):
         LOG.debug('Mount %(subj)s %(name)s: %(payload)s',

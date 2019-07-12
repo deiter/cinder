@@ -191,15 +191,10 @@ NEXENTA_NFS_OPTS = [
                choices=['raw', 'qcow', 'qcow2', 'parallels', 'vdi', 'vhdx',
                         'vmdk', 'vpc', 'qed'],
                help='Volume image file format'),
-    cfg.StrOpt('nexenta_volume_file_options',
-               default='',
-               help='Comma separated list of format specific options in a '
-                    'name=value format.'),
     cfg.BoolOpt('nexenta_qcow2_volumes',
                 deprecated_for_removal=True,
-                deprecated_reason='Volume file parameters should be used: '
-                                  'nexenta_volume_file_format and '
-                                  'nexenta_volume_file_options',
+                deprecated_reason='Volume file format parameters should '
+                                  'be used: nexenta_volume_file_format',
                 default=False,
                 help='Create volumes as QCOW2 files rather than raw files'),
     cfg.BoolOpt('nexenta_nms_cache_volroot',
