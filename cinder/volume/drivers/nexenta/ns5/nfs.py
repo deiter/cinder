@@ -255,6 +255,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             raise jsonrpc.NefException(code='EINVAL', message=message)
         return meta_size
 
+    # TODO: remove
     def _get_file_info(self, path):
         cmd = ['env', 'LC_ALL=C', 'qemu-img', 'info', '--output=json', path]
         stdout, stderr, status = self._execute(*cmd, run_as_root=True)
@@ -684,11 +685,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._mount_volume(volume)
         share = self._get_volume_share(volume)
         file_path = self.local_path(volume)
-        file_info = self._get_file_info(file_path)
+        file_info = image_utils.qemu_img_info(file_path,
+                                              run_as_root=True,
+                                              force_share=True)
         self._unmount_volume(volume)
         data = {
             'export': share,
-            'format': file_info['format'],
+            'format': file_info.format,
             'name': 'volume'
         }
         nfs_options = self.configuration.safe_get('nfs_mount_options')
