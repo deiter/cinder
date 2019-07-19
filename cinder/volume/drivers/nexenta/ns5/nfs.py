@@ -292,6 +292,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if file_format == 'qcow2':
             file_options += ',preallocation=metadata'
         payload.update({'path': volume_path})
+        volume['metadata']['volume_format'] = file_format
         self.nef.filesystems.create(payload)
         try:
             file_path = self.local_path(volume)
