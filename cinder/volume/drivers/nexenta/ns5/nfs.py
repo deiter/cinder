@@ -692,7 +692,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._unmount_volume(volume)
         data = {
             'export': share,
-            'format': file_info.format,
+            'format': file_info.file_format,
             'name': 'volume'
         }
         nfs_options = self.configuration.safe_get('nfs_mount_options')
