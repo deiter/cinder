@@ -16,8 +16,10 @@
 import errno
 import hashlib
 import ipaddress
+import json
 import os
 import posixpath
+import sys
 import uuid
 
 from oslo_log import log as logging
@@ -177,6 +179,104 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'state': share['shareState']})
             raise jsonrpc.NefException(code='ESRCH', message=message)
 
+    def _get_reservation(self, volume, block_size, data_copies):
+        reservation = volume['size'] * units.Gi
+        numdb = 7
+        dn_max_indblkshift = 17
+        spa_blkptrshift = 7
+        spa_dvas_per_bp = 3
+        dnodes_per_level_shift = dn_max_indblkshift - spa_blkptrshift
+        dnodes_per_level = 1 << dnodes_per_level_shift
+        nblocks = reservation / block_size
+        while nblocks > 1:
+            nblocks += dnodes_per_level - 1
+            nblocks /= dnodes_per_level
+            numdb += nblocks
+        numdb *= min(spa_dvas_per_bp, data_copies + 1)
+        reservation *= data_copies
+        numdb *= 1 << dn_max_indblkshift
+        reservation += numdb
+        return reservation
+
+    def _get_meta_size(self, volume):
+        def div_roundup(numerator, denominator):
+            return (numerator + denominator - 1) // denominator
+        def roundup(numerator, denominator):
+            return div_roundup(numerator, denominator) * denominator
+        volume_size = volume['size'] * units.Gi
+        volume_format = 'raw'
+        volume_metadata = volume['metadata']
+        if 'volume_format' in volume_metadata:
+            volume_format = volume_metadata['volume_format']
+        if volume_format == 'raw':
+            meta_size = 0
+        elif volume_format == 'qcow':
+            meta_size = 48 + 4 * volume_size / units.Mi
+        elif volume_format == 'qcow2':
+            cluster_size = 64 * units.Ki
+            refcount_size = 4
+            int_size = (sys.maxint.bit_length() + 1) / 8
+            meta_size = 0
+            aligned_volume_size = roundup(volume_size, cluster_size)
+            meta_size += cluster_size
+            blocks_per_table = cluster_size / int_size
+            clusters = aligned_volume_size / cluster_size
+            nl2e = roundup(clusters, blocks_per_table)
+            meta_size += nl2e * int_size
+            clusters = nl2e * int_size / cluster_size
+            nl1e = roundup(clusters, blocks_per_table)
+            meta_size += nl1e * int_size
+            clusters = (aligned_volume_size + meta_size) / cluster_size
+            refcounts_per_block = 8 * cluster_size / (1 << refcount_size)
+            table = blocks = first = 0
+            last = 1
+            while first != last:
+                last = first
+                first = clusters + blocks + table
+                blocks = div_roundup(first, refcounts_per_block)
+                table = div_roundup(blocks, blocks_per_table)
+                first = clusters + blocks + table
+            meta_size += (blocks + table) * cluster_size
+        elif volume_format == 'parallels':
+            meta_size = (1 + volume_size / units.Gi / 256) * units.Mi
+        elif volume_format == 'vdi':
+            meta_size = 512 + 4 * volume_size / units.Mi
+        elif volume_format == 'vhdx':
+            meta_size = 8 * units.Mi
+        elif volume_format == 'vmdk':
+            meta_size = 192 * (units.Ki + volume_size / units.Mi)
+        elif volume_format == 'vpc':
+            meta_size = 512 + 2 * (units.Ki + volume_size / units.Mi)
+        elif volume_format == 'qed':
+            meta_size = 320 * units.Ki
+        else:
+            message = (_('Volume format %(volume_format)s is not supported')
+                       % {'volume_format': volume_format})
+            raise jsonrpc.NefException(code='EINVAL', message=message)
+        return meta_size
+
+    def _get_file_info(self, path):
+        cmd = ['env', 'LC_ALL=C', 'qemu-img', 'info', '--output=json', path]
+        stdout, stderr, status = self._execute(*cmd, run_as_root=True)
+        if status != 0:
+            message = (_('Failed to get info for file %(path)s: %(stderr)s')
+                       % {'path': path, 'stderr': stderr})
+            raise jsonrpc.NefException(code='EINVAL', message=message)
+        try:
+            content = json.load(stdout)
+        except (TypeError, ValueError) as error:
+            message = (_('Failed to decode JSON %(stdout)s: %(error)s')
+                       % {'stdout': stdout, 'error': error})
+            raise jsonrpc.NefException(code='EINVAL', message=message)
+        keys = ['filename', 'format', 'virtual-size', 'actual-size']
+        for key in keys:
+            if key not in content:
+                message = (_('Failed to get info for file %(path)s: missing '
+                             'required parameter %(key)s in %(content)s')
+                           % {'path': path, 'key': key, 'content': content})
+                raise jsonrpc.NefException(code='EINVAL', message=message)
+        return content
+
     @coordination.synchronized('{self.nef.lock}')
     def create_volume(self, volume):
         """Creates a volume.
@@ -191,14 +291,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         file_options = 'size=%dG' % volume['size']
         if file_format == 'qcow2':
             file_options += ',preallocation=metadata'
-        if not sparsed_volume:
-            if file_format == 'raw':
-                reservation = volume['size'] * units.Gi
-            elif file_format == 'qcow':
-                reservation = volume['size'] * units.Gi
-            elif file_format == 'qcow2':
-                reservation = volume['size'] * units.Gi
-            payload.update({'referencedReservationSize': reservation})
         payload.update({'path': volume_path})
         self.nef.filesystems.create(payload)
         try:
@@ -210,6 +302,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           '-o', file_options,
                           file_path,
                           run_as_root=True)
+            if sparsed_volume:
+                return
+            if 'recordSize' in payload:
+                block_size = payload['recordSize']
+            else:
+                block_size = self.root['recordSize']
+            if 'dataCopies' in payload:
+                data_copies = payload['dataCopies']
+            else:
+                data_copies = self.root['dataCopies']
+            reservation = self._get_reservation(volume,
+                                                block_size,
+                                                data_copies)
+            reservation += self._get_meta_size(volume)
+            payload = {'referencedReservationSize': reservation}
+            self.nef.filesystems.set(volume_path, payload)
         except jsonrpc.NefException as create_error:
             try:
                 payload = {'force': True}
