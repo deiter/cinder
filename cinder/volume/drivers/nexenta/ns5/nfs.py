@@ -681,9 +681,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         LOG.debug('Initialize volume connection for %(volume)s',
                   {'volume': volume['name']})
+        self._mount_volume(volume)
         share = self._get_volume_share(volume)
+        file_path = self.local_path(volume)
+        file_info = self._get_file_info(file_path)
+        self._unmount_volume(volume)
         data = {
             'export': share,
+            'format': file_info['format'],
             'name': 'volume'
         }
         nfs_options = self.configuration.safe_get('nfs_mount_options')
