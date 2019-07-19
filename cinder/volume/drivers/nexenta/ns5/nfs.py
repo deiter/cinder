@@ -187,10 +187,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         spa_dvas_per_bp = 3
         dnodes_per_level_shift = dn_max_indblkshift - spa_blkptrshift
         dnodes_per_level = 1 << dnodes_per_level_shift
-        nblocks = reservation / block_size
+        nblocks = reservation // block_size
         while nblocks > 1:
             nblocks += dnodes_per_level - 1
-            nblocks /= dnodes_per_level
+            nblocks //= dnodes_per_level
             numdb += nblocks
         numdb *= min(spa_dvas_per_bp, data_copies + 1)
         reservation *= data_copies
@@ -211,23 +211,23 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if volume_format == 'raw':
             meta_size = 0
         elif volume_format == 'qcow':
-            meta_size = 48 + 4 * volume_size / units.Mi
+            meta_size = 48 + 4 * volume_size // units.Mi
         elif volume_format == 'qcow2':
             cluster_size = 64 * units.Ki
             refcount_size = 4
-            int_size = (sys.maxint.bit_length() + 1) / 8
+            int_size = (sys.maxint.bit_length() + 1) // 8
             meta_size = 0
             aligned_volume_size = roundup(volume_size, cluster_size)
             meta_size += cluster_size
-            blocks_per_table = cluster_size / int_size
-            clusters = aligned_volume_size / cluster_size
+            blocks_per_table = cluster_size // int_size
+            clusters = aligned_volume_size // cluster_size
             nl2e = roundup(clusters, blocks_per_table)
             meta_size += nl2e * int_size
-            clusters = nl2e * int_size / cluster_size
+            clusters = nl2e * int_size // cluster_size
             nl1e = roundup(clusters, blocks_per_table)
             meta_size += nl1e * int_size
-            clusters = (aligned_volume_size + meta_size) / cluster_size
-            refcounts_per_block = 8 * cluster_size / (1 << refcount_size)
+            clusters = (aligned_volume_size + meta_size) // cluster_size
+            refcounts_per_block = 8 * cluster_size // (1 << refcount_size)
             table = blocks = first = 0
             last = 1
             while first != last:
@@ -238,15 +238,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 first = clusters + blocks + table
             meta_size += (blocks + table) * cluster_size
         elif volume_format == 'parallels':
-            meta_size = (1 + volume_size / units.Gi / 256) * units.Mi
+            meta_size = (1 + volume_size // units.Gi // 256) * units.Mi
         elif volume_format == 'vdi':
-            meta_size = 512 + 4 * volume_size / units.Mi
+            meta_size = 512 + 4 * volume_size // units.Mi
         elif volume_format == 'vhdx':
             meta_size = 8 * units.Mi
         elif volume_format == 'vmdk':
-            meta_size = 192 * (units.Ki + volume_size / units.Mi)
+            meta_size = 192 * (units.Ki + volume_size // units.Mi)
         elif volume_format == 'vpc':
-            meta_size = 512 + 2 * (units.Ki + volume_size / units.Mi)
+            meta_size = 512 + 2 * (units.Ki + volume_size // units.Mi)
         elif volume_format == 'qed':
             meta_size = 320 * units.Ki
         else:
