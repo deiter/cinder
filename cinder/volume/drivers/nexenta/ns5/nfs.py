@@ -30,6 +30,7 @@ import six
 from cinder import context
 from cinder import coordination
 from cinder.i18n import _
+from cinder.image import image_utils
 from cinder import interface
 from cinder import objects
 from cinder.privsep import fs
