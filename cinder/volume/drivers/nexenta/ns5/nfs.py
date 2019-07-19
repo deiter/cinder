@@ -215,7 +215,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         elif volume_format == 'qcow2':
             cluster_size = 64 * units.Ki
             refcount_size = 4
-            int_size = (sys.maxint.bit_length() + 1) // 8
+            int_size = (sys.maxsize.bit_length() + 1) // 8
             meta_size = 0
             aligned_volume_size = roundup(volume_size, cluster_size)
             meta_size += cluster_size
