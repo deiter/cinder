@@ -186,7 +186,7 @@ NEXENTA_NFS_OPTS = [
                      'sparsed files that take no space. If disabled '
                      '(False), volume is created as a regular file, '
                      'which takes a long time.'),
-    cfg.StrOpt('nexenta_volume_file_format',
+    cfg.StrOpt('nexenta_volume_format',
                default='raw',
                choices=['raw', 'qcow', 'qcow2', 'parallels', 'vdi', 'vhdx',
                         'vmdk', 'vpc', 'qed'],
