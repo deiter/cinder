@@ -1707,18 +1707,27 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         src_nfs_share, src_mount_point, src_volume_file = (
             self._mount_volume(src_volume))
-        dst_nfs_share, dst_mount_point, dst_volume_file = (
-            self._mount_volume(dst_volume))
         src_volume_info = image_utils.qemu_img_info(src_volume_file,
                                                     run_as_root=True,
                                                     force_share=True)
         self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
+        dst_nfs_share, dst_mount_point, dst_volume_file = (
+            self._mount_volume(dst_volume))
+        dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
+                                                    run_as_root=True,
+                                                    force_share=True)
+        if src_volume_info.file_format == dst_volume_info.file_format:
+            self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
+            return
         tmp_volume_file = '%(path)s.%(format)s' % {
             'path': dst_volume_file,
             'format': src_volume_info.file_format
         }
-        self._execute('qemu-img', 'convert', '-O', src_volume_info.file_format,
-                      dst_volume_file, tmp_volume_file, run_as_root=True)
+        self._execute('qemu-img', 'convert',
+                      '-f', dst_volume_info.file_format,
+                      '-O', src_volume_info.file_format,
+                      dst_volume_file, tmp_volume_file,
+                      run_as_root=True)
         os.remove(dst_volume_file)
         os.rename(tmp_volume_file, dst_volume_file)
         self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
@@ -1730,18 +1739,28 @@ class NexentaNfsDriver(nfs.NfsDriver):
         migration
         """
         properties = self.nef.filesystems.properties
-        payload = self._get_vendor_properties(volume, properties)
-        volume_format = payload.pop('volumeFormat')
-        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        payload = self._get_vendor_properties(dst_volume, properties)
+        dst_volume_format = payload.pop('volumeFormat')
+        dst_nfs_share, dst_mount_point, dst_volume_file = (
+            self._mount_volume(dst_volume)
+        dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
+                                                    run_as_root=True,
+                                                    force_share=True)
+        if dst_volume_info.file_format == dst_volume_format:
+            self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
+            return
         tmp_volume_file = '%(path)s.%(format)s' % {
-            'path': volume_file,
-            'format': volume_format
+            'path': dst_volume_file,
+            'format': dst_volume_format
         }
-        self._execute('qemu-img', 'convert' '-O', volume_format,
-                      volume_file, tmp_volume_file, run_as_root=True)
-        os.remove(volume_file)
-        os.rename(tmp_volume_file, volume_file)
-        self._unmount_volume(volume, nfs_share, mount_point)
+        self._execute('qemu-img', 'convert',
+                      '-f', dst_volume_info.file_format,
+                      '-O', dst_volume_format,
+                      dst_volume_file, tmp_volume_file,
+                      run_as_root=True)
+        os.remove(dst_volume_file)
+        os.rename(tmp_volume_file, dst_volume_file)
+        self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
 
     def retype(self, context, volume, new_type, diff, host):
         """Retype from one volume type to another."""
