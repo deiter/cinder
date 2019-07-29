@@ -1717,13 +1717,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'path': dst_volume_file,
             'format': src_volume_info.file_format
         }
-        self._execute('qemu-img', 'convert', '-f', src_volume_info.file_format,
+        self._execute('qemu-img', 'convert', '-O', src_volume_info.file_format,
                       dst_volume_file, tmp_volume_file, run_as_root=True)
         os.remove(dst_volume_file)
         os.rename(tmp_volume_file, dst_volume_file)
         self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
 
-    def after_volume_copy(self, ctxt, src_volume, dest_volume, remote=None):
+    def after_volume_copy(self, ctxt, src_volume, dst_volume, remote=None):
         """Driver-specific actions after copy volume data.
 
         This method will be called after _copy_volume_data during volume
@@ -1737,7 +1737,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'path': volume_file,
             'format': volume_format
         }
-        self._execute('qemu-img', 'convert' '-f', volume_format,
+        self._execute('qemu-img', 'convert' '-O', volume_format,
                       volume_file, tmp_volume_file, run_as_root=True)
         os.remove(volume_file)
         os.rename(tmp_volume_file, volume_file)
