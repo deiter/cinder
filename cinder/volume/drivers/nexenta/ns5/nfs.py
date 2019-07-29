@@ -1742,7 +1742,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = self._get_vendor_properties(dst_volume, properties)
         dst_volume_format = payload.pop('volumeFormat')
         dst_nfs_share, dst_mount_point, dst_volume_file = (
-            self._mount_volume(dst_volume)
+            self._mount_volume(dst_volume))
         dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
                                                     run_as_root=True,
                                                     force_share=True)
