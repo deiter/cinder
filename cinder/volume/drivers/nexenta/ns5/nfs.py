@@ -1699,14 +1699,60 @@ class NexentaNfsDriver(nfs.NfsDriver):
         model_update = {'_name_id': name_id}
         return model_update
 
+    def before_volume_copy(self, context, src_vol, dst_vol, remote=None):
+        """Driver-specific actions before copy volume data.
+
+        This method will be called before _copy_volume_data during volume
+        migration
+        """
+        src_nfs_share, src_mount_point, src_volume_file = (
+            self._mount_volume(src_volume))
+        dst_nfs_share, dst_mount_point, dst_volume_file = (
+            self._mount_volume(dst_volume))
+        src_volume_info = image_utils.qemu_img_info(src_volume_file,
+                                                    run_as_root=True,
+                                                    force_share=True)
+        self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
+        tmp_volume_file = '%(path)s.%(format)s' % {
+            'path': dst_volume_file,
+            'format': src_volume_info.file_format
+        }
+        self._execute('qemu-img', 'convert' '-f' src_volume_info.file_format,
+                      dst_volume_file, tmp_volume_file, run_as_root=True)
+        os.remove(dst_volume_file)
+        os.rename(tmp_volume_file, dst_volume_file)
+        self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
+
+    def after_volume_copy(self, context, src_vol, dest_vol, remote=None):
+        """Driver-specific actions after copy volume data.
+
+        This method will be called after _copy_volume_data during volume
+        migration
+        """
+        properties = self.nef.filesystems.properties
+        payload = self._get_vendor_properties(volume, properties)
+        volume_format = payload.pop('volumeFormat')
+        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        tmp_volume_file = '%(path)s.%(format)s' % {
+            'path': volume_file,
+            'format': volume_format
+        }
+        self._execute('qemu-img', 'convert' '-f' volume_format,
+                      volume_file, tmp_volume_file, run_as_root=True)
+        os.remove(volume_file)
+        os.rename(tmp_volume_file, volume_file)
+        self._unmount_volume(volume, nfs_share, mount_point)
+
     def retype(self, context, volume, new_type, diff, host):
         """Retype from one volume type to another."""
         LOG.debug('Retype volume %(volume)s to host %(host)s '
                   'and volume type %(type)s with diff %(diff)s',
                   {'volume': volume['name'], 'host': host['host'],
                    'type': new_type['name'], 'diff': diff})
-        retyped = False
-        migrated, model_update = self.migrate_volume(context, volume, host)
+        migrated = retyped = False
+        model_update = None
+        if volume['host'] != host['host']:
+            migrated, model_update = self.migrate_volume(context, volume, host)
         volume_path = self._get_volume_path(volume)
         payload = {'source': True}
         volume_specs = self.nef.filesystems.get(volume_path, payload)
