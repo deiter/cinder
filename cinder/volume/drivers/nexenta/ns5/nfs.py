@@ -1717,7 +1717,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'path': dst_volume_file,
             'format': src_volume_info.file_format
         }
-        self._execute('qemu-img', 'convert' '-f' src_volume_info.file_format,
+        self._execute('qemu-img', 'convert' '-f', src_volume_info.file_format,
                       dst_volume_file, tmp_volume_file, run_as_root=True)
         os.remove(dst_volume_file)
         os.rename(tmp_volume_file, dst_volume_file)
@@ -1737,7 +1737,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'path': volume_file,
             'format': volume_format
         }
-        self._execute('qemu-img', 'convert' '-f' volume_format,
+        self._execute('qemu-img', 'convert' '-f', volume_format,
                       volume_file, tmp_volume_file, run_as_root=True)
         os.remove(volume_file)
         os.rename(tmp_volume_file, volume_file)
