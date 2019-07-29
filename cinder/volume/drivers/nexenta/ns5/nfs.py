@@ -1699,7 +1699,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         model_update = {'_name_id': name_id}
         return model_update
 
-    def before_volume_copy(self, context, src_vol, dst_vol, remote=None):
+    def before_volume_copy(self, ctxt, src_volume, dst_volume, remote=None):
         """Driver-specific actions before copy volume data.
 
         This method will be called before _copy_volume_data during volume
@@ -1723,7 +1723,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         os.rename(tmp_volume_file, dst_volume_file)
         self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
 
-    def after_volume_copy(self, context, src_vol, dest_vol, remote=None):
+    def after_volume_copy(self, ctxt, src_volume, dest_volume, remote=None):
         """Driver-specific actions after copy volume data.
 
         This method will be called after _copy_volume_data during volume
