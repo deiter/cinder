@@ -1728,8 +1728,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                       '-O', src_volume_info.file_format,
                       dst_volume_file, tmp_volume_file,
                       run_as_root=True)
-        os.remove(dst_volume_file)
-        os.rename(tmp_volume_file, dst_volume_file)
+        self._execute('rm', '-f', dst_volume_file, run_as_root=True)
+        self._execute('mv', tmp_volume_file, dst_volume_file, run_as_root=True)
         self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
 
     def after_volume_copy(self, ctxt, src_volume, dst_volume, remote=None):
@@ -1758,8 +1758,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                       '-O', dst_volume_format,
                       dst_volume_file, tmp_volume_file,
                       run_as_root=True)
-        os.remove(dst_volume_file)
-        os.rename(tmp_volume_file, dst_volume_file)
+        self._execute('rm', '-f', dst_volume_file, run_as_root=True)
+        self._execute('mv', tmp_volume_file, dst_volume_file, run_as_root=True)
         self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
 
     def retype(self, context, volume, new_type, diff, host):
