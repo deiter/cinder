@@ -296,7 +296,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = self._get_vendor_properties(volume, properties)
         sparsed_volume = payload.pop('sparseVolume')
         volume_format = payload.pop('volumeFormat')
-        specs = {'size': '%dG' % volume['size']}
+        specs = {'size': '%sG' % volume['size']}
         if volume_format == VOLUME_FORMAT_QCOW2:
             specs['preallocation'] = 'metadata'
         volume_options = ','.join(['%s=%s' % _ for _ in specs.items()])
@@ -779,8 +779,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                  {'volume': volume['name'], 'size': new_size})
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
         try:
-            self._execute('qemu-img', 'resize', volume_file,
-                          '%dG' % new_size, run_as_root=True)
+            image_utils.resize_image(volume_file, new_size, run_as_root=True)
         except OSError as error:
             LOG.error('Failed to extend backend file %(volume_file)s '
                       'for volume %(volume)s: %(error)s',
