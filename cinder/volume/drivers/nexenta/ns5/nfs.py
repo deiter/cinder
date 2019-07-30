@@ -1704,6 +1704,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         This method will be called before _copy_volume_data during volume
         migration
         """
+        LOG.debug(' ===> before_volume_copy %s => %s on %s', src_volume['name'], dst_volume['name'], self.host)
         src_nfs_share, src_mount_point, src_volume_file = (
             self._mount_volume(src_volume))
         src_volume_info = image_utils.qemu_img_info(src_volume_file,
@@ -1737,6 +1738,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         This method will be called after _copy_volume_data during volume
         migration
         """
+        LOG.debug(' ===> after_volume_copy %s => %s on %s', src_volume['name'], dst_volume['name'], self.host)
         properties = self.nef.filesystems.properties
         payload = self._get_vendor_properties(dst_volume, properties)
         dst_volume_format = payload.pop('volumeFormat')
