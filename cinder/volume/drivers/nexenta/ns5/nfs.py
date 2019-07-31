@@ -1682,21 +1682,55 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param original_volume_status: The status of the original volume
         :returns: model_update to update DB with any needed changes
         """
-        name_id = None
-        path = self._get_volume_path(volume)
-        new_path = self._get_volume_path(new_volume)
-        payload = {'newPath': path}
+        volume_renamed = False
+        volume_path = self._get_volume_path(volume)
+        new_volume_path = self._get_volume_path(new_volume)
+        backup_volume_path = '%s-backup' % volume_path
+        if volume['host'] == new_volume['host']:
+            payload = {'newPath': backup_volume_path}
+            try:
+                self.nef.filesystems.rename(volume_path, payload)
+            except jsonrpc.NefException as error:
+                LOG.error('Failed to create backup copy of volume '
+                          '%(volume)s: %(error)s',
+                          {'volume': volume['name'],
+                           'error': error})
+                if error.code != 'ENOENT':
+                    raise error
+            else:
+                volume_renamed = True
+
+        payload = {'newPath': volume_path}
         try:
-            self.nef.filesystems.rename(new_path, payload)
-        except jsonrpc.NefException as error:
-            LOG.error('Failed to rename volume %(new_volume)s '
-                      'to %(volume)s after migration: %(error)s',
+            self.nef.filesystems.rename(new_volume_path, payload)
+        except jsonrpc.NefException as rename_error:
+            LOG.error('Failed to rename temporary volume %(new_volume)s '
+                      'to original %(volume)s after migration: %(error)s',
                       {'new_volume': new_volume['name'],
                        'volume': volume['name'],
-                       'error': error})
-            name_id = new_volume._name_id or new_volume.id
-        model_update = {'_name_id': name_id}
-        return model_update
+                       'error': rename_error})
+            if volume_renamed:
+                payload = {'newPath': volume_path}
+                try:
+                    self.nef.filesystems.rename(backup_volume_path, payload)
+                except jsonrpc.NefException as restore_error:
+                    LOG.error('Failed to restore backup copy of volume '
+                              '%(volume)s: %(error)s',
+                              {'volume': volume['name'],
+                               'error': restore_error})
+            raise rename_error
+        else:
+            if volume_renamed:
+                payload = {'force': True}
+                try:
+                    self.nef.filesystems.delete(backup_volume_path, payload)
+                except jsonrpc.NefException as error:
+                    LOG.error('Failed to delete backup copy of volume '
+                              '%(volume)s: %(error)s',
+                              {'volume': volume['name'],
+                               'error': error})
+            model_update = {'_name_id': None}
+            return model_update
 
     def before_volume_copy(self, ctxt, src_volume, dst_volume, remote=None):
         """Driver-specific actions before copy volume data.
