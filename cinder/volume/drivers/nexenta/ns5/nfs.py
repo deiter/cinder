@@ -1683,12 +1683,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :returns: model_update to update DB with any needed changes
         """
         name_id = None
+        provider_location = None
         volume_renamed = False
         volume_path = self._get_volume_path(volume)
         new_volume_path = self._get_volume_path(new_volume)
         backup_volume_path = '%s-backup' % volume_path
         if volume['host'] == new_volume['host']:
-            name_id = new_volume['_name_id'] or new_volume['id']
+            name_id = volume['id']
             payload = {'newPath': backup_volume_path}
             try:
                 self.nef.filesystems.rename(volume_path, payload)
@@ -1730,7 +1731,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           '%(volume)s: %(error)s',
                           {'volume': volume['name'],
                            'error': error})
-        model_update = {'_name_id': name_id}
+        model_update = {
+            '_name_id': name_id,
+            'provider_location': provider_location
+        }
         return model_update
 
     def before_volume_copy(self, ctxt, src_volume, dst_volume, remote=None):
