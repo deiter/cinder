@@ -1805,8 +1805,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    'type': new_type['name'], 'diff': diff})
         migrated = retyped = False
         model_update = None
-        if volume['host'] != host['host']:
-            migrated, model_update = self.migrate_volume(context, volume, host)
+        #if volume['host'] != host['host']:
+        #    # TODO
+        #    migrated, model_update = self.migrate_volume(context, volume, host)
         volume_path = self._get_volume_path(volume)
         payload = {'source': True}
         volume_specs = self.nef.filesystems.get(volume_path, payload)
@@ -1817,11 +1818,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
             property_name = vendor_spec['name']
             api = vendor_spec['api']
             if 'retype' in vendor_spec:
-                LOG.debug('Skip retype vendor volume property '
+                LOG.error('Failed to retype vendor volume property '
                           '%(property_name)s. %(reason)s',
                           {'property_name': property_name,
                            'reason': vendor_spec['retype']})
-                continue
+                return retyped
             if property_name in extra_specs:
                 extra_spec = extra_specs[property_name]
                 value = self._get_vendor_value(extra_spec, vendor_spec)
