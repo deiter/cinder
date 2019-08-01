@@ -1690,9 +1690,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         new_volume_path = self._get_volume_path(new_volume)
         backup_volume_path = '%s-backup' % volume_path
         if volume['host'] == new_volume['host']:
-            #setattr(volume, '_name_id', volume['id'])
+            setattr(volume, '_name_id', volume['id'])
             setattr(new_volume, '_name_id', new_volume['id'])
-            return None
             name_id = volume.id
             return {'_name_id': name_id, 'provider_location': provider_location}
             payload = {'newPath': backup_volume_path}
