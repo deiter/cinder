@@ -1689,6 +1689,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         new_volume_path = self._get_volume_path(new_volume)
         backup_volume_path = '%s-backup' % volume_path
         if volume['host'] == new_volume['host']:
+            name_id = new_volume._name_id or new_volume.id
+            return {'_name_id': name_id, 'provider_location': provider_location}
             payload = {'newPath': backup_volume_path}
             try:
                 self.nef.filesystems.rename(volume_path, payload)
