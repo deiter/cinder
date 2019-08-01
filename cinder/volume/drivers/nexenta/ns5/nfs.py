@@ -1731,7 +1731,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           {'volume': volume['name'],
                            'error': error})
         if volume['host'] == new_volume['host']:
-            name_id = volume['id']
+            name_id = new_volume['id']
         model_update = {
             '_name_id': name_id,
             'provider_location': provider_location
