@@ -738,6 +738,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param volume: volume reference
         """
+        LOG.debug(' ===> Delete volume id %s name_id %s', volume['id'], volume['name'])
         volume_path = self._get_volume_path(volume)
         self._unmount_volume(volume)
         delete_payload = {'force': True, 'snapshots': True}
@@ -1689,7 +1690,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         new_volume_path = self._get_volume_path(new_volume)
         backup_volume_path = '%s-backup' % volume_path
         if volume['host'] == new_volume['host']:
-            name_id = new_volume._name_id or new_volume.id
+            name_id = volume._name_id or volume.id
             return {'_name_id': name_id, 'provider_location': provider_location}
             payload = {'newPath': backup_volume_path}
             try:
