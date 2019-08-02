@@ -15,7 +15,9 @@
 
 from oslo_config import cfg
 
+from cinder import exception
 from cinder.volume import configuration as conf
+from cinder.volume import driver
 
 DEFAULT_ISCSI_PORT = 3260
 DEFAULT_HOST_GROUP = 'all'
@@ -267,3 +269,15 @@ CONF.register_opts(NEXENTA_DATASET_OPTS, group=conf.SHARED_CONF_GROUP)
 CONF.register_opts(NEXENTA_NFS_OPTS, group=conf.SHARED_CONF_GROUP)
 CONF.register_opts(NEXENTA_RRMGR_OPTS, group=conf.SHARED_CONF_GROUP)
 CONF.register_opts(NEXENTA_EDGE_OPTS, group=conf.SHARED_CONF_GROUP)
+
+
+def get_backend_configuration(backend, options):
+    sections = CONF.list_all_sections()
+    if backend not in sections:
+        message = (_('Unable to find backend name %(backend)s in '
+                     'configuration: %(sections)s')
+                   % {'backend': backend, 'sections': sections})
+        raise exception.ConfigNotFound(message=message)
+    config = conf.Configuration(driver.volume_opts, config_group=backend)
+    config.append_config_values(options)
+    return config

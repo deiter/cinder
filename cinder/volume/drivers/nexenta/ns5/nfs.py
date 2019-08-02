@@ -1739,6 +1739,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         migration
         """
         LOG.debug(' ===> before_volume_copy %s => %s on %s', src_volume['name'], dst_volume['name'], self.host)
+        LOG.debug(' ===> before_volume_copy %s => %s on %s', src_volume['host'], dst_volume['host'], self.host)
+        driver_options = self.get_driver_options()
+        config = options.get_backend_configuration('xxx', driver_options)
+
         src_nfs_share, src_mount_point, src_volume_file = (
             self._mount_volume(src_volume))
         src_volume_info = image_utils.qemu_img_info(src_volume_file,
