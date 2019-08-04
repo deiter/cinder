@@ -32,6 +32,7 @@ from cinder.image import image_utils
 from cinder import interface
 from cinder import objects
 from cinder.privsep import fs
+from cinder import utils as cutils
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers import nfs
@@ -1740,8 +1741,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         LOG.debug(' ===> before_volume_copy %s => %s on %s', src_volume['name'], dst_volume['name'], self.host)
         LOG.debug(' ===> before_volume_copy %s => %s on %s', src_volume['host'], dst_volume['host'], self.host)
-        driver_options = self.get_driver_options()
-        config = options.get_backend_configuration('xxx', driver_options)
+
+
+         use_multipath = self.configuration.use_multipath_for_image_xfer
+         enforce_multipath = self.configuration.enforce_multipath_for_image_xfer
+         properties = cutils.brick_get_connector_properties(use_multipath, enforce_multipath)
+         attach_info, dst_volume = self._attach_volume(ctxt, dst_volume, properties)
+         LOG.debug(' ===> attach_info is %s', attach_info)
+         dst_volume_info = image_utils.qemu_img_info(attach_info['device']['path'], run_as_root=True, force_share=True)
+         LOG.debug(' ===> dst_volume_info is %s', dst_volume_info)
+         self._detach_volume(ctxt, attach_info, dst_volume, properties, force=True)
+
+
+
+
 
         src_nfs_share, src_mount_point, src_volume_file = (
             self._mount_volume(src_volume))
@@ -1749,11 +1762,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                                     run_as_root=True,
                                                     force_share=True)
         self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
-        dst_nfs_share, dst_mount_point, dst_volume_file = (
-            self._mount_volume(dst_volume))
-        dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
-                                                    run_as_root=True,
-                                                    force_share=True)
+
+        #dst_nfs_share, dst_mount_point, dst_volume_file = (
+        #    self._mount_volume(dst_volume))
+        #dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
+        #                                            run_as_root=True,
+        #                                            force_share=True)
+
         if src_volume_info.file_format == dst_volume_info.file_format:
             self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
             return
