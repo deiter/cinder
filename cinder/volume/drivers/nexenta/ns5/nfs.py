@@ -1468,8 +1468,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 'extra_info': extra_info
             })
         return volume_utils.paginate_entries_list(manageable_volumes,
-                                           marker, limit, offset,
-                                           sort_keys, sort_dirs)
+                                                  marker, limit, offset,
+                                                  sort_keys, sort_dirs)
 
     def unmanage(self, volume):
         """Removes the specified volume from Cinder management.
@@ -1653,8 +1653,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 'source_reference': source_reference
             })
         return volume_utils.paginate_entries_list(manageable_snapshots,
-                                           marker, limit, offset,
-                                           sort_keys, sort_dirs)
+                                                  marker, limit, offset,
+                                                  sort_keys, sort_dirs)
 
     def unmanage_snapshot(self, snapshot):
         """Removes the specified snapshot from Cinder management.
@@ -1803,7 +1803,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         This method will be called after _copy_volume_data during volume
         migration
         """
-        LOG.debug(' ===> after_volume_copy %s => %s on %s', src_volume['name'], dst_volume['name'], self.host)
         properties = self.nef.filesystems.properties
         payload = self._get_vendor_properties(dst_volume, properties)
         dst_volume_format = payload.pop('volumeFormat')
