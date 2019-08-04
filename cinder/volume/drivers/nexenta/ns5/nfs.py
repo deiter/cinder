@@ -1746,7 +1746,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         use_multipath = self.configuration.use_multipath_for_image_xfer
         enforce_multipath = self.configuration.enforce_multipath_for_image_xfer
         properties = cutils.brick_get_connector_properties(use_multipath, enforce_multipath)
-        attach_info, dst_volume = self._attach_volume(ctxt, dst_volume, properties)
+        attach_info, dst_volume = self._attach_volume(ctxt, dst_volume, properties, remote=True)
         LOG.debug(' ===> attach_info is %s', attach_info)
         dst_volume_info = image_utils.qemu_img_info(attach_info['device']['path'], run_as_root=True, force_share=True)
         LOG.debug(' ===> dst_volume_info is %s', dst_volume_info)
