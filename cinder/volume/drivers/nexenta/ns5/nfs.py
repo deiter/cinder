@@ -1739,53 +1739,65 @@ class NexentaNfsDriver(nfs.NfsDriver):
         This method will be called before _copy_volume_data during volume
         migration
         """
-        LOG.debug(' ===> before_volume_copy %s => %s on %s', src_volume['name'], dst_volume['name'], self.host)
-        LOG.debug(' ===> before_volume_copy %s => %s on %s', src_volume['host'], dst_volume['host'], self.host)
-
-
-        use_multipath = self.configuration.use_multipath_for_image_xfer
-        enforce_multipath = self.configuration.enforce_multipath_for_image_xfer
-        properties = cutils.brick_get_connector_properties(use_multipath, enforce_multipath)
-        attach_info, dst_volume = self._attach_volume(ctxt, dst_volume, properties, remote=True)
-        LOG.debug(' ===> attach_info is %s', attach_info)
-        dst_volume_info = image_utils.qemu_img_info(attach_info['device']['path'], run_as_root=True, force_share=True)
-        LOG.debug(' ===> dst_volume_info is %s', dst_volume_info)
-        self._detach_volume(ctxt, attach_info, dst_volume, properties, force=True)
-
-
-
-
-
+        connector_properties = cinder_utils.brick_get_connector_properties()
+        attach_info, dst_volume = self._attach_volume(ctxt, dst_volume,
+                                                      connector_properties,
+                                                      remote=True)
+        dst_volume_file = attach_info['device']['path']
+        dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
+                                                    run_as_root=True,
+                                                    force_share=True)
+        self._detach_volume(ctxt, attach_info, dst_volume,
+                            connector_properties, force=True)
         src_nfs_share, src_mount_point, src_volume_file = (
             self._mount_volume(src_volume))
         src_volume_info = image_utils.qemu_img_info(src_volume_file,
                                                     run_as_root=True,
                                                     force_share=True)
-        self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
-
-        #dst_nfs_share, dst_mount_point, dst_volume_file = (
-        #    self._mount_volume(dst_volume))
-        #dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
-        #                                            run_as_root=True,
-        #                                            force_share=True)
-
         if src_volume_info.file_format == dst_volume_info.file_format:
-            self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
+            self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
             return
-        tmp_volume_file = '%(path)s.%(format)s' % {
-            'path': dst_volume_file,
+        bak_volume_file = '%(path)s.%(format)s' % {
+            'path': src_volume_file,
             'format': src_volume_info.file_format
         }
-        self._execute('qemu-img', 'convert',
-                      '-f', dst_volume_info.file_format,
-                      '-O', src_volume_info.file_format,
-                      dst_volume_file, tmp_volume_file,
-                      run_as_root=True)
-        self._execute('rm', '-f', dst_volume_file, run_as_root=True)
-        self._execute('mv', tmp_volume_file, dst_volume_file, run_as_root=True)
-        self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
+        try:
+            self._execute('mv', src_volume_file,
+                          bak_volume_file,
+                          run_as_root=True)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to rename backend file %(src_volume_file)s'
+                         'to %(bak_volume_file)s before migrating the source '
+                         'volume %(src_volume)s: %(error)s')
+                       % {'src_volume_file': src_volume_file,
+                          'bak_volume_file': bak_volume_file,
+                          'src_volume': src_volume['name'],
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+        try:
+            self._execute('qemu-img', 'convert',
+                          '-f', src_volume_info.file_format,
+                          '-O', dst_volume_info.file_format,
+                          bak_volume_file, src_volume_file,
+                          run_as_root=True)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to convert %(src_format)s file '
+                         '%(bak_volume_file)s to %(dst_format)s '
+                         'file %(src_volume_file)s before migrating '
+                         'the source volume %(src_volume)s: %(error)s')
+                       % {'src_format': src_volume_info.file_format,
+                          'bak_volume_file': bak_volume_file,
+                          'dst_format': dst_volume_info.file_format,
+                          'src_volume_file': src_volume_file,
+                          'src_volume': src_volume['name'],
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+        self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
 
-    def after_volume_copy(self, ctxt, src_volume, dst_volume, remote=None):
+    # TODO: rename
+    def __after_volume_copy(self, ctxt, src_volume, dst_volume, remote=None):
         """Driver-specific actions after copy volume data.
 
         This method will be called after _copy_volume_data during volume
