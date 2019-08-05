@@ -711,7 +711,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param connector: a connector object
         :returns: dictionary of connection information
         """
-        # TODO
         LOG.debug('Initialize volume connection for %(volume)s '
                   'and connector %(connector)s',
                   {'volume': volume['name'], 'connector': connector})
@@ -776,7 +775,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def _delete(self, path):
         """Override parent method for safe remove mountpoint."""
         try:
-            os.rmdir(path)
+            self._execute('rmdir', path, run_as_root=True)
             LOG.debug('The mountpoint %(path)s has been successfully removed',
                       {'path': path})
         except OSError as error:
@@ -854,9 +853,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._set_volume_acl(volume)
         if volume['size'] > snapshot['volume_size']:
             new_size = volume['size']
-            volume['size'] = snapshot['volume_size']
             self.extend_volume(volume, new_size)
-            volume['size'] = new_size
 
     def create_cloned_volume(self, volume, src_vref):
         """Creates a clone of the specified volume.
@@ -1079,8 +1076,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param volume: volume reference
         """
-        share = self._get_volume_share(volume)
-        mount_point = self._get_mount_point_for_share(share)
+        nfs_share = self._get_volume_share(volume)
+        mount_point = self._get_mount_point_for_share(nfs_share)
         volume_file = os.path.join(mount_point, VOLUME_FILE_NAME)
         return volume_file
 
@@ -1114,8 +1111,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             filesystem = self.nef.filesystems.get(volume_path, get_payload)
         if not filesystem['isMounted']:
             self.nef.filesystems.mount(volume_path)
-        share = '%s:%s' % (self.nas_host, filesystem['mountPoint'])
-        return share
+        nfs_share = '%s:%s' % (self.nas_host, filesystem['mountPoint'])
+        return nfs_share
 
     def _get_volume_path(self, volume):
         """Return ZFS dataset path for the volume."""
@@ -1126,7 +1123,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_name = snapshot['volume_name']
         snapshot_name = snapshot['name']
         volume_path = posixpath.join(self.nas_path, volume_name)
-        return '%s@%s' % (volume_path, snapshot_name)
+        snapshot_path = '%s@%s' % (volume_path, snapshot_name)
+        return snapshot_path
 
     def get_volume_stats(self, refresh=False):
         """Get volume stats.
