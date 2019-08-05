@@ -346,9 +346,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
             volume_file, volume_info.file_format,
             self.configuration.volume_dd_blocksize,
             run_as_root=True)
-        #image_utils.resize_image(volume_file,
-        #                         volume['size'],
-        #                         run_as_root=True)
+        image_utils.resize_image(volume_file,
+                                 volume['size'],
+                                 run_as_root=True)
         self._unmount_volume(volume, nfs_share, mount_point)
 
     def copy_volume_to_image(self, context, volume, image_service, image_meta):
