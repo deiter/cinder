@@ -1706,15 +1706,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
             try:
                 self.nef.filesystems.rename(volume_path, payload)
             except jsonrpc.NefException as error:
-                LOG.error('Failed to create backup copy of volume '
-                          '%(volume)s: %(error)s',
+                LOG.error('Failed to create backup copy of original '
+                          'volume %(volume)s: %(error)s',
                           {'volume': volume['name'],
                            'error': error})
                 if error.code != 'ENOENT':
                     raise error
             else:
                 volume_renamed = True
-
         payload = {'newPath': volume_path}
         try:
             self.nef.filesystems.rename(new_volume_path, payload)
@@ -1729,8 +1728,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 try:
                     self.nef.filesystems.rename(bak_volume_path, payload)
                 except jsonrpc.NefException as restore_error:
-                    LOG.error('Failed to restore backup copy of volume '
-                              '%(volume)s: %(error)s',
+                    LOG.error('Failed to restore backup copy of original '
+                              'volume %(volume)s: %(error)s',
                               {'volume': volume['name'],
                                'error': restore_error})
             raise rename_error
@@ -1739,8 +1738,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             try:
                 self.nef.filesystems.delete(bak_volume_path, payload)
             except jsonrpc.NefException as error:
-                LOG.error('Failed to delete backup copy of volume '
-                          '%(volume)s: %(error)s',
+                LOG.error('Failed to delete backup copy of original '
+                          'volume %(volume)s: %(error)s',
                           {'volume': volume['name'],
                            'error': error})
         return {'_name_id': None, 'provider_location': None}
@@ -1774,8 +1773,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'format': src_volume_info.file_format
         }
         try:
-            self._execute('mv', src_volume_file,
-                          bak_volume_file,
+            self._execute('mv', src_volume_file, bak_volume_file,
                           run_as_root=True)
         except OSError as error:
             code = errno.errorcode[error.errno]
@@ -1795,49 +1793,18 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           run_as_root=True)
         except OSError as error:
             code = errno.errorcode[error.errno]
-            message = (_('Failed to convert %(src_format)s file '
-                         '%(bak_volume_file)s to %(dst_format)s '
+            message = (_('Failed to convert %(src_file_format)s file '
+                         '%(bak_volume_file)s to %(dst_file_format)s '
                          'file %(src_volume_file)s before migrating '
                          'the source volume %(src_volume)s: %(error)s')
-                       % {'src_format': src_volume_info.file_format,
+                       % {'src_file_format': src_volume_info.file_format,
                           'bak_volume_file': bak_volume_file,
-                          'dst_format': dst_volume_info.file_format,
+                          'dst_file_format': dst_volume_info.file_format,
                           'src_volume_file': src_volume_file,
                           'src_volume': src_volume['name'],
                           'error': error.strerror})
             raise jsonrpc.NefException(code=code, message=message)
         self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
-
-    # TODO: rename
-    def __after_volume_copy(self, ctxt, src_volume, dst_volume, remote=None):
-        """Driver-specific actions after copy volume data.
-
-        This method will be called after _copy_volume_data during volume
-        migration
-        """
-        properties = self.nef.filesystems.properties
-        payload = self._get_vendor_properties(dst_volume, properties)
-        dst_volume_format = payload.pop('volumeFormat')
-        dst_nfs_share, dst_mount_point, dst_volume_file = (
-            self._mount_volume(dst_volume))
-        dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
-                                                    run_as_root=True,
-                                                    force_share=True)
-        if dst_volume_info.file_format == dst_volume_format:
-            self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
-            return
-        tmp_volume_file = '%(path)s.%(format)s' % {
-            'path': dst_volume_file,
-            'format': dst_volume_format
-        }
-        self._execute('qemu-img', 'convert',
-                      '-f', dst_volume_info.file_format,
-                      '-O', dst_volume_format,
-                      dst_volume_file, tmp_volume_file,
-                      run_as_root=True)
-        self._execute('rm', '-f', dst_volume_file, run_as_root=True)
-        self._execute('mv', tmp_volume_file, dst_volume_file, run_as_root=True)
-        self._unmount_volume(dst_volume, dst_nfs_share, dst_mount_point)
 
     def retype(self, context, volume, new_type, diff, host):
         """Retype from one volume type to another."""
