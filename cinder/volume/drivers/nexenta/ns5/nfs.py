@@ -339,16 +339,28 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Copy image %(image)s to volume %(volume)s',
                   {'image': image_id, 'volume': volume['name']})
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        super(NexentaNfsDriver, self).copy_image_to_volume(
-            context, volume, image_service, image_id)
+        volume_info = image_utils.qemu_img_info(volume_file, run_as_root=True,
+                                                force_share=True)
+        image_utils.fetch_to_volume_format(
+            context, image_service, image_id,
+            volume_file, volume_info.file_format,
+            self.configuration.volume_dd_blocksize,
+            run_as_root=True)
+        #image_utils.resize_image(volume_file,
+        #                         volume['size'],
+        #                         run_as_root=True)
         self._unmount_volume(volume, nfs_share, mount_point)
 
     def copy_volume_to_image(self, context, volume, image_service, image_meta):
         LOG.debug('Copy volume %(volume)s to image %(image)s',
                   {'volume': volume['name'], 'image': image_meta['id']})
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        super(NexentaNfsDriver, self).copy_volume_to_image(
-            context, volume, image_service, image_meta)
+        volume_info = image_utils.qemu_img_info(volume_file, run_as_root=True,
+                                                force_share=True)
+        image_utils.upload_volume(
+            context, image_service, image_meta,
+            volume_file, volume_format=volume_info.file_format,
+            run_as_root=True)
         self._unmount_volume(volume, nfs_share, mount_point)
 
     def _ensure_share_unmounted(self, nfs_share, mount_point=None):
