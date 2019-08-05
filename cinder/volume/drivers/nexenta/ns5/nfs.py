@@ -1699,10 +1699,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_renamed = False
         volume_path = self._get_volume_path(volume)
         new_volume_path = self._get_volume_path(new_volume)
-        backup_volume_path = '%s-backup' % volume_path
+        bak_volume_path = '%s-backup' % volume_path
         if volume['host'] == new_volume['host']:
             volume['_name_id'] = new_volume['id']
-            payload = {'newPath': backup_volume_path}
+            payload = {'newPath': bak_volume_path}
             try:
                 self.nef.filesystems.rename(volume_path, payload)
             except jsonrpc.NefException as error:
@@ -1727,7 +1727,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             if volume_renamed:
                 payload = {'newPath': volume_path}
                 try:
-                    self.nef.filesystems.rename(backup_volume_path, payload)
+                    self.nef.filesystems.rename(bak_volume_path, payload)
                 except jsonrpc.NefException as restore_error:
                     LOG.error('Failed to restore backup copy of volume '
                               '%(volume)s: %(error)s',
@@ -1737,7 +1737,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if volume_renamed:
             payload = {'force': True}
             try:
-                self.nef.filesystems.delete(backup_volume_path, payload)
+                self.nef.filesystems.delete(bak_volume_path, payload)
             except jsonrpc.NefException as error:
                 LOG.error('Failed to delete backup copy of volume '
                           '%(volume)s: %(error)s',
@@ -1845,11 +1845,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   'and volume type %(type)s with diff %(diff)s',
                   {'volume': volume['name'], 'host': host['host'],
                    'type': new_type['name'], 'diff': diff})
-        migrated = retyped = False
+        retyped = False
         model_update = None
-        #if volume['host'] != host['host']:
-        #    # TODO
-        #    migrated, model_update = self.migrate_volume(context, volume, host)
         volume_path = self._get_volume_path(volume)
         payload = {'source': True}
         volume_specs = self.nef.filesystems.get(volume_path, payload)
@@ -1891,7 +1888,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         except jsonrpc.NefException as error:
             LOG.error('Failed to retype volume %(volume)s: %(error)s',
                       {'volume': volume['name'], 'error': error})
-        return retyped or migrated, model_update
+        return retyped, model_update
 
     def _init_vendor_properties(self):
         """Create a dictionary of vendor unique properties.
