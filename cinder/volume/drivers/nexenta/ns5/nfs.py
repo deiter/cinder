@@ -154,7 +154,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             options.NEXENTA_DATASET_OPTS
         )
 
-    def do_setup(self, context):
+    def do_setup(self, ctxt):
         self.nef = jsonrpc.NefProxy(self.driver_volume_type,
                                     self.nas_path,
                                     self.configuration)
@@ -276,6 +276,43 @@ class NexentaNfsDriver(nfs.NfsDriver):
         reservation += meta_size
         return reservation
 
+    def _convert_volume_file_format(self, volume, volume_file, src_format,
+                                    dst_format):
+        backup_file = '%(path)s.%(format)s' % {
+            'path': volume_file,
+            'format': src_format
+        }
+        try:
+            self._execute('mv', volume_file, backup_file, run_as_root=True)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to rename backend file %(volume_file)s '
+                         'to %(backup_file)s before converting volume '
+                         '%(volume)s: %(error)s')
+                       % {'volume_file': volume_file,
+                          'backup_file': backup_file,
+                          'volume': volume['name'],
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+        try:
+            self._execute('qemu-img', 'convert',
+                          '-f', src_format,
+                          '-O', dst_format,
+                          backup_file, volume_file,
+                          run_as_root=True)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to convert %(src_format)s file '
+                         '%(backup_file)s to %(dst_format)s file '
+                         '%(volume_file)s for volume %(volume)s: %(error)s')
+                       % {'src_format': src_format,
+                          'backup_file': backup_file,
+                          'dst_format': dst_format,
+                          'volume_file': volume_file,
+                          'volume': volume['name'],
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+
     @coordination.synchronized('{self.nef.lock}')
     def create_volume(self, volume):
         """Creates a volume.
@@ -324,14 +361,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    % {'volume': volume['name'], 'error': error_message})
         raise jsonrpc.NefException(code=error_code, message=message)
 
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
         LOG.debug('Copy image %(image)s to volume %(volume)s',
                   {'image': image_id, 'volume': volume['name']})
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
         volume_info = image_utils.qemu_img_info(volume_file, run_as_root=True,
                                                 force_share=True)
         image_utils.fetch_to_volume_format(
-            context, image_service, image_id,
+            ctxt, image_service, image_id,
             volume_file, volume_info.file_format,
             self.configuration.volume_dd_blocksize,
             run_as_root=True)
@@ -340,14 +377,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                  run_as_root=True)
         self._unmount_volume(volume, nfs_share, mount_point)
 
-    def copy_volume_to_image(self, context, volume, image_service, image_meta):
+    def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
         LOG.debug('Copy volume %(volume)s to image %(image)s',
                   {'volume': volume['name'], 'image': image_meta['id']})
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
         volume_info = image_utils.qemu_img_info(volume_file, run_as_root=True,
                                                 force_share=True)
         image_utils.upload_volume(
-            context, image_service, image_meta,
+            ctxt, image_service, image_meta,
             volume_file, volume_format=volume_info.file_format,
             run_as_root=True)
         self._unmount_volume(volume, nfs_share, mount_point)
@@ -552,13 +589,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        'error': error})
         return True
 
-    def migrate_volume(self, context, volume, host):
+    def migrate_volume(self, ctxt, volume, host):
         """Migrate the volume to the specified host.
 
         Returns a boolean indicating whether the migration occurred,
         as well as model_update.
 
-        :param context: Security context
+        :param ctxt: Security context
         :param volume: A dictionary describing the volume to migrate
         :param host: A dictionary describing the host to migrate to, where
                      host['host'] is its name, and host['capabilities'] is a
@@ -670,15 +707,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
             return (True, None)
         return false_ret
 
-    def create_export(self, context, volume, connector):
+    def create_export(self, ctxt, volume, connector):
         """Driver entry point to get the export info for a new volume."""
         pass
 
-    def ensure_export(self, context, volume):
+    def ensure_export(self, ctxt, volume):
         """Driver entry point to get the export info for an existing volume."""
         pass
 
-    def remove_export(self, context, volume):
+    def remove_export(self, ctxt, volume):
         """Driver entry point to remove an export for a volume."""
         pass
 
@@ -819,7 +856,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         # actually helpful.
         return False
 
-    def revert_to_snapshot(self, context, volume, snapshot):
+    def revert_to_snapshot(self, ctxt, volume, snapshot):
         """Revert volume to snapshot."""
         volume_path = self._get_volume_path(volume)
         payload = {'snapshot': snapshot['name']}
@@ -876,29 +913,29 @@ class NexentaNfsDriver(nfs.NfsDriver):
                            'snapshot': snapshot['name'],
                            'error': error})
 
-    def create_consistencygroup(self, context, group):
+    def create_consistencygroup(self, ctxt, group):
         """Creates a consistency group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the dictionary of the consistency group to be created.
         :returns: group_model_update
         """
         group_model_update = {}
         return group_model_update
 
-    def create_group(self, context, group):
+    def create_group(self, ctxt, group):
         """Creates a group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the group object.
         :returns: model_update
         """
-        return self.create_consistencygroup(context, group)
+        return self.create_consistencygroup(ctxt, group)
 
-    def delete_consistencygroup(self, context, group, volumes):
+    def delete_consistencygroup(self, ctxt, group, volumes):
         """Deletes a consistency group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the dictionary of the consistency group to be deleted.
         :param volumes: a list of volume dictionaries in the group.
         :returns: group_model_update, volumes_model_update
@@ -909,21 +946,21 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.delete_volume(volume)
         return group_model_update, volumes_model_update
 
-    def delete_group(self, context, group, volumes):
+    def delete_group(self, ctxt, group, volumes):
         """Deletes a group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the group object.
         :param volumes: a list of volume objects in the group.
         :returns: model_update, volumes_model_update
         """
-        return self.delete_consistencygroup(context, group, volumes)
+        return self.delete_consistencygroup(ctxt, group, volumes)
 
-    def update_consistencygroup(self, context, group, add_volumes=None,
+    def update_consistencygroup(self, ctxt, group, add_volumes=None,
                                 remove_volumes=None):
         """Updates a consistency group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the dictionary of the consistency group to be updated.
         :param add_volumes: a list of volume dictionaries to be added.
         :param remove_volumes: a list of volume dictionaries to be removed.
@@ -934,23 +971,23 @@ class NexentaNfsDriver(nfs.NfsDriver):
         remove_volumes_update = []
         return group_model_update, add_volumes_update, remove_volumes_update
 
-    def update_group(self, context, group, add_volumes=None,
+    def update_group(self, ctxt, group, add_volumes=None,
                      remove_volumes=None):
         """Updates a group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the group object.
         :param add_volumes: a list of volume objects to be added.
         :param remove_volumes: a list of volume objects to be removed.
         :returns: model_update, add_volumes_update, remove_volumes_update
         """
-        return self.update_consistencygroup(context, group, add_volumes,
+        return self.update_consistencygroup(ctxt, group, add_volumes,
                                             remove_volumes)
 
-    def create_cgsnapshot(self, context, cgsnapshot, snapshots):
+    def create_cgsnapshot(self, ctxt, cgsnapshot, snapshots):
         """Creates a consistency group snapshot.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param cgsnapshot: the dictionary of the cgsnapshot to be created.
         :param snapshots: a list of snapshot dictionaries in the cgsnapshot.
         :returns: group_model_update, snapshots_model_update
@@ -972,20 +1009,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.snapshots.delete(cgsnapshot_path, delete_payload)
         return group_model_update, snapshots_model_update
 
-    def create_group_snapshot(self, context, group_snapshot, snapshots):
+    def create_group_snapshot(self, ctxt, group_snapshot, snapshots):
         """Creates a group_snapshot.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group_snapshot: the GroupSnapshot object to be created.
         :param snapshots: a list of Snapshot objects in the group_snapshot.
         :returns: model_update, snapshots_model_update
         """
-        return self.create_cgsnapshot(context, group_snapshot, snapshots)
+        return self.create_cgsnapshot(ctxt, group_snapshot, snapshots)
 
-    def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
+    def delete_cgsnapshot(self, ctxt, cgsnapshot, snapshots):
         """Deletes a consistency group snapshot.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param cgsnapshot: the dictionary of the cgsnapshot to be created.
         :param snapshots: a list of snapshot dictionaries in the cgsnapshot.
         :returns: group_model_update, snapshots_model_update
@@ -996,22 +1033,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.delete_snapshot(snapshot)
         return group_model_update, snapshots_model_update
 
-    def delete_group_snapshot(self, context, group_snapshot, snapshots):
+    def delete_group_snapshot(self, ctxt, group_snapshot, snapshots):
         """Deletes a group_snapshot.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group_snapshot: the GroupSnapshot object to be deleted.
         :param snapshots: a list of snapshot objects in the group_snapshot.
         :returns: model_update, snapshots_model_update
         """
-        return self.delete_cgsnapshot(context, group_snapshot, snapshots)
+        return self.delete_cgsnapshot(ctxt, group_snapshot, snapshots)
 
-    def create_consistencygroup_from_src(self, context, group, volumes,
+    def create_consistencygroup_from_src(self, ctxt, group, volumes,
                                          cgsnapshot=None, snapshots=None,
                                          source_cg=None, source_vols=None):
         """Creates a consistency group from source.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the dictionary of the consistency group to be created.
         :param volumes: a list of volume dictionaries in the group.
         :param cgsnapshot: the dictionary of the cgsnapshot as source.
@@ -1042,12 +1079,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.nef.snapshots.delete(snapshot_path, delete_payload)
         return group_model_update, volumes_model_update
 
-    def create_group_from_src(self, context, group, volumes,
+    def create_group_from_src(self, ctxt, group, volumes,
                               group_snapshot=None, snapshots=None,
                               source_group=None, source_vols=None):
         """Creates a group from source.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the Group object to be created.
         :param volumes: a list of Volume objects in the group.
         :param group_snapshot: the GroupSnapshot object as source.
@@ -1056,7 +1093,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param source_vols: a list of volume objects in the source_group.
         :returns: model_update, volumes_model_update
         """
-        return self.create_consistencygroup_from_src(context, group, volumes,
+        return self.create_consistencygroup_from_src(ctxt, group, volumes,
                                                      group_snapshot, snapshots,
                                                      source_group, source_vols)
 
@@ -1364,6 +1401,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
             volume_path = self._get_volume_path(volume)
             payload = {'newPath': volume_path}
             self.nef.filesystems.rename(existing_volume_path, payload)
+        if not volume['volume_type_id']:
+            return
+        ctxt = context.get_admin_context()
+        volume_type_id = volume['volume_type_id']
+        volume_type = volume_types.get_volume_type(ctxt, volume_type_id)
+        diff = {}
+        host = volume['host']
+        self.retype(ctxt, volume, volume_type, diff, host)
 
     def manage_existing_get_size(self, volume, existing_ref):
         """Return size of volume to be managed by manage_existing.
@@ -1384,7 +1429,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                                     force_share=True)
         except OSError as error:
             code = errno.errorcode[error.errno]
-            message = (_('Manage existing volume %(volume)s failed: '
+            message = (_('Manage existing volume %(volume)s failed, '
                          'unable to get size of volume backend file '
                          '%(volume_file)s: %(error)s')
                        % {'volume': existing_volume['name'],
@@ -1393,7 +1438,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             raise jsonrpc.NefException(code=code, message=message)
         finally:
             self._unmount_volume(existing_volume, nfs_share, mount_point)
-        return volume_info.virtual_size // units.Gi
+        volume_size = volume_info.virtual_size // units.Gi
+        return volume_size
 
     def get_manageable_volumes(self, cinder_volumes, marker, limit, offset,
                                sort_keys, sort_dirs):
@@ -1669,14 +1715,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         pass
 
-    def update_migrated_volume(self, context, volume, new_volume,
+    def update_migrated_volume(self, ctxt, volume, new_volume,
                                original_volume_status):
         """Return model update for migrated volume.
 
         This method should rename the back-end volume name on the
         destination host back to its original name on the source host.
 
-        :param context: The context of the caller
+        :param ctxt: The context of the caller
         :param volume: The original volume that was migrated to this backend
         :param new_volume: The migration volume object that was created on
                            this backend as part of the migration process
@@ -1754,59 +1800,18 @@ class NexentaNfsDriver(nfs.NfsDriver):
         src_volume_info = image_utils.qemu_img_info(src_volume_file,
                                                     run_as_root=True,
                                                     force_share=True)
-        if src_volume_info.file_format == dst_volume_info.file_format:
-            self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
-            return
-        bak_volume_file = '%(path)s.%(format)s' % {
-            'path': src_volume_file,
-            'format': src_volume_info.file_format
-        }
-        try:
-            self._execute('mv', src_volume_file, bak_volume_file,
-                          run_as_root=True)
-        except OSError as error:
-            code = errno.errorcode[error.errno]
-            message = (_('Failed to rename backend file %(src_volume_file)s'
-                         'to %(bak_volume_file)s before migrating the source '
-                         'volume %(src_volume)s: %(error)s')
-                       % {'src_volume_file': src_volume_file,
-                          'bak_volume_file': bak_volume_file,
-                          'src_volume': src_volume['name'],
-                          'error': error.strerror})
-            raise jsonrpc.NefException(code=code, message=message)
-        try:
-            self._execute('qemu-img', 'convert',
-                          '-f', src_volume_info.file_format,
-                          '-O', dst_volume_info.file_format,
-                          bak_volume_file, src_volume_file,
-                          run_as_root=True)
-        except OSError as error:
-            code = errno.errorcode[error.errno]
-            message = (_('Failed to convert %(src_file_format)s file '
-                         '%(bak_volume_file)s to %(dst_file_format)s '
-                         'file %(src_volume_file)s before migrating '
-                         'the source volume %(src_volume)s: %(error)s')
-                       % {'src_file_format': src_volume_info.file_format,
-                          'bak_volume_file': bak_volume_file,
-                          'dst_file_format': dst_volume_info.file_format,
-                          'src_volume_file': src_volume_file,
-                          'src_volume': src_volume['name'],
-                          'error': error.strerror})
-            raise jsonrpc.NefException(code=code, message=message)
+        if src_volume_info.file_format != dst_volume_info.file_format:
+            self._convert_volume_file_format(src_volume, src_volume_file,
+                                             src_volume_info.file_format,
+                                             dst_volume_info.file_format)
         self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
 
-    def retype(self, context, volume, new_type, diff, host):
+    def retype(self, ctxt, volume, new_type, diff, host):
         """Retype from one volume type to another."""
         LOG.debug('Retype volume %(volume)s to host %(host)s '
                   'and volume type %(type)s with diff %(diff)s',
                   {'volume': volume['name'], 'host': host['host'],
                    'type': new_type['name'], 'diff': diff})
-        nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        volume_info = image_utils.qemu_img_info(volume_file,
-                                                run_as_root=True,
-                                                force_share=True)
-        volume_format = volume_info.file_format
-        self._unmount_volume(volume, nfs_share, mount_point)
         volume_path = self._get_volume_path(volume)
         payload = {'source': True}
         volume_specs = self.nef.filesystems.get(volume_path, payload)
@@ -1851,6 +1856,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                         continue
                     payload[api] = None
         sparsed_volume = payload.pop('sparseVolume')
+        volume_format = payload.pop('volumeFormat')
         try:
             self.nef.filesystems.set(volume_path, payload)
         except jsonrpc.NefException as error:
@@ -1863,6 +1869,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        'payload': payload,
                        'error': error})
             return False, None
+        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        volume_info = image_utils.qemu_img_info(volume_file,
+                                                run_as_root=True,
+                                                force_share=True)
+        if volume_info.file_format != volume_format:
+            self._convert_volume_file_format(volume, volume_file,
+                                             volume_info.file_format,
+                                             volume_format)
+        self._unmount_volume(volume, nfs_share, mount_point)
         if sparsed_volume:
             reservation = 0
         else:
