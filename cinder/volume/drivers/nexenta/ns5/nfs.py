@@ -764,7 +764,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def _delete(self, path):
         """Override parent method for safe remove mountpoint."""
         try:
-            self._execute('rmdir', path, run_as_root=True)
+            self._execute('rm', '-d', path, run_as_root=True)
             LOG.debug('The mountpoint %(path)s has been successfully removed',
                       {'path': path})
         except OSError as error:
