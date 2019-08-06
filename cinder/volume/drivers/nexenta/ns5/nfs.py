@@ -131,9 +131,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
             options.NEXENTA_NFS_OPTS)
         self.configuration.append_config_values(
             options.NEXENTA_DATASET_OPTS)
-        self.nef = None
-        self.root = None
         self.driver_name = self.__class__.__name__
+        self.nef = None
+        self.nas_root = None
         self.nas_host = self.configuration.nas_host
         self.nas_path = self.configuration.nas_share_path
         self.mount_point_base = self.configuration.nexenta_mount_point_base
@@ -161,19 +161,19 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def check_for_setup_error(self):
         """Check root filesystem, NFS service and NFS share."""
-        self.root = self.nef.filesystems.get(self.nas_path)
-        if self.root['mountPoint'] == 'none':
+        self.nas_root = self.nef.filesystems.get(self.nas_path)
+        if self.nas_root['mountPoint'] == 'none':
             message = (_('NFS root filesystem %(path)s is not writable')
-                       % {'path': self.root['mountPoint']})
+                       % {'path': self.nas_root['mountPoint']})
             raise jsonrpc.NefException(code='ENOENT', message=message)
-        if not self.root['isMounted']:
+        if not self.nas_root['isMounted']:
             message = (_('NFS root filesystem %(path)s is not mounted')
-                       % {'path': self.root['mountPoint']})
+                       % {'path': self.nas_root['mountPoint']})
             raise jsonrpc.NefException(code='ENOTDIR', message=message)
         payload = {}
-        if self.root['nonBlockingMandatoryMode']:
+        if self.nas_root['nonBlockingMandatoryMode']:
             payload['nonBlockingMandatoryMode'] = False
-        if self.root['smartCompression']:
+        if self.nas_root['smartCompression']:
             payload['smartCompression'] = False
         if payload:
             self.nef.filesystems.set(self.nas_path, payload)
@@ -418,7 +418,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 nfs_share = '%(host)s:%(path)s' % {
                     'host': self.nas_host,
                     'path': posixpath.join(
-                        self.root['mountPoint'],
+                        self.nas_root['mountPoint'],
                         volume['name']
                     )
                 }
@@ -1919,8 +1919,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                     property_spec[key] = vendor_spec[key]
             if 'api' in vendor_spec:
                 api = vendor_spec['api']
-                if api in self.root:
-                    property_spec['default'] = self.root[api]
+                if api in self.nas_root:
+                    property_spec['default'] = self.nas_root[api]
             property_name = vendor_spec['name']
             property_title = vendor_spec['title']
             property_description = vendor_spec['description']
