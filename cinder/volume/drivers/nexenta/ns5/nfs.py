@@ -1821,9 +1821,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                                         new_type)
         payload = {}
         for vendor_spec in vendor_specs:
-            name = vendor_spec['name']
             api = vendor_spec['api']
-            if name in volume_type_specs:
+            if api in volume_type_specs:
+                value = volume_type_specs[api]
+                if volume_specs[api] == value:
+                    continue
                 if 'retype' in vendor_spec:
                     LOG.error('Failed to retype volume %(volume)s '
                               'to host %(host)s and volume type '
@@ -1833,11 +1835,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                'type': new_type['name'],
                                'reason': vendor_spec['retype']})
                     return False, None
-                volume_type_spec = volume_type_specs[name]
-                value = self._get_vendor_value(volume_type_spec, vendor_spec)
                 payload[api] = value
-            elif (api in volume_specs and 'source' in volume_specs and
-                  api in volume_specs['source'] and
+            elif (api in volume_specs['source'] and
                   volume_specs['source'][api] in ['local', 'received']):
                 if 'cfg' in vendor_spec:
                     cfg = vendor_spec['cfg']
