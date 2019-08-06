@@ -1810,7 +1810,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """Retype from one volume type to another."""
         LOG.debug('Retype volume %(volume)s to host %(host)s '
                   'and volume type %(type)s with diff %(diff)s',
-                  {'volume': volume['name'], 'host': host['host'],
+                  {'volume': volume['name'], 'host': host,
                    'type': new_type['name'], 'diff': diff})
         volume_path = self._get_volume_path(volume)
         payload = {'source': True}
@@ -1829,7 +1829,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                               'to host %(host)s and volume type '
                               '%(type)s. %(reason)s',
                               {'volume': volume['name'],
-                               'host': host['host'],
+                               'host': host,
                                'type': new_type['name'],
                                'reason': vendor_spec['retype']})
                     return False, None
@@ -1864,7 +1864,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                       'host %(host)s and volume type %(type)s '
                       'with payload %(payload)s: %(error)s',
                       {'volume': volume['name'],
-                       'host': host['host'],
+                       'host': host,
                        'type': new_type['name'],
                        'payload': payload,
                        'error': error})
