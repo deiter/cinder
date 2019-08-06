@@ -1721,13 +1721,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                'error': restore_error})
             raise rename_error
         if volume_renamed:
-            payload = {'force': True}
+            payload = {'newPath': new_volume_path}
             try:
-                self.nef.filesystems.delete(bak_volume_path, payload)
+                self.nef.filesystems.rename(bak_volume_path, payload)
             except jsonrpc.NefException as error:
-                LOG.error('Failed to delete backup copy of original '
-                          'volume %(volume)s: %(error)s',
+                LOG.error('Failed to rename backup copy of original '
+                          'volume %(volume)s to temporary volume '
+                          '%(new_volume)s: %(error)s',
                           {'volume': volume['name'],
+                           'new_volume': new_volume['name'],
                            'error': error})
         return {'_name_id': None, 'provider_location': None}
 
