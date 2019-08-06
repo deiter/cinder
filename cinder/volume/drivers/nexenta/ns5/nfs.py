@@ -1805,7 +1805,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_info = image_utils.qemu_img_info(volume_file,
                                                 run_as_root=True,
                                                 force_share=True)
-        volume_format = volume_info['file_format']
+        volume_format = volume_info.file_format
         self._unmount_volume(volume, nfs_share, mount_point)
         volume_path = self._get_volume_path(volume)
         payload = {'source': True}
