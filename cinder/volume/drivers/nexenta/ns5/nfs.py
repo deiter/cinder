@@ -189,21 +189,30 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'state': share['shareState']})
             raise jsonrpc.NefException(code='ESRCH', message=message)
 
-    def _get_volume_reservation(self, volume):
+    def _get_volume_reservation(self, volume, volume_format):
         """Calculates the correct reservation size for given volume size.
 
         Its purpose is to reserve additional space for volume metadata
         so volume don't unexpectedly run out of room. This function is
         a copy of the volsize_to_reservation function in libzfs_dataset.c
+        and qcow2_calc_prealloc_size function in qcow2.c
 
         :param volume: volume reference
+        :param volume_format: volume backend file format
         :returns: reservation size
         """
+        def div_roundup(numerator, denominator):
+            return (numerator + denominator - 1) // denominator
+
+        def roundup(numerator, denominator):
+            return div_roundup(numerator, denominator) * denominator
+
         volume_path = self._get_volume_path(volume)
+        volume_size = volume['size'] * units.Gi
         filesystem = self.nef.filesystems.get(volume_path)
         block_size = filesystem['recordSize']
         data_copies = filesystem['dataCopies']
-        reservation = volume['size'] * units.Gi
+        reservation = volume_size
         numdb = 7
         dn_max_indblkshift = 17
         spa_blkptrshift = 7
@@ -219,26 +228,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         reservation *= data_copies
         numdb *= 1 << dn_max_indblkshift
         reservation += numdb
-        return reservation
-
-    def _get_meta_size(self, volume, volume_format):
-        """Calculates the metadata size for given volume format.
-
-        Its purpose is to reserve additional space for volume metadata
-        so volume don't unexpectedly run out of room. This function is
-        a copy of the qcow2_calc_prealloc_size function in qcow2.c
-
-        :param volume: volume reference
-        :volume_format: volume format
-        :returns: metadata size
-        """
-        def div_roundup(numerator, denominator):
-            return (numerator + denominator - 1) // denominator
-
-        def roundup(numerator, denominator):
-            return div_roundup(numerator, denominator) * denominator
-
-        volume_size = volume['size'] * units.Gi
         if volume_format == VOLUME_FORMAT_RAW:
             meta_size = 0
         elif volume_format == VOLUME_FORMAT_QCOW:
@@ -284,7 +273,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             message = (_('Volume format %(volume_format)s is not supported')
                        % {'volume_format': volume_format})
             raise jsonrpc.NefException(code='EINVAL', message=message)
-        return meta_size
+        reservation += meta_size
+        return reservation
 
     @coordination.synchronized('{self.nef.lock}')
     def create_volume(self, volume):
@@ -294,7 +284,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         volume_path = self._get_volume_path(volume)
         properties = self.nef.filesystems.properties
-        payload = self._get_vendor_properties(volume, properties)
+        payload = self._get_vendor_properties(properties, volume)
         sparsed_volume = payload.pop('sparseVolume')
         volume_format = payload.pop('volumeFormat')
         specs = {'size': '%sG' % volume['size']}
@@ -311,8 +301,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           volume_options, volume_file, run_as_root=True)
             if sparsed_volume:
                 return
-            reservation = self._get_volume_reservation(volume)
-            reservation += self._get_meta_size(volume, volume_format)
+            reservation = self._get_volume_reservation(volume, volume_format)
             payload = {'referencedReservationSize': reservation}
             self.nef.filesystems.set(volume_path, payload)
         except jsonrpc.NefException as error:
@@ -1810,26 +1799,35 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   'and volume type %(type)s with diff %(diff)s',
                   {'volume': volume['name'], 'host': host['host'],
                    'type': new_type['name'], 'diff': diff})
-        retyped = False
-        model_update = None
+        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        volume_info = image_utils.qemu_img_info(volume_file,
+                                                run_as_root=True,
+                                                force_share=True)
+        volume_format = volume_info['file_format']
+        self._unmount_volume(volume, nfs_share, mount_point)
         volume_path = self._get_volume_path(volume)
         payload = {'source': True}
         volume_specs = self.nef.filesystems.get(volume_path, payload)
-        payload = {}
-        extra_specs = volume_types.get_volume_type_extra_specs(new_type['id'])
         vendor_specs = self.nef.filesystems.properties
+        volume_type_specs = self._get_vendor_properties(vendor_specs,
+                                                        volume,
+                                                        new_type)
+        payload = {}
         for vendor_spec in vendor_specs:
-            property_name = vendor_spec['name']
+            name = vendor_spec['name']
             api = vendor_spec['api']
-            if 'retype' in vendor_spec:
-                LOG.error('Failed to retype vendor volume property '
-                          '%(property_name)s. %(reason)s',
-                          {'property_name': property_name,
-                           'reason': vendor_spec['retype']})
-                return retyped
-            if property_name in extra_specs:
-                extra_spec = extra_specs[property_name]
-                value = self._get_vendor_value(extra_spec, vendor_spec)
+            if name in volume_type_specs:
+                if 'retype' in vendor_spec:
+                    LOG.error('Failed to retype volume %(volume)s '
+                              'to host %(host)s and volume type '
+                              '%(type)s. %(reason)s',
+                              {'volume': volume['name'],
+                               'host': host['host'],
+                               'type': new_type['name'],
+                               'reason': vendor_spec['retype']})
+                    return False, None
+                volume_type_spec = volume_type_specs[name]
+                value = self._get_vendor_value(volume_type_spec, vendor_spec)
                 payload[api] = value
             elif (api in volume_specs and 'source' in volume_specs and
                   api in volume_specs['source'] and
@@ -1841,19 +1839,43 @@ class NexentaNfsDriver(nfs.NfsDriver):
                         payload[api] = value
                 else:
                     if 'inherit' in vendor_spec:
-                        LOG.debug('Skip inherit vendor volume property '
-                                  '%(property_name)s. %(reason)s',
-                                  {'property_name': property_name,
+                        LOG.debug('Unable to inherit property %(name)s '
+                                  'from volume type %(type)s for volume '
+                                  '%(volume)s. %(reason)s',
+                                  {'name': name,
+                                   'type': new_type['name'],
+                                   'volume': volume['name'],
                                    'reason': vendor_spec['inherit']})
                         continue
                     payload[api] = None
+        sparsed_volume = payload.pop('sparseVolume')
         try:
             self.nef.filesystems.set(volume_path, payload)
-            retyped = True
         except jsonrpc.NefException as error:
-            LOG.error('Failed to retype volume %(volume)s: %(error)s',
-                      {'volume': volume['name'], 'error': error})
-        return retyped, model_update
+            LOG.error('Failed to retype volume %(volume)s to '
+                      'host %(host)s and volume type %(type)s '
+                      'with payload %(payload)s: %(error)s',
+                      {'volume': volume['name'],
+                       'host': host['host'],
+                       'type': new_type['name'],
+                       'payload': payload,
+                       'error': error})
+            return False, None
+        if sparsed_volume:
+            reservation = 0
+        else:
+            reservation = self._get_volume_reservation(volume, volume_format)
+        payload = {'referencedReservationSize': reservation}
+        try:
+            self.nef.filesystems.set(volume_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to change reservation to %(reservation)s '
+                      'for volume %(volume)s: %(error)s',
+                      {'reservation': reservation,
+                       'volume': volume['name'],
+                       'error': error})
+            return False, None
+        return True, None
 
     def _init_vendor_properties(self):
         """Create a dictionary of vendor unique properties.
@@ -1919,16 +1941,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
             )
         return properties, namespace
 
-    def _get_vendor_properties(self, volume, vendor_specs):
+    def _get_vendor_properties(self, vendor_specs, volume, volume_type=None):
         properties = {}
         extra_specs = {}
-        type_id = volume.get('volume_type_id', None)
-        if type_id:
-            extra_specs = volume_types.get_volume_type_extra_specs(type_id)
+        if volume_type:
+            volume_type_id = volume_type['id']
+        else:
+            volume_type_id = volume['volume_type_id']
+        if volume_type_id:
+            extra_specs = volume_types.get_volume_type_extra_specs(
+                volume_type_id)
         for vendor_spec in vendor_specs:
-            property_name = vendor_spec['name']
-            if property_name in extra_specs:
-                extra_spec = extra_specs[property_name]
+            name = vendor_spec['name']
+            if name in extra_specs:
+                extra_spec = extra_specs[name]
                 value = self._get_vendor_value(extra_spec, vendor_spec)
             elif 'cfg' in vendor_spec:
                 cfg = vendor_spec['cfg']
@@ -1937,10 +1963,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 continue
             api = vendor_spec['api']
             properties[api] = value
-            LOG.debug('Get vendor property name %(property_name)s '
+            LOG.debug('Get vendor property name %(name)s '
                       'with API name %(api)s and %(type)s value '
                       '%(value)s for volume %(volume)s',
-                      {'property_name': property_name,
+                      {'name': name,
                        'api': api,
                        'type': type(value).__name__,
                        'value': value,
