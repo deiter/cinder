@@ -207,6 +207,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         def roundup(numerator, denominator):
             return div_roundup(numerator, denominator) * denominator
 
+        LOG.debug(' ===> _get_volume_reservation get vol %s', volume)
         volume_size = volume['size'] * units.Gi
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'recordSize,dataCopies'}
