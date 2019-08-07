@@ -1852,7 +1852,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                     LOG.debug('Unable to inherit property %(name)s '
                               'from volume type %(type)s for volume '
                               '%(volume)s. %(reason)s',
-                              {'name': name,
+                              {'name': api,
                                'type': new_type['name'],
                                'volume': volume['name'],
                                'reason': vendor_spec['inherit']})
@@ -1878,7 +1878,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                                 force_share=True)
         volume_size = volume_info.virtual_size
         volume_src_format = volume_info.file_format
-        if volume_info.file_format != volume_format:
+        if volume_src_format != volume_dst_format:
             self._convert_volume_file_format(volume,
                                              volume_file,
                                              volume_src_format,
@@ -1889,7 +1889,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         else:
             reservation = self._get_volume_reservation(volume,
                                                        volume_size,
-                                                       volume_format)
+                                                       volume_dst_format)
         payload = {'referencedReservationSize': reservation}
         try:
             self.nef.filesystems.set(volume_path, payload)
