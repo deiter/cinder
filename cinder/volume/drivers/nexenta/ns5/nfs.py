@@ -189,7 +189,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'state': share['shareState']})
             raise jsonrpc.NefException(code='ESRCH', message=message)
 
-    def _get_volume_reservation(self, volume, volume_format):
+    def _get_volume_reservation(self, volume, volume_size, volume_format):
         """Calculates the correct reservation size for given volume size.
 
         Its purpose is to reserve additional space for volume metadata
@@ -198,6 +198,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         and qcow2_calc_prealloc_size function in qcow2.c
 
         :param volume: volume reference
+        :param volume_size: volume size in bytes
         :param volume_format: volume backend file format
         :returns: reservation size
         """
@@ -208,7 +209,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
             return div_roundup(numerator, denominator) * denominator
 
         LOG.debug(' ===> _get_volume_reservation get vol %s', volume)
-        volume_size = volume['size'] * units.Gi
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'recordSize,dataCopies'}
         filesystem = self.nef.filesystems.get(volume_path, payload)
@@ -324,11 +324,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param volume: volume reference
         """
         volume_path = self._get_volume_path(volume)
+        volume_size = volume['size'] * units.Gi
         properties = self.nef.filesystems.properties
         payload = self._get_vendor_properties(properties, volume)
         sparsed_volume = payload.pop('sparseVolume')
         volume_format = payload.pop('volumeFormat')
-        specs = {'size': '%sG' % volume['size']}
+        specs = {'size': volume_size}
         if volume_format == VOLUME_FORMAT_QCOW2:
             specs['preallocation'] = 'metadata'
         volume_options = ','.join(['%s=%s' % _ for _ in specs.items()])
@@ -342,7 +343,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           volume_options, volume_file, run_as_root=True)
             if sparsed_volume:
                 return
-            reservation = self._get_volume_reservation(volume, volume_format)
+            reservation = self._get_volume_reservation(volume,
+                                                       volume_size,
+                                                       volume_format)
             payload = {'referencedReservationSize': reservation}
             self.nef.filesystems.set(volume_path, payload)
         except jsonrpc.NefException as error:
@@ -1856,7 +1859,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                     continue
                 payload[api] = None
         sparsed_volume = payload.pop('sparseVolume')
-        volume_format = payload.pop('volumeFormat')
+        volume_dst_format = payload.pop('volumeFormat')
         try:
             self.nef.filesystems.set(volume_path, payload)
         except jsonrpc.NefException as error:
@@ -1873,15 +1876,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_info = image_utils.qemu_img_info(volume_file,
                                                 run_as_root=True,
                                                 force_share=True)
+        volume_size = volume_info.virtual_size
+        volume_src_format = volume_info.file_format
         if volume_info.file_format != volume_format:
-            self._convert_volume_file_format(volume, volume_file,
-                                             volume_info.file_format,
-                                             volume_format)
+            self._convert_volume_file_format(volume,
+                                             volume_file,
+                                             volume_src_format,
+                                             volume_dst_format)
         self._unmount_volume(volume, nfs_share, mount_point)
         if sparsed_volume:
             reservation = 0
         else:
-            reservation = self._get_volume_reservation(volume, volume_format)
+            reservation = self._get_volume_reservation(volume,
+                                                       volume_size,
+                                                       volume_format)
         payload = {'referencedReservationSize': reservation}
         try:
             self.nef.filesystems.set(volume_path, payload)
