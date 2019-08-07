@@ -1976,10 +1976,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
             if name in extra_specs:
                 extra_spec = extra_specs[name]
                 value = self._get_vendor_value(extra_spec, vendor_spec)
-            elif 'cfg' in vendor_spec and 'default' in vendor_spec:
-                value = vendor_spec['default']
-                #cfg = vendor_spec['cfg']
-                #value = self.configuration.safe_get(cfg)
+            elif 'cfg' in vendor_spec:
+                cfg = vendor_spec['cfg']
+                value = self.configuration.safe_get(cfg)
+                if value in [None, '']:
+                    continue
+            elif api in self.nas_root:
+                value = self.nas_root[api]
             else:
                 continue
             properties[api] = value
