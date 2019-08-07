@@ -207,9 +207,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         def roundup(numerator, denominator):
             return div_roundup(numerator, denominator) * denominator
 
-        volume_path = self._get_volume_path(volume)
         volume_size = volume['size'] * units.Gi
-        filesystem = self.nef.filesystems.get(volume_path)
+        volume_path = self._get_volume_path(volume)
+        payload = {'fields': 'recordSize,dataCopies'}
+        filesystem = self.nef.filesystems.get(volume_path, payload)
         block_size = filesystem['recordSize']
         data_copies = filesystem['dataCopies']
         reservation = volume_size
@@ -228,6 +229,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         reservation *= data_copies
         numdb *= 1 << dn_max_indblkshift
         reservation += numdb
+        LOG.debug(' ===> reservation == %s', reservation)
         if volume_format == VOLUME_FORMAT_RAW:
             meta_size = 0
         elif volume_format == VOLUME_FORMAT_QCOW:
@@ -274,6 +276,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        % {'volume_format': volume_format})
             raise jsonrpc.NefException(code='EINVAL', message=message)
         reservation += meta_size
+        LOG.debug(' ===> reservation + meta == %s', reservation)
         return reservation
 
     def _convert_volume_file_format(self, volume, volume_file, src_format,
