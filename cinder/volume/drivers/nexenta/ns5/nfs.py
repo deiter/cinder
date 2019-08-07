@@ -1824,8 +1824,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
             api = vendor_spec['api']
             if api in volume_type_specs:
                 value = volume_type_specs[api]
-                if volume_specs[api] == value:
-                    continue
+                if api in volume_specs:
+                    if volume_specs[api] == value:
+                        continue
                 if 'retype' in vendor_spec:
                     LOG.error('Failed to retype volume %(volume)s '
                               'to host %(host)s and volume type '
@@ -1838,22 +1839,18 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 payload[api] = value
             elif (api in volume_specs['source'] and
                   volume_specs['source'][api] in ['local', 'received']):
-                if 'cfg' in vendor_spec:
-                    cfg = vendor_spec['cfg']
-                    value = self.configuration.safe_get(cfg)
-                    if volume_specs[api] != value:
-                        payload[api] = value
-                else:
-                    if 'inherit' in vendor_spec:
-                        LOG.debug('Unable to inherit property %(name)s '
-                                  'from volume type %(type)s for volume '
-                                  '%(volume)s. %(reason)s',
-                                  {'name': name,
-                                   'type': new_type['name'],
-                                   'volume': volume['name'],
-                                   'reason': vendor_spec['inherit']})
-                        continue
-                    payload[api] = None
+                if volume_specs[api] == vendor_spec['default']:
+                    continue
+                if 'inherit' in vendor_spec:
+                    LOG.debug('Unable to inherit property %(name)s '
+                              'from volume type %(type)s for volume '
+                              '%(volume)s. %(reason)s',
+                              {'name': name,
+                               'type': new_type['name'],
+                               'volume': volume['name'],
+                               'reason': vendor_spec['inherit']})
+                    continue
+                payload[api] = None
         sparsed_volume = payload.pop('sparseVolume')
         volume_format = payload.pop('volumeFormat')
         try:
@@ -1930,11 +1927,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
             property_spec = {}
             for key in keys:
                 if key in vendor_spec:
-                    property_spec[key] = vendor_spec[key]
-            if 'api' in vendor_spec:
-                api = vendor_spec['api']
-                if api in self.nas_root:
-                    property_spec['default'] = self.nas_root[api]
+                    value = vendor_spec[key]
+                    property_spec[key] = value
+            api = vendor_spec['api']
+            if 'cfg' in vendor_spec:
+                cfg = vendor_spec['cfg']
+                value = self.configuration.safe_get(cfg)
+                if value not in [None, '']:
+                    property_spec['default'] = value
+            elif api in self.nas_root:
+                value = self.nas_root[api]
+                property_spec['default'] = value
             property_name = vendor_spec['name']
             property_title = vendor_spec['title']
             property_description = vendor_spec['description']
@@ -1968,16 +1971,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
             extra_specs = volume_types.get_volume_type_extra_specs(
                 volume_type_id)
         for vendor_spec in vendor_specs:
+            api = vendor_spec['api']
             name = vendor_spec['name']
             if name in extra_specs:
                 extra_spec = extra_specs[name]
                 value = self._get_vendor_value(extra_spec, vendor_spec)
-            elif 'cfg' in vendor_spec:
-                cfg = vendor_spec['cfg']
-                value = self.configuration.safe_get(cfg)
+            elif 'cfg' in vendor_spec and 'default' in vendor_spec:
+                value = vendor_spec['default']
+                #cfg = vendor_spec['cfg']
+                #value = self.configuration.safe_get(cfg)
             else:
                 continue
-            api = vendor_spec['api']
             properties[api] = value
             LOG.debug('Get vendor property name %(name)s '
                       'with API name %(api)s and %(type)s value '
