@@ -105,8 +105,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.8.8 - Improved error messages.
               - Improved compatibility with initial driver versions.
               - Added throttle for storage assisted volume migration.
-        1.8.9 - Added qcow2 format support.
-              - Fixed space reservation calculation.
+        1.8.9 - Added support for different volume formats.
+              - Added space reservation for thick provisioned volumes.
     """
 
     VERSION = '1.8.9'
@@ -208,7 +208,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         def roundup(numerator, denominator):
             return div_roundup(numerator, denominator) * denominator
 
-        LOG.debug(' ===> _get_volume_reservation get vol %s', volume)
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'recordSize,dataCopies'}
         filesystem = self.nef.filesystems.get(volume_path, payload)
@@ -230,7 +229,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         reservation *= data_copies
         numdb *= 1 << dn_max_indblkshift
         reservation += numdb
-        LOG.debug(' ===> reservation == %s', reservation)
         if volume_format == VOLUME_FORMAT_RAW:
             meta_size = 0
         elif volume_format == VOLUME_FORMAT_QCOW:
@@ -277,7 +275,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        % {'volume_format': volume_format})
             raise jsonrpc.NefException(code='EINVAL', message=message)
         reservation += meta_size
-        LOG.debug(' ===> reservation + meta == %s', reservation)
         return reservation
 
     def _convert_volume_file_format(self, volume, volume_file, src_format,
@@ -302,7 +299,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self._execute('qemu-img', 'convert',
                           '-f', src_format,
                           '-O', dst_format,
-                          backup_file, volume_file,
+                          backup_file,
+                          volume_file,
                           run_as_root=True)
         except OSError as error:
             code = errno.errorcode[error.errno]
@@ -369,15 +367,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         raise jsonrpc.NefException(code=error_code, message=message)
 
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
-        LOG.debug('Copy image %(image)s to volume %(volume)s',
-                  {'image': image_id, 'volume': volume['name']})
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        volume_info = image_utils.qemu_img_info(volume_file, run_as_root=True,
-                                                force_share=True)
+        volume_info = image_utils.qemu_img_info(volume_file,
+                                                force_share=True,
+                                                run_as_root=True)
+        volume_format = volume_info.file_format
+        volume_blocksize = self.configuration.volume_dd_blocksize
+        LOG.debug('Copy image %(image)s to %(format)s volume %(volume)s',
+                  {'image': image_id,
+                   'format': volume_format,
+                   'volume': volume['name']})
         image_utils.fetch_to_volume_format(
             ctxt, image_service, image_id,
-            volume_file, volume_info.file_format,
-            self.configuration.volume_dd_blocksize,
+            volume_file, volume_format,
+            volume_blocksize,
             run_as_root=True)
         image_utils.resize_image(volume_file,
                                  volume['size'],
@@ -385,14 +388,19 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._unmount_volume(volume, nfs_share, mount_point)
 
     def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
-        LOG.debug('Copy volume %(volume)s to image %(image)s',
-                  {'volume': volume['name'], 'image': image_meta['id']})
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        volume_info = image_utils.qemu_img_info(volume_file, run_as_root=True,
-                                                force_share=True)
+        volume_info = image_utils.qemu_img_info(volume_file,
+                                                force_share=True,
+                                                run_as_root=True)
+        volume_format = volume_info.file_format
+        LOG.debug('Copy %(format)s volume %(volume)s to image %(image)s',
+                {'format': volume_format,
+                 'volume': volume['name'],
+                 'image': image_meta['id']})
         image_utils.upload_volume(
-            ctxt, image_service, image_meta,
-            volume_file, volume_format=volume_info.file_format,
+            ctxt, image_service,
+            image_meta, volume_file,
+            volume_format=volume_format,
             run_as_root=True)
         self._unmount_volume(volume, nfs_share, mount_point)
 
@@ -749,8 +757,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'volume': volume['name'], 'connector': connector})
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
         volume_info = image_utils.qemu_img_info(volume_file,
-                                                run_as_root=True,
-                                                force_share=True)
+                                                force_share=True,
+                                                run_as_root=True)
         self._unmount_volume(volume, nfs_share, mount_point)
         data = {
             'export': nfs_share,
@@ -783,7 +791,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param volume: volume reference
         """
-        LOG.debug(' ===> Delete volume id %s name_id %s', volume['id'], volume['name'])
         volume_path = self._get_volume_path(volume)
         self._unmount_volume(volume)
         delete_payload = {'force': True, 'snapshots': True}
@@ -1432,8 +1439,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         nfs_share, mount_point, volume_file = self._mount_volume(existing_volume)
         try:
             volume_info = image_utils.qemu_img_info(volume_file,
-                                                    run_as_root=True,
-                                                    force_share=True)
+                                                    force_share=True,
+                                                    run_as_root=True)
         except OSError as error:
             code = errno.errorcode[error.errno]
             message = (_('Manage existing volume %(volume)s failed, '
@@ -1446,6 +1453,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         finally:
             self._unmount_volume(existing_volume, nfs_share, mount_point)
         volume_size = volume_info.virtual_size // units.Gi
+        LOG.debug('Manage existing volume: %(volume)s size is %(size)sG',
+                  {'volume': existing_volume['name'], 'size': volume_size})
         return volume_size
 
     def get_manageable_volumes(self, cinder_volumes, marker, limit, offset,
@@ -1798,15 +1807,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                                       remote=True)
         dst_volume_file = attach_info['device']['path']
         dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
-                                                    run_as_root=True,
-                                                    force_share=True)
+                                                    force_share=True,
+                                                    run_as_root=True)
         self._detach_volume(ctxt, attach_info, dst_volume,
                             connector_properties, force=True)
         src_nfs_share, src_mount_point, src_volume_file = (
             self._mount_volume(src_volume))
         src_volume_info = image_utils.qemu_img_info(src_volume_file,
-                                                    run_as_root=True,
-                                                    force_share=True)
+                                                    force_share=True,
+                                                    run_as_root=True)
         if src_volume_info.file_format != dst_volume_info.file_format:
             self._convert_volume_file_format(src_volume, src_volume_file,
                                              src_volume_info.file_format,
@@ -1835,16 +1844,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
                     if volume_specs[api] == value:
                         continue
                 if 'retype' in vendor_spec:
-                    LOG.error('Failed to retype volume %(volume)s '
-                              'to host %(host)s and volume type '
-                              '%(type)s. %(reason)s',
-                              {'volume': volume['name'],
-                               'host': host,
-                               'type': new_type['name'],
-                               'reason': vendor_spec['retype']})
-                    return False, None
+                    code = 'EINVAL'
+                    message = (_('Failed to retype volume %(volume)s '
+                                 'to host %(host)s and volume type '
+                                 '%(type)s. %(reason)s')
+                               % {'volume': volume['name'],
+                                  'host': host,
+                                  'type': new_type['name'],
+                                  'reason': vendor_spec['retype']})
+                    raise jsonrpc.NefException(code=code, message=message)
                 payload[api] = value
-            elif (api in volume_specs['source'] and
+            elif (api in volume_specs and api in volume_specs['source'] and
                   volume_specs['source'][api] in ['local', 'received']):
                 if volume_specs[api] == vendor_spec['default']:
                     continue
@@ -1871,11 +1881,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        'type': new_type['name'],
                        'payload': payload,
                        'error': error})
-            return False, None
+            raise
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
         volume_info = image_utils.qemu_img_info(volume_file,
-                                                run_as_root=True,
-                                                force_share=True)
+                                                force_share=True,
+                                                run_as_root=True)
         volume_size = volume_info.virtual_size
         volume_src_format = volume_info.file_format
         if volume_src_format != volume_dst_format:
@@ -1899,7 +1909,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                       {'reservation': reservation,
                        'volume': volume['name'],
                        'error': error})
-            return False, None
+            raise
         return True, None
 
     def _init_vendor_properties(self):
