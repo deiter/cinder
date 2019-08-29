@@ -14,6 +14,7 @@
 
 import re
 import six
+import uuid
 
 from oslo_utils import units
 
@@ -61,3 +62,24 @@ def divup(numerator, denominator):
 
 def roundup(numerator, denominator):
     return divup(numerator, denominator) * denominator
+
+
+def match_template(template, name):
+    if not (name and isinstance(name, six.string_types) and
+            template and isinstance(template, six.string_types)):
+        return False
+    pattern = template.replace('%s', r'(?P<uuid>.+)')
+    if pattern == template:
+        return False
+    regex = re.compile(pattern)
+    match = regex.match(name)
+    if match is None:
+        return False
+    result = match.group('uuid')
+    if not (result and isinstance(result, six.string_types)):
+        return False
+    try:
+        uuid.UUID(result, version=4)
+    except ValueError:
+        return False
+    return True

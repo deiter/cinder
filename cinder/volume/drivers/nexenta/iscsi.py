@@ -13,7 +13,6 @@
 #    under the License.
 
 import datetime
-import difflib
 import ipaddress
 import posixpath
 import random
@@ -33,6 +32,7 @@ from cinder import objects
 from cinder.volume import driver
 from cinder.volume.drivers.nexenta import jsonrpc
 from cinder.volume.drivers.nexenta import options
+from cinder.volume.drivers.nexenta import utils as nexenta_utils
 
 LOG = logging.getLogger(__name__)
 
@@ -187,23 +187,6 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         snapshot_path = '%s@%s' % (volume_path, snapshot_name)
         return snapshot_path
 
-    @staticmethod
-    def _match_template(template, name):
-        sequence = difflib.SequenceMatcher(None, name, template)
-        added = deleted = result = ''
-        for tag, a1, a2, b1, b2 in sequence.get_opcodes():
-            if tag == 'equal':
-                result += ''.join(sequence.a[a1:a2])
-            elif tag == 'delete':
-                deleted += ''.join(sequence.a[a1:a2])
-            elif tag == 'insert':
-                added += ''.join(sequence.b[b1:b2])
-            elif tag == 'replace':
-                result += ''.join(sequence.b[b1:b2])
-        if result == template and not (added or deleted):
-            return True
-        return False
-
     def _create_target_group(self, group, target):
         """Create a new target group with target member.
 
@@ -267,7 +250,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             return
         template = self.origin_snapshot_template
         parent_path, snapshot_name = origin.split('@')
-        if not self._match_template(template, snapshot_name):
+        if not nexenta_utils.match_template(template, snapshot_name):
             return
         try:
             self.nms.snapshot.destroy(origin, '-d')

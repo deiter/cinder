@@ -254,6 +254,11 @@ NEXENTASTOR_DATASET_OPTS = [
                      'created as sparse devices. Setting value to false '
                      'will result in volumes being fully allocated at the '
                      'time of creation.'),
+    cfg.BoolOpt('nexenta_image_cache',
+                default=True,
+                help='Enables an internal cache of images to efficiently '
+                     'create a new volume by cloning an existing cached '
+                     'image.'),
     cfg.IntOpt('nexenta_blocksize',
                default=32768,
                help='Specifies a suggested block size for a volume. '
@@ -278,6 +283,12 @@ NEXENTASTOR_DATASET_OPTS = [
     cfg.StrOpt('nexenta_group_snapshot_template',
                default='group-snapshot-%s',
                help='Template string to generate group snapshot name.'),
+    cfg.StrOpt('nexenta_cache_image_template',
+               default='cache-image-%s',
+               help='Template string to generate cache image name.'),
+    cfg.StrOpt('nexenta_cache_snapshot_template',
+               default='cache-snapshot-%s',
+               help='Template string to generate cache snapshot name.'),
     cfg.StrOpt('nexenta_dataset_description',
                default='',
                help='Human-readable description for the backend.')

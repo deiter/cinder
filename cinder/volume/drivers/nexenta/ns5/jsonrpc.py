@@ -892,7 +892,7 @@ class NefProxy(object):
         if not guid:
             guid = ':'.join(sorted(self.hosts))
         lock = '%s:%s' % (guid, self.path)
-        if six.PY3:
+        if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
         self.lock = hashlib.md5(lock).hexdigest()
         LOG.debug('NEF coordination lock: %(lock)s',

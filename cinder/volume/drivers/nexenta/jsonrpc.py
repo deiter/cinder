@@ -393,7 +393,7 @@ class NmsProxy(object):
         if not signature:
             signature = self.host
         lock = '%s:%s' % (signature, self.path)
-        if six.PY3:
+        if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
         self.lock = hashlib.md5(lock).hexdigest()
         LOG.debug('NMS coordination lock: %(lock)s',

@@ -89,9 +89,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
               - Fixed properties for volumes created from snapshot.
               - Added workaround for referenced reservation size.
               - Allow retype volume to another provisioning type.
+        1.4.9 - Added image caching using clone_image method.
     """
 
-    VERSION = '1.4.8'
+    VERSION = '1.4.9'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -112,6 +113,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.driver_name = self.__class__.__name__
         self.nef = None
         self.san_stat = None
+        self.image_cache = self.configuration.nexenta_image_cache
         self.target_prefix = self.configuration.nexenta_target_prefix
         self.target_group_prefix = (
             self.configuration.nexenta_target_group_prefix)
@@ -129,6 +131,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.configuration.nexenta_group_snapshot_template)
         self.origin_snapshot_template = (
             self.configuration.nexenta_origin_snapshot_template)
+        self.cache_image_template = (
+            self.configuration.nexenta_cache_image_template)
+        self.cache_snapshot_template = (
+            self.configuration.nexenta_cache_snapshot_template)
         self.migration_service_prefix = (
             self.configuration.nexenta_migration_service_prefix)
         self.migration_throttle = (
@@ -313,31 +319,217 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         })
         self.nef.volumes.create(payload)
 
+    @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
+    def clone_image(self, ctxt, volume, image_location, image_meta,
+                    image_service):
+        """Create a volume efficiently from an existing image.
+
+        image_location is a string whose format depends on the
+        image service backend in use. The driver should use it
+        to determine whether cloning is possible.
+
+        image_meta is a dictionary that includes 'disk_format' (e.g.
+        raw, qcow2) and other image attributes that allow drivers to
+        decide whether they can clone the image without first requiring
+        conversion.
+
+        image_service is the reference of the image_service to use.
+        Note that this is needed to be passed here for drivers that
+        will want to fetch images from the image service directly.
+
+        Returns a dict of volume properties eg. provider_location,
+        boolean indicating whether cloning occurred.
+        """
+        if not self.image_cache:
+            return None, False
+        properties = self.nef.volumes.properties
+        payload = self._get_vendor_properties(properties, volume)
+        volume_blocksize = payload['volumeBlockSize']
+        volume_size = volume['size'] * units.Gi
+        image_id = image_meta['id']
+        image_checksum = image_meta['checksum']
+        namespace = uuid.UUID(image_id, version=4)
+        name = '%s:%s' % (image_checksum, volume_blocksize)
+        if isinstance(name, six.text_type):
+            name = name.encode('utf-8')
+        cache_uuid = uuid.uuid5(namespace, name)
+        cache_id = six.text_type(cache_uuid)
+        cache_name = self.cache_image_template % cache_id
+        cache_type_id = volume['volume_type_id']
+        if 'virtual_size' in image_meta and image_meta['virtual_size']:
+            image_size = image_meta['virtual_size']
+        else:
+            image_size = nexenta_utils.roundup(image_meta['size'], units.Gi)
+        if image_size > volume_size:
+            LOG.error('Unable to clone image %(image)s to volume '
+                      '%(volume)s: image size %(image_size)s is '
+                      'larger than volume size %(volume_size)s',
+                      {'image': image_id,
+                       'volume': volume['name'],
+                       'image_size': image_size,
+                       'volume_size': volume_size})
+            return None, False
+        LOG.debug('Clone image %(image)s (size: %(image_size)s, '
+                  'checksum: %(image_checksum)s) to volume '
+                  '%(volume)s (size: %(volume_size)s, '
+                  'block size: %(volume_blocksize)s)',
+                  {'image': image_id,
+                   'image_size': image_size,
+                   'image_checksum': image_checksum,
+                   'volume': volume['name'],
+                   'volume_size': volume_size,
+                   'volume_blocksize': volume_blocksize})
+        cache_size = image_size // units.Gi
+        cache = {
+            'id': cache_id,
+            'name': cache_name,
+            'volume_type_id': cache_type_id,
+            'size': cache_size
+        }
+        cache_path = self._get_volume_path(cache)
+        payload = {'fields': 'readOnly'}
+        cache_exist = False
+        try:
+            cache_specs = self.nef.volumes.get(cache_path, payload)
+        except jsonrpc.NefException as error:
+            if error.code != 'ENOENT':
+                LOG.error('Failed to get properties for image cache '
+                          '%(cache)s: %(error)s',
+                          {'cache': cache_name, 'error': error})
+                return None, False
+        else:
+            if cache_specs['readOnly']:
+                cache_exist = True
+        if not cache_exist:
+            LOG.debug('Create cache %(cache)s for image %(image)s',
+                      {'cache': cache_name, 'image': image_id})
+            payload = {'readOnly': True}
+            try:
+                self.delete_volume(cache)
+                self.create_volume(cache)
+                self.copy_image_to_volume(ctxt, cache,
+                                          image_service,
+                                          image_id)
+                self.nef.volumes.set(cache_path, payload)
+            except jsonrpc.NefException as error:
+                LOG.error('Failed to create cache %(cache)s for '
+                          'image %(image)s: %(error)s',
+                          {'cache': cache_name,
+                           'image': image_id,
+                           'error': error})
+            else:
+                cache_exist = True
+        if not cache_exist:
+            try:
+                self.delete_volume(cache)
+            except jsonrpc.NefException:
+                pass
+            return None, False
+        snapshot_name = self.cache_snapshot_template % cache_id
+        snapshot = {
+            'id': cache_id,
+            'name': snapshot_name,
+            'volume_id': cache_id,
+            'volume_name': cache_name,
+            'volume_size': cache_size
+        }
+        snapshot_path = self._get_snapshot_path(snapshot)
+        payload = {'fields': 'path'}
+        snapshot_exist = False
+        try:
+            self.nef.snapshots.get(snapshot_path, payload)
+        except jsonrpc.NefException as error:
+            if error.code != 'ENOENT':
+                LOG.error('Failed to get properties for image cache '
+                          'snapshot %(snapshot)s: %(error)s',
+                          {'snapshot': snapshot_name,
+                           'error': error})
+                return None, False
+        else:
+            snapshot_exist = True
+        if not snapshot_exist:
+            LOG.debug('Create snapshot %(snapshot)s for image cache '
+                      '%(cache)s',
+                      {'snapshot': snapshot_name,
+                       'cache': cache_name})
+            try:
+                self.create_snapshot(snapshot)
+            except jsonrpc.NefException as error:
+                LOG.error('Failed to create snapshot %(snapshot)s '
+                          'for image cache %(cache)s: %(error)s',
+                          {'snapshot': snapshot_name,
+                           'cache': cache_name,
+                           'error': error})
+            else:
+                snapshot_exist = True
+        if not snapshot_exist:
+            try:
+                self.delete_volume(cache)
+            except jsonrpc.NefException:
+                pass
+            return None, False
+        self.create_volume_from_snapshot(volume, snapshot)
+        return None, True
+
     @coordination.synchronized('{self.nef.lock}')
     def delete_volume(self, volume):
-        """Deletes a logical volume.
+        """Deletes a volume.
 
         :param volume: volume reference
         """
         volume_path = self._get_volume_path(volume)
-        delete_payload = {'snapshots': True}
+        payload = {'fields': 'originalSnapshot'}
         try:
-            self.nef.volumes.delete(volume_path, delete_payload)
+            volume_spec = self.nef.volumes.get(volume_path, payload)
+        except jsonrpc.NefException as error:
+            if error.code == 'ENOENT':
+                return
+            raise
+        volume_origin = volume_spec['originalSnapshot']
+        payload = {'snapshots': True}
+        try:
+            self.nef.volumes.delete(volume_path, payload)
         except jsonrpc.NefException as error:
             if error.code != 'EEXIST':
                 raise
-            snapshots_tree = {}
-            snapshots_payload = {'parent': volume_path, 'fields': 'path'}
-            snapshots = self.nef.snapshots.list(snapshots_payload)
+            snapshot_tree = {}
+            payload = {'parent': volume_path, 'fields': 'path'}
+            snapshots = self.nef.snapshots.list(payload)
             for snapshot in snapshots:
-                clones_payload = {'fields': 'clones,creationTxg'}
-                data = self.nef.snapshots.get(snapshot['path'], clones_payload)
-                if data['clones']:
-                    snapshots_tree[data['creationTxg']] = data['clones'][0]
-            if snapshots_tree:
-                clone_path = snapshots_tree[max(snapshots_tree)]
+                snapshot_path = snapshot['path']
+                payload = {'fields': 'clones,creationTxg'}
+                snapshot_spec = self.nef.snapshots.get(snapshot_path, payload)
+                if snapshot_spec['clones']:
+                    snapshot_txg = snapshot_spec['creationTxg']
+                    snapshot_clones = snapshot_spec['clones']
+                    first_clone = snapshot_clones[0]
+                    snapshot_tree[snapshot_txg] = first_clone
+            if snapshot_tree:
+                latest_txg = max(snapshot_tree)
+                clone_path = snapshot_tree[latest_txg]
                 self.nef.volumes.promote(clone_path)
-            self.nef.volumes.delete(volume_path, delete_payload)
+            payload = {'snapshots': True}
+            self.nef.volumes.delete(volume_path, payload)
+        if not volume_origin:
+            return
+        origin_path, snapshot_name = volume_origin.split('@')
+        origin_name = posixpath.basename(origin_path)
+        if nexenta_utils.match_template(self.origin_snapshot_template,
+                                        snapshot_name):
+            payload = {'defer': True}
+            try:
+                self.nef.snapshots.delete(volume_origin, payload)
+            except Exception:
+                pass
+        elif (nexenta_utils.match_template(self.cache_snapshot_template,
+                                           snapshot_name) and
+              nexenta_utils.match_template(self.cache_image_template,
+                                           origin_name)):
+            payload = {'snapshots': True}
+            try:
+                self.nef.volumes.delete(origin_path, payload)
+            except Exception:
+                pass
 
     def extend_volume(self, volume, new_size):
         """Extend an existing volume.
@@ -1412,6 +1604,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             guid = volume['guid']
             size = volume['volumeSize'] // units.Gi
             name = volume['name']
+            if nexenta_utils.match_template(self.cache_image_template, name):
+                LOG.debug('Skip image cache %(path)s',
+                          {'path': path})
+                continue
             if name in cinder_volume_names:
                 cinder_id = cinder_volume_names[name]
                 safe_to_manage = False
@@ -1585,16 +1781,23 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                           'volume %(parent)s is unmanaged',
                           {'path': path, 'parent': parent})
                 continue
-            if name.startswith(self.origin_snapshot_template):
+            if nexenta_utils.match_template(self.cache_snapshot_template,
+                                            name):
+                LOG.debug('Skip image cache snapshot %(path)s',
+                          {'path': path})
+                continue
+            if nexenta_utils.match_template(self.origin_snapshot_template,
+                                            name):
                 LOG.debug('Skip temporary origin snapshot %(path)s',
                           {'path': path})
                 continue
-            if name.startswith(self.group_snapshot_template):
+            if nexenta_utils.match_template(self.group_snapshot_template,
+                                            name):
                 LOG.debug('Skip temporary group snapshot %(path)s',
                           {'path': path})
                 continue
             if snapshot['hprService'] or snapshot['snaplistId']:
-                LOG.debug('Skip HPR/snapping snapshot %(path)s',
+                LOG.debug('Skip Replication/Snapping snapshot %(path)s',
                           {'path': path})
                 continue
             if name in cinder_snapshot_names:
@@ -1722,7 +1925,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         while service_running:
             self.nef.delay(service_retries)
             service_retries += 1
-            payload = {'fields': 'state,progress,runNumber'}
+            payload = {'fields': 'state,progress,runNumber,lastError'}
             try:
                 service = self.nef.hpr.get(service_name, payload)
             except jsonrpc.NefException as error:
