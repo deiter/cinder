@@ -19,6 +19,7 @@ import uuid
 from oslo_utils import units
 
 from cinder.i18n import _
+from cinder import utils as cinder_utils
 
 
 def str2size(s, scale=1024):
@@ -54,6 +55,18 @@ def str2gib_size(s):
     """Covert size-string to size in gigabytes."""
     size_in_bytes = str2size(s)
     return size_in_bytes // units.Gi
+
+
+def native_string(text):
+    """Convert to native string.
+
+    Convert bytes and Unicode strings to native strings:
+
+    * convert to bytes on Python 2:
+      encode Unicode using encodeutils.safe_encode()
+    * convert to Unicode on Python 3: decode bytes from UTF-8
+    """
+    return cinder_utils.convert_str(text)
 
 
 def divup(numerator, denominator):

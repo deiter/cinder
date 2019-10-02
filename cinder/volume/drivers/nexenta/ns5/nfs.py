@@ -38,8 +38,8 @@ from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils as nexenta_utils
 from cinder.volume.drivers import nfs
-from cinder.volume import volume_utils
 from cinder.volume import volume_types
+from cinder.volume import volume_utils
 
 LOG = logging.getLogger(__name__)
 
@@ -493,8 +493,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         image_checksum = image_meta['checksum']
         namespace = uuid.UUID(image_id, version=4)
         name = '%s:%s' % (image_checksum, volume_format)
-        if isinstance(name, six.text_type):
-            name = name.encode('utf-8')
+        name = nexenta_utils.native_string(name)
         cache_uuid = uuid.uuid5(namespace, name)
         cache_id = six.text_type(cache_uuid)
         cache_name = self.cache_image_template % cache_id
