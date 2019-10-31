@@ -114,9 +114,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
               - Fixed properties for volumes created from snapshot.
               - Allow retype volume to another provisioning type.
         1.9.0 - Added image caching using clone_image method.
+        1.9.1 - Added flag backend_state to report backend status.
+              - Added retry on driver initialization failure.
+              - Added QoS support in terms of I/O throttling rate.
     """
 
-    VERSION = '1.9.0'
+    VERSION = '1.9.1'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -159,8 +162,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.driver_name = self.__class__.__name__
         self.nef = None
         self.nas_stat = None
+        self.backend_name = self._get_backend_name()
         self.nas_host = self.configuration.nas_host
         self.nas_path = self.configuration.nas_share_path
+        self.nas_pool = self.nas_path.split(posixpath.sep)[0]
         self.image_cache = self.configuration.nexenta_image_cache
         self.nbmand = self.configuration.nexenta_nbmand
         self.smart_compression = (
@@ -183,48 +188,100 @@ class NexentaNfsDriver(nfs.NfsDriver):
         return options.NEXENTASTOR5_NFS_OPTS
 
     def do_setup(self, ctxt):
-        self.nef = jsonrpc.NefProxy(self.driver_volume_type,
-                                    self.nas_path,
-                                    self.configuration)
+        retries = 0
+        while not self._do_setup():
+            retries += 1
+            self.nef.delay(retries)
+
+    def _do_setup(self):
+        try:
+            self.nef = jsonrpc.NefProxy(self.driver_volume_type,
+                                        self.nas_pool, self.nas_path,
+                                        self.configuration)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to initialize RESTful API for backend '
+                      '%(backend_name)s on host %(host)s: %(error)s',
+                      {'backend_name': self.backend_name,
+                       'host': self.host,
+                       'error': error})
+            return False
+        return True
 
     def check_for_setup_error(self):
+        retries = 0
+        while not self._check_for_setup_error():
+            retries += 1
+            self.nef.delay(retries)
+
+    def _check_for_setup_error(self):
         """Check root filesystem, NFS service and NFS share."""
-        vendor_specs = self.nef.filesystems.properties
-        names = [_['api'] for _ in vendor_specs if 'api' in _]
+        payload = {'fields': 'path'}
+        try:
+            self.nef.filesystems.get(self.nas_pool, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get stat of NAS pool %(nas_pool)s: %(error)s',
+                      {'nas_pool': self.nas_pool, 'error': error})
+            return False
+        specs = self.nef.filesystems.properties
+        names = [spec['api'] for spec in specs if 'api' in spec]
         names.remove('sparseVolume')
         names.remove('volumeFormat')
         names.append('mountPoint')
         names.append('isMounted')
         fields = ','.join(names)
         payload = {'fields': fields}
-        self.nas_stat = self.nef.filesystems.get(self.nas_path, payload)
+        try:
+            self.nas_stat = self.nef.filesystems.get(self.nas_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get stat of NAS path %(nas_path)s: %(error)s',
+                      {'nas_path': self.nas_path, 'error': error})
+            return False
         if self.nas_stat['mountPoint'] == 'none':
-            message = (_('NFS root filesystem %(path)s is not writable')
-                       % {'path': self.nas_stat['mountPoint']})
-            raise jsonrpc.NefException(code='ENOENT', message=message)
+            LOG.error('NAS path %(nas_path)s is not writable',
+                      {'nas_path': self.nas_path})
+            return False
         if not self.nas_stat['isMounted']:
-            message = (_('NFS root filesystem %(path)s is not mounted')
-                       % {'path': self.nas_stat['mountPoint']})
-            raise jsonrpc.NefException(code='ENOTDIR', message=message)
+            LOG.error('NAS path %(nas_path)s is not mounted',
+                      {'nas_path': self.nas_path})
+            return False
+        try:
+            service = self.nef.services.get('nfs')
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get state of NFS service: %(error)s',
+                      {'error': error})
+            return False
+        if service['state'] != 'online':
+            LOG.error('NFS service is not online: %(state)s',
+                      {'state': service['state']})
+            return False
+        try:
+            share = self.nef.nfs.get(self.nas_path)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get state of NFS share %(share)s: %(error)s',
+                      {'share': self.nas_path, 'error': error})
+            return False
+        if share['shareState'] != 'online':
+            LOG.error('NFS share %(share)s is not online: %(state)s',
+                      {'share': self.nas_path,
+                       'state': share['shareState']})
+            return False
         payload = {}
         if self.nas_stat['nonBlockingMandatoryMode'] != self.nbmand:
             payload['nonBlockingMandatoryMode'] = self.nbmand
         if self.nas_stat['smartCompression'] != self.smart_compression:
             payload['smartCompression'] = self.smart_compression
-        if payload:
+        if not payload:
+            return True
+        try:
             self.nef.filesystems.set(self.nas_path, payload)
-            self.nas_stat.update(payload)
-        service = self.nef.services.get('nfs')
-        if service['state'] != 'online':
-            message = (_('NFS server service is not online: %(state)s')
-                       % {'state': service['state']})
-            raise jsonrpc.NefException(code='ESRCH', message=message)
-        share = self.nef.nfs.get(self.nas_path)
-        if share['shareState'] != 'online':
-            message = (_('NFS share %(share)s is not online: %(state)s')
-                       % {'share': self.nas_path,
-                          'state': share['shareState']})
-            raise jsonrpc.NefException(code='ESRCH', message=message)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to set NAS path %(nas_path)s '
+                      'properties %{payload}s: %(error)s',
+                      {'nas_path': self.nas_path,
+                       'payload': payload, 'error': error})
+            return False
+        self.nas_stat.update(payload)
+        return True
 
     def _update_volume_properties(self, volume):
         """Updates the existing volume properties.
@@ -792,8 +849,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         service_success = False
         service_retries = 0
         while service_running:
-            self.nef.delay(service_retries)
             service_retries += 1
+            self.nef.delay(service_retries)
             payload = {'fields': 'state,progress,runNumber,lastError'}
             try:
                 service = self.nef.hpr.get(service_name, payload)
@@ -1474,11 +1531,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor Appliance."""
-        payload = {'fields': 'bytesAvailable,bytesUsed'}
-        dataset = self.nef.filesystems.get(self.nas_path, payload)
-        free_capacity_gb = dataset['bytesAvailable'] // units.Gi
-        allocated_capacity_gb = dataset['bytesUsed'] // units.Gi
-        total_capacity_gb = free_capacity_gb + allocated_capacity_gb
         provisioned_capacity_gb = total_volumes = total_snapshots = 0
         ctxt = context.get_admin_context()
         volumes = objects.VolumeList.get_all_by_host(ctxt, self.host)
@@ -1489,14 +1541,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         for snapshot in snapshots:
             provisioned_capacity_gb += snapshot['volume_size']
             total_snapshots += 1
-        volume_backend_name = (
-            self.configuration.safe_get('volume_backend_name'))
-        if not volume_backend_name:
-            LOG.error('Failed to get configured volume backend name')
-            volume_backend_name = '%(product)s_%(protocol)s' % {
-                'product': self.product_name,
-                'protocol': self.storage_protocol
-            }
         description = (
             self.configuration.safe_get('nexenta_dataset_description'))
         if not description:
@@ -1520,42 +1564,58 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'product': self.product_name,
             'protocol': self.storage_protocol
         }
-        visibility = 'public'
-        self._stats = {
+        stats = {
+            'backend_state': 'down',
             'driver_version': self.VERSION,
             'vendor_name': self.vendor_name,
             'storage_protocol': self.storage_protocol,
-            'volume_backend_name': volume_backend_name,
+            'volume_backend_name': self.backend_name,
             'location_info': location_info,
             'description': description,
             'display_name': display_name,
-            'pool_name': self.nas_path.split(posixpath.sep)[0],
+            'pool_name': self.nas_pool,
             'multiattach': True,
-            'QoS_support': False,
+            'QoS_support': True,
             'consistencygroup_support': True,
             'consistent_group_snapshot_enabled': True,
             'online_extend_support': True,
             'sparse_copy_volume': True,
             'thin_provisioning_support': True,
             'thick_provisioning_support': True,
-            'total_capacity_gb': total_capacity_gb,
-            'allocated_capacity_gb': allocated_capacity_gb,
-            'free_capacity_gb': free_capacity_gb,
+            'total_capacity_gb': 'unknown',
+            'allocated_capacity_gb': 'unknown',
+            'free_capacity_gb': 'unknown',
             'provisioned_capacity_gb': provisioned_capacity_gb,
             'total_volumes': total_volumes,
             'total_snapshots': total_snapshots,
             'max_over_subscription_ratio': max_over_subscription_ratio,
             'reserved_percentage': reserved_percentage,
-            'visibility': visibility,
             'nef_scheme': self.nef.scheme,
             'nef_hosts': ','.join(self.nef.hosts),
             'nef_port': self.nef.port,
             'nef_url': self.nef.url()
         }
+        payload = {'fields': 'bytesAvailable,bytesUsed'}
+        try:
+            nas_stat = self.nef.filesystems.get(self.nas_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get backend statistics for host %(host)s '
+                      'and volume backend %(backend_name)s: %(error)s',
+                      {'host': self.host,
+                       'backend_name': self.backend_name,
+                       'error': error})
+        else:
+            available = nas_stat['bytesAvailable'] // units.Gi
+            used = nas_stat['bytesUsed'] // units.Gi
+            stats['free_capacity_gb'] = available
+            stats['allocated_capacity_gb'] = used
+            stats['total_capacity_gb'] = available + used
+            stats['backend_state'] = 'up'
+        self._stats = stats
         LOG.debug('Updated volume backend statistics for host %(host)s '
-                  'and volume backend %(volume_backend_name)s: %(stats)s',
+                  'and volume backend %(backend_name)s: %(stats)s',
                   {'host': self.host,
-                   'volume_backend_name': volume_backend_name,
+                   'backend_name': self.backend_name,
                    'stats': self._stats})
 
     def _get_existing_volume(self, existing_ref):
@@ -2391,3 +2451,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Configured IP addresses: %(addresses)s',
                   {'addresses': addresses})
         return addresses
+
+    def _get_backend_name(self):
+        backend_name = self.configuration.safe_get('volume_backend_name')
+        if not backend_name:
+            LOG.error('Failed to get configured volume backend name')
+            backend_name = '%(product)s_%(protocol)s' % {
+                'product': self.product_name,
+                'protocol': self.storage_protocol
+            }
+        return backend_name

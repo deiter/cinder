@@ -90,9 +90,11 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
               - Added workaround for referenced reservation size.
               - Allow retype volume to another provisioning type.
         1.4.9 - Added image caching using clone_image method.
+        1.5.0 - Added flag backend_state to report backend status.
+              - Added retry on driver initialization failure.
     """
 
-    VERSION = '1.4.9'
+    VERSION = '1.5.0'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -113,10 +115,12 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.driver_name = self.__class__.__name__
         self.nef = None
         self.san_stat = None
+        self.backend_name = self._get_backend_name()
         self.image_cache = self.configuration.nexenta_image_cache
         self.target_prefix = self.configuration.nexenta_target_prefix
         self.target_group_prefix = (
             self.configuration.nexenta_target_group_prefix)
+        self.block_size = self.configuration.nexenta_blocksize
         self.host_group_prefix = self.configuration.nexenta_host_group_prefix
         self.luns_per_target = self.configuration.nexenta_luns_per_target
         self.lu_writebackcache_disabled = (
@@ -126,6 +130,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.san_path = posixpath.join(
             self.configuration.nexenta_volume,
             self.configuration.nexenta_volume_group)
+        self.san_pool = self.configuration.nexenta_volume
         self.portals = self.configuration.nexenta_iscsi_target_portals
         self.group_snapshot_template = (
             self.configuration.nexenta_group_snapshot_template)
@@ -145,36 +150,78 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         return options.NEXENTASTOR5_ISCSI_OPTS
 
     def do_setup(self, ctxt):
-        self.nef = jsonrpc.NefProxy(self.driver_volume_type,
-                                    self.san_path,
-                                    self.configuration)
+        retries = 0
+        while not self._do_setup():
+            retries += 1
+            self.nef.delay(retries)
+
+    def _do_setup(self):
+        try:
+            self.nef = jsonrpc.NefProxy(self.driver_volume_type,
+                                        self.san_pool,
+                                        self.san_path,
+                                        self.configuration)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to initialize RESTful API for backend '
+                      '%(backend_name)s on host %(host)s: %(error)s',
+                      {'backend_name': self.backend_name,
+                       'host': self.host,
+                       'error': error})
+            return False
+        return True
 
     def check_for_setup_error(self):
+        retries = 0
+        while not self._check_for_setup_error():
+            retries += 1
+            self.nef.delay(retries)
+
+    def _check_for_setup_error(self):
         """Check root volume group and iSCSI target service."""
-        vendor_specs = self.nef.volumes.properties
-        names = [_['api'] for _ in vendor_specs if 'api' in _]
+        payload = {'fields': 'path'}
+        try:
+            self.nef.filesystems.get(self.san_pool, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get stat of SAN pool %(san_pool)s: %(error)s',
+                      {'san_pool': self.san_pool, 'error': error})
+            return False
+        specs = self.nef.volumes.properties
+        names = [spec['api'] for spec in specs if 'api' in spec]
         names.remove('sparseVolume')
         fields = ','.join(names)
-        stat_payload = {'fields': fields}
+        payload = {'fields': fields}
         try:
-            self.san_stat = self.nef.volumegroups.get(self.san_path,
-                                                      stat_payload)
+            self.san_stat = self.nef.volumegroups.get(self.san_path, payload)
         except jsonrpc.NefException as error:
-            if error.code != 'ENOENT':
-                raise
-            block_size = self.configuration.nexenta_blocksize
-            create_payload = {
-                'path': self.san_path,
-                'volumeBlockSize': block_size
-            }
-            self.nef.volumegroups.create(create_payload)
-            self.san_stat = self.nef.volumegroups.get(self.san_path,
-                                                      stat_payload)
-        service = self.nef.services.get('iscsit')
+            LOG.error('Failed to get stat of SAN path %(san_path)s: %(error)s',
+                      {'san_path': self.san_path, 'error': error})
+            if error.code == 'ENOENT':
+                self._create_san_path()
+            return False
+        if not self.san_stat:
+            return False
+        try:
+            service = self.nef.services.get('iscsit')
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get state of iSCSI target service: %(error)s',
+                      {'error': error})
+            return False
         if service['state'] != 'online':
-            message = (_('iSCSI target service is not online: %(state)s')
-                       % {'state': service['state']})
-            raise jsonrpc.NefException(code='ESRCH', message=message)
+            LOG.error('iSCSI target service is not online: %(state)s',
+                      {'state': service['state']})
+            return False
+        return True
+
+    def _create_san_path(self):
+        payload = {
+            'path': self.san_path,
+            'volumeBlockSize': self.block_size
+        }
+        try:
+            self.nef.volumegroups.create(payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to create SAN path %(san_path)s: %(error)s',
+                      {'san_path': self.san_path, 'error': error})
 
     def _get_volume_reservation(self, volume):
         """Calculates the correct reservation size for given volume size.
@@ -706,11 +753,6 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor appliance."""
-        payload = {'fields': 'bytesAvailable,bytesUsed'}
-        dataset = self.nef.volumegroups.get(self.san_path, payload)
-        free_capacity_gb = dataset['bytesAvailable'] // units.Gi
-        allocated_capacity_gb = dataset['bytesUsed'] // units.Gi
-        total_capacity_gb = free_capacity_gb + allocated_capacity_gb
         provisioned_capacity_gb = total_volumes = total_snapshots = 0
         ctxt = context.get_admin_context()
         volumes = objects.VolumeList.get_all_by_host(ctxt, self.host)
@@ -721,14 +763,6 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         for snapshot in snapshots:
             provisioned_capacity_gb += snapshot['volume_size']
             total_snapshots += 1
-        volume_backend_name = (
-            self.configuration.safe_get('volume_backend_name'))
-        if not volume_backend_name:
-            LOG.error('Failed to get configured volume backend name')
-            volume_backend_name = '%(product)s_%(protocol)s' % {
-                'product': self.product_name,
-                'protocol': self.storage_protocol
-            }
         description = (
             self.configuration.safe_get('nexenta_dataset_description'))
         if not description:
@@ -752,16 +786,16 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'product': self.product_name,
             'protocol': self.storage_protocol
         }
-        visibility = 'public'
-        self._stats = {
+        stats = {
+            'backend_state': 'down',
             'driver_version': self.VERSION,
             'vendor_name': self.vendor_name,
             'storage_protocol': self.storage_protocol,
-            'volume_backend_name': volume_backend_name,
+            'volume_backend_name': self.backend_name,
             'location_info': location_info,
             'description': description,
             'display_name': display_name,
-            'pool_name': self.configuration.nexenta_volume,
+            'pool_name': self.san_pool,
             'multiattach': True,
             'QoS_support': False,
             'consistencygroup_support': True,
@@ -770,24 +804,40 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'sparse_copy_volume': True,
             'thin_provisioning_support': True,
             'thick_provisioning_support': True,
-            'total_capacity_gb': total_capacity_gb,
-            'allocated_capacity_gb': allocated_capacity_gb,
-            'free_capacity_gb': free_capacity_gb,
+            'total_capacity_gb': 'unknown',
+            'allocated_capacity_gb': 'unknown',
+            'free_capacity_gb': 'unknown',
             'provisioned_capacity_gb': provisioned_capacity_gb,
             'total_volumes': total_volumes,
             'total_snapshots': total_snapshots,
             'max_over_subscription_ratio': max_over_subscription_ratio,
             'reserved_percentage': reserved_percentage,
-            'visibility': visibility,
             'nef_scheme': self.nef.scheme,
             'nef_hosts': ','.join(self.nef.hosts),
             'nef_port': self.nef.port,
             'nef_url': self.nef.url()
         }
+        payload = {'fields': 'bytesAvailable,bytesUsed'}
+        try:
+            san_stat = self.nef.volumegroups.get(self.san_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get backend statistics for host %(host)s '
+                      'and volume backend %(backend_name)s: %(error)s',
+                      {'host': self.host,
+                       'backend_name': self.backend_name,
+                       'error': error})
+        else:
+            available = san_stat['bytesAvailable'] // units.Gi
+            used = san_stat['bytesUsed'] // units.Gi
+            stats['free_capacity_gb'] = available
+            stats['allocated_capacity_gb'] = used
+            stats['total_capacity_gb'] = available + used
+            stats['backend_state'] = 'up'
+        self._stats = stats
         LOG.debug('Updated volume backend statistics for host %(host)s '
-                  'and volume backend %(volume_backend_name)s: %(stats)s',
+                  'and volume backend %(backend_name)s: %(stats)s',
                   {'host': self.host,
-                   'volume_backend_name': volume_backend_name,
+                   'backend_name': self.backend_name,
                    'stats': self._stats})
 
     def _get_volume_connectors(self, volume):
@@ -1063,21 +1113,25 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 props_portals += portals
                 props_iqns += [target] * len(portals)
 
-        payload = {'volume': volume_path,
-                   'targetGroup': target_group,
-                   'hostGroup': host_group}
+        payload = {
+            'volume': volume_path,
+            'targetGroup': target_group,
+            'hostGroup': host_group
+        }
         self.nef.mappings.create(payload)
-        mapping = {}
-        for attempt in range(self.nef.retries):
-            mapping = self.nef.mappings.list(payload)
-            if mapping:
+        mappings = {}
+        for attempt in range(1, self.nef.retries + 1):
+            mappings = self.nef.mappings.list(payload)
+            if mappings:
                 break
             self.nef.delay(attempt)
-        if not mapping:
-            message = (_('Failed to get LUN number for %(volume)s')
-                       % {'volume': volume_path})
+        if not mappings:
+            message = (_('LUN mapping %(payload)s created for '
+                         'volume %(volume)s was not found')
+                       % {'payload': payload,
+                          'volume': volume['name']})
             raise jsonrpc.NefException(code='ENOTBLK', message=message)
-        lun = mapping[0]['lun']
+        lun = mappings[0]['lun']
         props_luns = [lun] * len(props_iqns)
 
         if multipath:
@@ -1090,8 +1144,6 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             props['target_iqn'] = props_iqns[index]
             props['target_lun'] = props_luns[index]
 
-        LOG.debug('Set LUN properties for volume %(volume)s',
-                  {'volume': volume_path})
         payload = {
             'volume': volume_path,
             'fields': 'guid'
@@ -1922,8 +1974,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         service_success = False
         service_retries = 0
         while service_running:
-            self.nef.delay(service_retries)
             service_retries += 1
+            self.nef.delay(service_retries)
             payload = {'fields': 'state,progress,runNumber,lastError'}
             try:
                 service = self.nef.hpr.get(service_name, payload)
@@ -2410,3 +2462,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                            % {'value': value, 'enum': enum, 'name': name})
                 raise jsonrpc.NefException(code=code, message=message)
         return value
+
+    def _get_backend_name(self):
+        backend_name = self.configuration.safe_get('volume_backend_name')
+        if not backend_name:
+            LOG.error('Failed to get configured volume backend name')
+            backend_name = '%(product)s_%(protocol)s' % {
+                'product': self.product_name,
+                'protocol': self.storage_protocol
+            }
+        return backend_name

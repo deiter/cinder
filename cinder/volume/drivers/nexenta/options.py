@@ -71,12 +71,12 @@ NEXENTASTOR_CONNECTION_OPTS = [
                       'within which NexentaStor RESTful API '
                       'interface must send a response.'),
     cfg.FloatOpt('nexenta_rest_backoff_factor',
-                 default=0.5,
+                 default=1,
                  help='Specifies the backoff factor to apply between '
                       'connection attempts to NexentaStor RESTful '
                       'API interface.'),
     cfg.IntOpt('nexenta_rest_retry_count',
-               default=3,
+               default=5,
                help='Specifies the number of times to repeat NexentaStor '
                     'RESTful API calls in case of connection errors '
                     'or NexentaStor appliance retryable errors.')
