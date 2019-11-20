@@ -13,10 +13,10 @@
 #    under the License.
 
 import re
-import six
 import uuid
 
 from oslo_utils import units
+import six
 
 from cinder.i18n import _
 from cinder import utils as cinder_utils

@@ -159,10 +159,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
             root_helper, execute=execute,
             nfs_mount_point_base=self.mount_point_base,
             nfs_mount_options=self.mount_options)
-        self.driver_name = self.__class__.__name__
         self.nef = None
         self.nas_stat = None
         self.backend_name = self._get_backend_name()
+        self.nas_driver = self.__class__.__name__
         self.nas_host = self.configuration.nas_host
         self.nas_path = self.configuration.nas_share_path
         self.nas_pool = self.nas_path.split(posixpath.sep)[0]
@@ -918,22 +918,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
             return false_ret
         location = capabilities['location_info']
         try:
-            driver_name, nas_host, nas_path = location.split(':')
+            nas_driver, nas_host, nas_path = location.split(':')
         except ValueError as error:
             LOG.error('Failed to parse location info %(location)s '
                       'for the destination host %(host)s: %(error)s',
                       {'location': location, 'host': host['host'],
                        'error': error})
             return false_ret
-        if not (driver_name and nas_host and nas_path):
+        if not (nas_driver and nas_host and nas_path):
             LOG.error('Incomplete location info %(location)s '
                       'found for the destination host %(host)s',
                       {'location': location, 'host': host['host']})
             return false_ret
-        if driver_name != self.driver_name:
-            LOG.error('Unsupported storage driver %(driver_name)s '
+        if nas_driver != self.nas_driver:
+            LOG.error('Unsupported storage driver %(nas_driver)s '
                       'found for the destination host %(host)s',
-                      {'driver_name': driver_name,
+                      {'nas_driver': nas_driver,
                        'host': host['host']})
             return false_ret
         storage_protocol = capabilities['storage_protocol']
@@ -1519,7 +1519,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if reserved_percentage is None:
             reserved_percentage = 0
         location_info = '%(driver)s:%(host)s:%(path)s' % {
-            'driver': self.driver_name,
+            'driver': self.nas_driver,
             'host': self.nas_host,
             'path': self.nas_path
         }

@@ -113,10 +113,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             raise jsonrpc.NefException(code='ENODATA', message=message)
         self.configuration.append_config_values(
             options.NEXENTASTOR5_ISCSI_OPTS)
-        self.driver_name = self.__class__.__name__
         self.nef = None
         self.san_stat = None
         self.backend_name = self._get_backend_name()
+        self.san_driver = self.__class__.__name__
         self.image_cache = self.configuration.nexenta_image_cache
         self.target_prefix = self.configuration.nexenta_target_prefix
         self.target_group_prefix = (
@@ -740,7 +740,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         if reserved_percentage is None:
             reserved_percentage = 0
         location_info = '%(driver)s:%(host)s:%(path)s' % {
-            'driver': self.driver_name,
+            'driver': self.san_driver,
             'host': self.san_host,
             'path': self.san_path
         }
@@ -2042,22 +2042,22 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             return false_ret
         location = capabilities['location_info']
         try:
-            driver_name, san_host, san_path = location.split(':')
+            san_driver, san_host, san_path = location.split(':')
         except ValueError as error:
             LOG.error('Failed to parse location info %(location)s '
                       'for the destination host %(host)s: %(error)s',
                       {'location': location, 'host': host['host'],
                        'error': error})
             return false_ret
-        if not (driver_name and san_host and san_path):
+        if not (san_driver and san_host and san_path):
             LOG.error('Incomplete location info %(location)s '
                       'found for the destination host %(host)s',
                       {'location': location, 'host': host['host']})
             return false_ret
-        if driver_name != self.driver_name:
-            LOG.error('Unsupported storage driver %(driver_name)s '
+        if san_driver != self.san_driver:
+            LOG.error('Unsupported storage driver %(san_driver)s '
                       'found for the destination host %(host)s',
-                      {'driver_name': driver_name,
+                      {'san_driver': san_driver,
                        'host': host['host']})
             return false_ret
         storage_protocol = capabilities['storage_protocol']

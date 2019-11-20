@@ -104,8 +104,6 @@ class NmsRequest(object):
         data = json.dumps(payload)
         message = None
         for attempt in range(attempts):
-            if attempt == attempts - 1:
-                raise NmsException(code='EAGAIN', message=message)
             if message:
                 self.nms.proxy.delay(attempt, message)
                 LOG.warning('NMS request retry %(attempt)s: post %(url)s '
@@ -202,6 +200,7 @@ class NmsRequest(object):
                       {'payload': payload, 'result': result})
 
             return result
+        raise NmsException(code='EAGAIN', message=message)
 
     def check_error(self, message):
         source = self.nms.proxy.url
@@ -403,8 +402,12 @@ class NmsProxy(object):
     def url(self):
         return '%s://%s:%s/rest/nms' % (self.scheme, self.host, self.port)
 
-    def delay(self, attempt, message):
-        interval = int(self.backoff_factor * (2 ** (attempt - 1)))
-        LOG.debug('Waiting for %(interval)s seconds, reason: %(message)s',
-                  {'interval': interval, 'message': message})
+    def delay(self, attempt, reason):
+        if self.retries > 0:
+            attempt %= self.retries
+            if attempt == 0:
+                attempt = self.retries
+        interval = float(self.backoff_factor * (2 ** (attempt - 1)))
+        LOG.debug('Waiting for %(interval)s seconds, reason: %(reason)s',
+                  {'interval': interval, 'reason': reason})
         greenthread.sleep(interval)

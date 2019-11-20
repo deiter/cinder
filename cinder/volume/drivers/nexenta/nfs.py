@@ -40,6 +40,9 @@ from cinder.volume.drivers import nfs
 
 LOG = logging.getLogger(__name__)
 
+DEFAULT_RETRY_COUNT = 10
+DEFAULT_RETRY_DELAY = 30
+
 
 @interface.volumedriver
 class NexentaNfsDriver(nfs.NfsDriver):
@@ -74,10 +77,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
               - Added informative exception messages for REST API.
               - Improved collection of backend statistics.
         1.4.1 - Added retries on timeouts, network connection errors,
-                SSL errors, proxy and NMS errors.
+              - SSL errors, proxy and NMS errors.
+        1.4.2 - Added flag backend_state to report backend status.
+              - Added retry on driver initialization failure.
     """
 
-    VERSION = '1.4.1'
+    VERSION = '1.4.2'
     CI_WIKI_NAME = 'Nexenta_CI'
 
     vendor_name = 'Nexenta'
@@ -128,11 +133,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
             root_helper, execute=execute,
             nfs_mount_point_base=self.mount_point_base,
             nfs_mount_options=self.mount_options)
-        self.driver_name = self.__class__.__name__
+        self.backend_name = self._get_backend_name()
         self.nms = None
         self.nas_stat = None
+        self.nas_driver = self.__class__.__name__
         self.nas_host = self.configuration.nas_host
         self.nas_path = self.configuration.nas_share_path
+        self.nas_pool = self.nas_path.split('/')[0]
         self.volume_compression = (
             self.configuration.nexenta_dataset_compression)
         self.volume_dedup = self.configuration.nexenta_dataset_dedup
@@ -151,41 +158,78 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def get_driver_options():
         return options.NEXENTASTOR4_NFS_OPTS
 
-    def do_setup(self, context):
-        self.nms = jsonrpc.NmsProxy(self.driver_volume_type,
-                                    self.nas_path,
-                                    self.configuration)
+    def do_setup(self, ctxt):
+        while not self._do_setup():
+            greenthread.sleep(DEFAULT_RETRY_DELAY)
+
+    def _do_setup(self):
+        try:
+            self.nms = jsonrpc.NmsProxy(self.driver_volume_type,
+                                        self.nas_path,
+                                        self.configuration)
+        except jsonrpc.NmsException as error:
+            LOG.error('Failed to initialize RESTful API for backend '
+                      '%(backend_name)s on host %(host)s: %(error)s',
+                      {'backend_name': self.backend_name,
+                       'host': self.host,
+                       'error': error})
+            return False
+        return True
 
     def check_for_setup_error(self):
+        while not self._check_for_setup_error():
+            greenthread.sleep(DEFAULT_RETRY_DELAY)
+
+    def _check_for_setup_error(self):
         """Check root filesystem, NFS service and NFS share."""
-        if not self.nms.folder.object_exists(self.nas_path):
-            message = (_('NFS root filesystem %(path)s not found')
-                       % {'path': self.nas_path})
-            raise jsonrpc.NmsException(code='ENOENT', message=message)
-        self.nas_stat = self.nms.folder.get_child_props(self.nas_path, '')
+        fmri = 'svc:/network/nfs/server:default'
+        try:
+            self.nas_stat = self.nms.folder.get_child_props(self.nas_path, '')
+        except jsonrpc.NmsException as error:
+            LOG.error('Failed to get stat of SAN path %(nas_path)s: %(error)s',
+                      {'nas_path': self.nas_path, 'error': error})
+            return False
         if self.nas_stat['mountpoint'] == 'none':
-            message = (_('NFS root filesystem %(path)s is not writable')
-                       % {'path': self.nas_path})
-            raise jsonrpc.NefException(code='ENOENT', message=message)
+            LOG.error('NAS path %(nas_path)s is not writable',
+                      {'nas_path': self.nas_path})
+            return False
         if self.nas_stat['mounted'] == 'no':
-            message = (_('NFS root filesystem %(path)s is not mounted')
-                       % {'path': self.nas_path})
-            raise jsonrpc.NefException(code='ENOTDIR', message=message)
-        if self.nas_stat['nbmand'] != self.nbmand:
+            LOG.error('NAS path %(nas_path)s is not mounted',
+                      {'nas_path': self.nas_path})
+            return False
+        try:
+            service_state = self.nms.netsvc.get_state(fmri)
+        except jsonrpc.NmsException as error:
+            LOG.error('Failed to get state of NFS service: %(error)s',
+                      {'error': error})
+            return False
+        if service_state != 'online':
+            LOG.error('NFS service is not online: %(state)s',
+                      {'state': service_state})
+            return False
+        try:
+            shared = self.nms.netstorsvc.is_folder_shared(fmri, self.nas_path)
+        except jsonrpc.NmsException as error:
+            LOG.error('Failed to get state of NFS share %(share)s: %(error)s',
+                      {'share': self.nas_path, 'error': error})
+            return False
+        if not shared:
+            LOG.error('NAS path %(nas_path)s is not shared',
+                      {'nas_path': self.nas_path})
+            return False
+        if self.nas_stat['nbmand'] == self.nbmand:
+            return True
+        try:
             self.nms.folder.set_child_prop(self.nas_path, 'nbmand',
                                            self.nbmand)
-            self.nas_stat['nbmand'] = self.nbmand
-        fmri = 'svc:/network/nfs/server:default'
-        state = self.nms.netsvc.get_state(fmri)
-        if state != 'online':
-            message = (_('NFS service is not online: %(state)s')
-                       % {'state': state})
-            raise jsonrpc.NmsException(code='ESRCH', message=message)
-        shared = self.nms.netstorsvc.is_folder_shared(fmri, self.nas_path)
-        if not shared:
-            message = (_('NFS root filesystem %(path)s is not shared')
-                       % {'path': self.nas_path})
-            raise jsonrpc.NmsException(code='ENOENT', message=message)
+        except jsonrpc.NmsException as error:
+            LOG.error('Failed to set NAS path %(nas_path)s property nbmand '
+                      'to value %(nbmand)s: %(error)s',
+                      {'nas_path': self.nas_path, 'nbmand': self.nbmand,
+                       'error': error})
+            return False
+        self.nas_stat['nbmand'] = self.nbmand
+        return True
 
     def create_volume(self, volume):
         """Creates a volume.
@@ -229,20 +273,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         finally:
             self._unmount_volume(volume)
 
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
         LOG.debug('Copy image %(image)s to volume %(volume)s',
                   {'image': image_id, 'volume': volume['name']})
         self._mount_volume(volume)
         super(NexentaNfsDriver, self).copy_image_to_volume(
-            context, volume, image_service, image_id)
+            ctxt, volume, image_service, image_id)
         self._unmount_volume(volume)
 
-    def copy_volume_to_image(self, context, volume, image_service, image_meta):
+    def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
         LOG.debug('Copy volume %(volume)s to image %(image)s',
                   {'volume': volume['name'], 'image': image_meta['id']})
         self._mount_volume(volume)
         super(NexentaNfsDriver, self).copy_volume_to_image(
-            context, volume, image_service, image_meta)
+            ctxt, volume, image_service, image_meta)
         self._unmount_volume(volume)
 
     def extend_volume(self, volume, new_size):
@@ -376,7 +420,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'retrying unmount %(share)s from %(path)s',
                           {'attempt': attempt, 'error': error,
                            'share': share, 'path': path})
-                greenthread.sleep(1)
+                greenthread.sleep(DEFAULT_RETRY_DELAY)
         self._delete(path)
 
     def _delete(self, path):
@@ -403,15 +447,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 return
         self._ensure_share_unmounted(share)
 
-    def create_export(self, context, volume, connector):
+    def create_export(self, ctxt, volume, connector):
         """Driver entry point to get the export info for a new volume."""
         pass
 
-    def ensure_export(self, context, volume):
+    def ensure_export(self, ctxt, volume):
         """Driver entry point to get the export info for an existing volume."""
         pass
 
-    def remove_export(self, context, volume):
+    def remove_export(self, ctxt, volume):
         """Driver entry point to remove an export for a volume."""
         pass
 
@@ -471,10 +515,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         return None
 
     def _svc_state(self, fmri, state):
-        retries = 10
-        delay = 30
+        retries = DEFAULT_RETRY_COUNT
         while retries:
-            greenthread.sleep(delay)
+            greenthread.sleep(DEFAULT_RETRY_DELAY)
             retries -= 1
             try:
                 status = self.nms.autosvc.get_state(fmri)
@@ -502,8 +545,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           '%(fmri)s to %(state)s: %(error)s',
                           {'fmri': fmri, 'state': state, 'error': error})
         LOG.error('Unable to change state of migration service %(fmri)s '
-                  'to %(state)s: maximum retries exceeded',
-                  {'fmri': fmri, 'state': state})
+                  'to %(state)s: maximum retries exceeded (%(retries)s)',
+                  {'fmri': fmri, 'state': state, 'retries': retries})
         return False
 
     def _svc_progress(self, fmri):
@@ -618,7 +661,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 except jsonrpc.NmsException as error:
                     if error.code == 'ENOENT':
                         break
-                greenthread.sleep(30)
+                greenthread.sleep(DEFAULT_RETRY_DELAY)
         if migrated:
             return
         path = props.get('restarter/logfile')
@@ -636,8 +679,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'fmri': fmri, 'log': log})
 
     def _migrate_volume(self, volume, host, path):
-        delay = 30
-        retries = 10
         src_path = self._get_volume_path(volume)
         dst_path = posixpath.join(path, volume['name'])
         hosts = self._get_host_addresses()
@@ -747,10 +788,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self._svc_cleanup(fmri)
             return False
         service_history = None
-        service_retries = retries
+        service_retries = DEFAULT_RETRY_COUNT
         service_progress = 0
         while service_retries and not service_history:
-            greenthread.sleep(delay)
+            greenthread.sleep(DEFAULT_RETRY_DELAY)
             service_retries -= 1
             try:
                 service_props = self.nms.autosvc.get_child_props(fmri, '')
@@ -766,7 +807,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             progress = self._svc_progress(fmri)
             if progress > service_progress:
                 service_progress = progress
-                service_retries = retries
+                service_retries = DEFAULT_RETRY_COUNT
             LOG.info('Migration service %(fmri)s replication progress: '
                      '%(service_progress)s%%',
                      {'fmri': fmri, 'service_progress': service_progress})
@@ -784,13 +825,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           {'volume': volume['name'], 'error': error})
         return volume_migrated
 
-    def migrate_volume(self, context, volume, host):
+    def migrate_volume(self, ctxt, volume, host):
         """Migrate the volume to the specified host.
 
         Returns a boolean indicating whether the migration occurred,
         as well as model_update.
 
-        :param context: Security context
+        :param ctxt: Security context
         :param volume: A dictionary describing the volume to migrate
         :param host: A dictionary describing the host to migrate to, where
                      host['host'] is its name, and host['capabilities'] is a
@@ -827,22 +868,23 @@ class NexentaNfsDriver(nfs.NfsDriver):
             return false_ret
         location = capabilities['location_info']
         try:
-            driver, nas_host, nas_path = location.split(':')
+            nas_driver, nas_host, nas_path = location.split(':')
         except ValueError as error:
             LOG.error('Failed to parse location info %(location)s '
                       'for the destination host %(host)s: %(error)s',
                       {'location': location, 'host': host['host'],
                        'error': error})
             return false_ret
-        if not (driver and nas_host and nas_path):
+        if not (nas_driver and nas_host and nas_path):
             LOG.error('Incomplete location info %(location)s '
                       'found for the destination host %(host)s',
                       {'location': location, 'host': host['host']})
             return false_ret
-        if driver != self.driver_name:
-            LOG.error('Unsupported storage driver %(driver)s '
+        if nas_driver != self.nas_driver:
+            LOG.error('Unsupported storage driver %(nas_driver)s '
                       'found for the destination host %(host)s',
-                      {'driver': driver, 'host': host['host']})
+                      {'nas_driver': nas_driver,
+                       'host': host['host']})
             return false_ret
         storage_protocol = capabilities['storage_protocol']
         if storage_protocol != self.storage_protocol:
@@ -865,14 +907,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
             return (True, None)
         return false_ret
 
-    def update_migrated_volume(self, context, volume, new_volume,
+    def update_migrated_volume(self, ctxt, volume, new_volume,
                                original_volume_status):
         """Return model update for migrated volume.
 
         This method should rename the back-end volume name on the
         destination host back to its original name on the source host.
 
-        :param context: The context of the caller
+        :param ctxt: The context of the caller
         :param volume: The original volume that was migrated to this backend
         :param new_volume: The migration volume object that was created on
                            this backend as part of the migration process
@@ -906,7 +948,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         model_update = {'_name_id': name_id}
         return model_update
 
-    def retype(self, context, volume, new_type, diff, host):
+    def retype(self, ctxt, volume, new_type, diff, host):
         """Convert the volume to be of the new type."""
         pass
 
@@ -934,7 +976,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         # actually helpful.
         return False
 
-    def revert_to_snapshot(self, context, volume, snapshot):
+    def revert_to_snapshot(self, ctxt, volume, snapshot):
         """Revert volume to snapshot."""
         snapshot_path = self._get_snapshot_path(snapshot)
         self.nms.snapshot.rollback(snapshot_path, '-Rf')
@@ -994,32 +1036,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor appliance."""
-        pool_name = self.nas_path.split('/')[0]
-        stats = {'available': None, 'used': None}
-        payload = '|'.join(stats.keys())
-        props = self.nms.folder.get_child_props(self.nas_path, payload)
-        for key in stats:
-            if not props.get(key):
-                LOG.error('Unable to get %(key)s statistics for %(path)s '
-                          'from properties %(props)s',
-                          {'path': self.nas_path, 'props': props})
-                continue
-            text = '%sB' % props[key]
-            try:
-                value = strutils.string_to_bytes(text, return_int=True)
-                stats[key] = value // units.Gi
-            except ValueError as error:
-                LOG.error('Failed to convert text value %(text)s to '
-                          'bytes for the %(key)s property: %(error)s',
-                          {'text': text, 'key': key, 'error': error})
-        if None in stats.values():
-            allocated_capacity_gb = 'unknown'
-            free_capacity_gb = 'unknown'
-            total_capacity_gb = 'unknown'
-        else:
-            free_capacity_gb = stats['available']
-            allocated_capacity_gb = stats['used']
-            total_capacity_gb = free_capacity_gb + allocated_capacity_gb
         provisioned_capacity_gb = total_volumes = total_snapshots = 0
         ctxt = context.get_admin_context()
         volumes = objects.VolumeList.get_all_by_host(ctxt, self.host)
@@ -1030,22 +1046,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         for snapshot in snapshots:
             provisioned_capacity_gb += snapshot['volume_size']
             total_snapshots += 1
-        if self.volume_compression:
-            compression = self.volume_compression
-        else:
-            compression = self.nas_stat['compression']
-        if self.volume_dedup:
-            dedup = self.volume_dedup
-        else:
-            dedup = self.nas_stat['dedup']
-        volume_backend_name = (
-            self.configuration.safe_get('volume_backend_name'))
-        if not volume_backend_name:
-            LOG.error('Failed to get configured volume backend name')
-            volume_backend_name = '%(product)s_%(protocol)s' % {
-                'product': self.product_name,
-                'protocol': self.storage_protocol
-            }
         description = (
             self.configuration.safe_get('nexenta_dataset_description'))
         if not description:
@@ -1061,7 +1061,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if reserved_percentage is None:
             reserved_percentage = 0
         location_info = '%(driver)s:%(host)s:%(path)s' % {
-            'driver': self.driver_name,
+            'driver': self.nas_driver,
             'host': self.nas_host,
             'path': self.nas_path
         }
@@ -1069,16 +1069,24 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'product': self.product_name,
             'protocol': self.storage_protocol
         }
-        visibility = 'public'
-        self._stats = {
+        if self.volume_compression:
+            compression = self.volume_compression
+        else:
+            compression = self.nas_stat['compression']
+        if self.volume_dedup:
+            dedup = self.volume_dedup
+        else:
+            dedup = self.nas_stat['dedup']
+        stats = {
+            'backend_state': 'down',
             'driver_version': self.VERSION,
             'vendor_name': self.vendor_name,
             'storage_protocol': self.storage_protocol,
-            'volume_backend_name': volume_backend_name,
+            'volume_backend_name': self.backend_name,
             'location_info': location_info,
             'description': description,
             'display_name': display_name,
-            'pool_name': pool_name,
+            'pool_name': self.nas_pool,
             'multiattach': True,
             'QoS_support': False,
             'consistencygroup_support': False,
@@ -1087,23 +1095,47 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'sparse_copy_volume': True,
             'thin_provisioning_support': True,
             'thick_provisioning_support': True,
-            'total_capacity_gb': total_capacity_gb,
-            'allocated_capacity_gb': allocated_capacity_gb,
-            'free_capacity_gb': free_capacity_gb,
+            'total_capacity_gb': 'unknown',
+            'allocated_capacity_gb': 'unknown',
+            'free_capacity_gb': 'unknown',
             'provisioned_capacity_gb': provisioned_capacity_gb,
             'total_volumes': total_volumes,
             'total_snapshots': total_snapshots,
             'max_over_subscription_ratio': max_over_subscription_ratio,
             'reserved_percentage': reserved_percentage,
-            'visibility': visibility,
             'dedup': dedup,
             'compression': compression,
             'nms_url': self.nms.url
         }
+        stats_props = {
+            'free_capacity_gb': 'available',
+            'allocated_capacity_gb': 'used'
+        }
+        payload = '|'.join(stats_props.values())
+        try:
+            nas_props = self.nms.folder.get_child_props(self.nas_path, payload)
+        except jsonrpc.NmsException as error:
+            LOG.error('Failed to get backend statistics for host %(host)s '
+                      'and volume backend %(backend_name)s: %(error)s',
+                      {'host': self.host,
+                       'backend_name': self.backend_name,
+                       'error': error})
+        else:
+            stats['backend_state'] = 'up'
+            stats['total_capacity_gb'] = 0
+            for stat, prop in stats_props.items():
+                try:
+                    text = '%sB' % nas_props[prop]
+                    size = strutils.string_to_bytes(text, return_int=True)
+                    stats[stat] = size // units.Gi
+                    stats['total_capacity_gb'] += stats[stat]
+                except (KeyError, TypeError, ValueError) as error:
+                    stats['total_capacity_gb'] = 'unknown'
+        self._stats = stats
         LOG.debug('Updated volume backend statistics for host %(host)s '
-                  'and volume backend %(volume_backend_name)s: %(stats)s',
+                  'and volume backend %(backend_name)s: %(stats)s',
                   {'host': self.host,
-                   'volume_backend_name': volume_backend_name,
+                   'backend_name': self.backend_name,
                    'stats': self._stats})
 
     def _get_volume_path(self, volume):
@@ -1133,3 +1165,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Configured IP addresses: %(addresses)s',
                   {'addresses': addresses})
         return addresses
+
+    def _get_backend_name(self):
+        backend_name = self.configuration.safe_get('volume_backend_name')
+        if not backend_name:
+            LOG.error('Failed to get configured volume backend name')
+            backend_name = '%(product)s_%(protocol)s' % {
+                'product': self.product_name,
+                'protocol': self.storage_protocol
+            }
+        return backend_name

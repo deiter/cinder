@@ -931,8 +931,8 @@ class NefProxy(object):
     def delay(self, attempt):
         if self.retries > 0:
             attempt %= self.retries
-        if attempt == 0:
-            attempt = 1
+            if attempt == 0:
+                attempt = self.retries
         interval = float(self.backoff_factor * (2 ** (attempt - 1)))
         LOG.debug('Waiting for %(interval)s seconds',
                   {'interval': interval})
