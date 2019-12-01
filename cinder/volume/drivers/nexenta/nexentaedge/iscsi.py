@@ -1,5 +1,4 @@
-# Copyright 2015 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -50,13 +49,7 @@ class NexentaEdgeISCSIDriver(driver.ISCSIDriver):
         super(NexentaEdgeISCSIDriver, self).__init__(*args, **kwargs)
         if self.configuration:
             self.configuration.append_config_values(
-                options.NEXENTA_CONNECTION_OPTS)
-            self.configuration.append_config_values(
-                options.NEXENTA_ISCSI_OPTS)
-            self.configuration.append_config_values(
-                options.NEXENTA_DATASET_OPTS)
-            self.configuration.append_config_values(
-                options.NEXENTA_EDGE_OPTS)
+                options.NEXENTAEDGE_ISCSI_OPTS)
         self.restapi_protocol = self.configuration.nexenta_rest_protocol
         self.restapi_host = self.configuration.nexenta_rest_address
         self.restapi_port = self.configuration.nexenta_rest_port
