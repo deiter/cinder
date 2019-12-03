@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -27,6 +26,13 @@ from cinder.i18n import _
 from cinder import utils
 
 LOG = logging.getLogger(__name__)
+
+DEFAULT_REST_PORT = 8457
+HTTPS = 'https'
+HTTP = 'http'
+AUTO = 'auto'
+NFS = 'nfs'
+ISCSI = 'iscsi'
 
 
 def synchronized(method):
@@ -117,8 +123,6 @@ class NmsRequest(object):
         data = json.dumps(payload)
         message = None
         for attempt in range(attempts):
-            if attempt == attempts - 1:
-                raise NmsException(code='EAGAIN', message=message)
             if message:
                 self.nms.proxy.delay(attempt, message)
                 LOG.warning('NMS request retry %(attempt)s: post %(url)s '
@@ -215,6 +219,7 @@ class NmsRequest(object):
                       {'payload': payload, 'result': result})
 
             return result
+        raise NmsException(code='EAGAIN', message=message)
 
     def check_error(self, message):
         source = self.nms.proxy.url
@@ -288,14 +293,14 @@ class NmsProxy(object):
         self.lock = 'nms'
         self.auto = False
         self.scheme = conf.nexenta_rest_protocol
-        if self.scheme == 'auto':
+        if self.scheme == AUTO:
             self.auto = True
-            self.scheme = 'http'
+            self.scheme = HTTP
         if conf.nexenta_rest_address:
             self.host = conf.nexenta_rest_address
-        elif conf.nexenta_host:
+        elif proto == ISCSI and conf.nexenta_host:
             self.host = conf.nexenta_host
-        elif proto == 'nfs' and conf.nas_host:
+        elif proto == NFS and conf.nas_host:
             self.host = conf.nas_host
         else:
             message = (_('NexentaStor Rest API address is not defined, '
@@ -306,7 +311,7 @@ class NmsProxy(object):
         if conf.nexenta_rest_port:
             self.port = conf.nexenta_rest_port
         else:
-            self.port = 8457
+            self.port = DEFAULT_REST_PORT
         self.headers = {
             'Content-Type': 'application/json',
             'X-Requested-With': 'XMLHttpRequest'
@@ -406,7 +411,7 @@ class NmsProxy(object):
         if not signature:
             signature = self.host
         lock = '%s:%s' % (signature, self.path)
-        if six.PY3:
+        if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
         self.lock = hashlib.md5(lock).hexdigest()
         LOG.debug('NMS coordination lock: %(lock)s',
@@ -416,8 +421,12 @@ class NmsProxy(object):
     def url(self):
         return '%s://%s:%s/rest/nms' % (self.scheme, self.host, self.port)
 
-    def delay(self, attempt, message):
-        interval = int(self.backoff_factor * (2 ** (attempt - 1)))
-        LOG.debug('Waiting for %(interval)s seconds, reason: %(message)s',
-                  {'interval': interval, 'message': message})
+    def delay(self, attempt, reason):
+        if self.retries > 0:
+            attempt %= self.retries
+            if attempt == 0:
+                attempt = self.retries
+        interval = float(self.backoff_factor * (2 ** (attempt - 1)))
+        LOG.debug('Waiting for %(interval)s seconds, reason: %(reason)s',
+                  {'interval': interval, 'reason': reason})
         greenthread.sleep(interval)
