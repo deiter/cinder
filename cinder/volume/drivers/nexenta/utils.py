@@ -1,5 +1,4 @@
-# Copyright 2018 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -14,10 +13,11 @@
 #    under the License.
 
 import re
-import six
+import uuid
 
+from oslo_utils import encodeutils
 from oslo_utils import units
-import six.moves.urllib.parse as urlparse
+import six
 
 from cinder.i18n import _
 
@@ -57,71 +57,46 @@ def str2gib_size(s):
     return size_in_bytes // units.Gi
 
 
-def get_rrmgr_cmd(src, dst, compression=None, tcp_buf_size=None,
-                  connections=None):
-    """Returns rrmgr command for source and destination."""
-    cmd = ['rrmgr', '-s', 'zfs']
-    if compression:
-        cmd.extend(['-c', six.text_type(compression)])
-    cmd.append('-q')
-    cmd.append('-e')
-    if tcp_buf_size:
-        cmd.extend(['-w', six.text_type(tcp_buf_size)])
-    if connections:
-        cmd.extend(['-n', six.text_type(connections)])
-    cmd.extend([src, dst])
-    return ' '.join(cmd)
+def native_string(text):
+    """Convert to native string.
 
+    Convert bytes and Unicode strings to native strings:
 
-def parse_nms_url(url):
-    """Parse NMS url into normalized parts like scheme, user, host and others.
-
-    Example NMS URL:
-        auto://admin:nexenta@192.168.1.1:2000/
-
-    NMS URL parts:
-
-    .. code-block:: none
-
-        auto                True if url starts with auto://, protocol
-                            will be automatically switched to https
-                            if http not supported;
-        scheme (auto)       connection protocol (http or https);
-        user (admin)        NMS user;
-        password (nexenta)  NMS password;
-        host (192.168.1.1)  NMS host;
-        port (2000)         NMS port.
-
-    :param url: url string
-    :return: tuple (auto, scheme, user, password, host, port, path)
+    * convert to bytes on Python 2:
+      encode Unicode using encodeutils.safe_encode()
+    * convert to Unicode on Python 3: decode bytes from UTF-8
     """
-    pr = urlparse.urlparse(url)
-    scheme = pr.scheme
-    auto = scheme == 'auto'
-    if auto:
-        scheme = 'http'
-    user = 'admin'
-    password = 'nexenta'
-    if '@' not in pr.netloc:
-        host_and_port = pr.netloc
-    else:
-        user_and_password, host_and_port = pr.netloc.split('@', 1)
-        if ':' in user_and_password:
-            user, password = user_and_password.split(':')
-        else:
-            user = user_and_password
-    if ':' in host_and_port:
-        host, port = host_and_port.split(':', 1)
-    else:
-        host, port = host_and_port, '2000'
-    return auto, scheme, user, password, host, port, '/rest/nms/'
+    if six.PY2:
+        return encodeutils.safe_encode(text)
+    if isinstance(text, bytes):
+        return text.decode('utf-8')
+    return text
 
 
-def get_migrate_snapshot_name(volume):
-    """Return name for snapshot that will be used to migrate the volume."""
-    return 'cinder-migrate-snapshot-%(id)s' % volume
+def divup(numerator, denominator):
+    return (numerator + denominator - 1) // denominator
 
 
-def ex2err(ex):
-    """Convert a Cinder Exception to a Nexenta Error."""
-    return ex.msg
+def roundup(numerator, denominator):
+    return divup(numerator, denominator) * denominator
+
+
+def match_template(template, name):
+    if not (name and isinstance(name, six.string_types) and
+            template and isinstance(template, six.string_types)):
+        return False
+    pattern = template.replace('%s', r'(?P<uuid>.+)')
+    if pattern == template:
+        return False
+    regex = re.compile(pattern)
+    match = regex.match(name)
+    if match is None:
+        return False
+    result = match.group('uuid')
+    if not (result and isinstance(result, six.string_types)):
+        return False
+    try:
+        uuid.UUID(result, version=4)
+    except ValueError:
+        return False
+    return True

@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -14,23 +13,41 @@
 #    under the License.
 
 import errno
-import hashlib
+import ipaddress
 import os
 import posixpath
+import sys
+import uuid
 
-import ipaddress
+from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_utils import strutils
 from oslo_utils import units
 import six
 
+from cinder.brick.remotefs import remotefs
+from cinder import context
 from cinder.i18n import _
+from cinder.image import image_utils
+from cinder import utils as cinder_utils
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
+from cinder.volume.drivers.nexenta import utils as nexenta_utils
 from cinder.volume.drivers import nfs
 from cinder.volume import volume_types
 
 LOG = logging.getLogger(__name__)
+
+VOLUME_FILE_NAME = 'volume'
+VOLUME_FORMAT_RAW = 'raw'
+VOLUME_FORMAT_QCOW = 'qcow'
+VOLUME_FORMAT_QCOW2 = 'qcow2'
+VOLUME_FORMAT_PARALLELS = 'parallels'
+VOLUME_FORMAT_VDI = 'vdi'
+VOLUME_FORMAT_VHDX = 'vhdx'
+VOLUME_FORMAT_VMDK = 'vmdk'
+VOLUME_FORMAT_VPC = 'vpc'
+VOLUME_FORMAT_QED = 'qed'
 
 
 class NexentaNfsDriver(nfs.NfsDriver):
@@ -75,14 +92,27 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.8.2 - Added manage/unmanage/manageable-list volume/snapshot support.
         1.8.3 - Added consistency group capability to generic volume group.
         1.8.4 - Refactored storage assisted volume migration.
-                Added support for volume retype.
-                Added support for volume type extra specs.
-                Added vendor capabilities support.
+              - Added support for volume retype.
+              - Added support for volume type extra specs.
+              - Added vendor capabilities support.
         1.8.5 - Fixed NFS protocol version for generic volume migration.
         1.8.6 - Fixed post-migration volume mount.
+        1.8.7 - Added workaround for pagination.
+        1.8.8 - Improved error messages.
+              - Improved compatibility with initial driver versions.
+              - Added throttle for storage assisted volume migration.
+        1.8.9 - Added support for different volume formats.
+              - Added space reservation for thick provisioned volumes.
+              - Fixed renaming volume after generic migration.
+              - Fixed properties for volumes created from snapshot.
+              - Allow retype volume to another provisioning type.
+        1.9.0 - Added image caching using clone_image method.
+        1.9.1 - Added flag backend_state to report backend status.
+              - Added retry on driver initialization failure.
+              - Added QoS support in terms of I/O throttling rate.
     """
 
-    VERSION = '1.8.6'
+    VERSION = '1.9.1'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -90,7 +120,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
     storage_protocol = 'NFS'
     driver_volume_type = 'nfs'
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, execute=processutils.execute, *args, **kwargs):
+        self._remotefsclient = None
         super(NexentaNfsDriver, self).__init__(*args, **kwargs)
         if not self.configuration:
             message = (_('%(product_name)s %(storage_protocol)s '
@@ -98,151 +129,547 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        % {'product_name': self.product_name,
                           'storage_protocol': self.storage_protocol})
             raise jsonrpc.NefException(code='ENODATA', message=message)
-        self.configuration.append_config_values(
-            options.NEXENTA_CONNECTION_OPTS)
-        self.configuration.append_config_values(
-            options.NEXENTA_NFS_OPTS)
-        self.configuration.append_config_values(
-            options.NEXENTA_DATASET_OPTS)
+        self.configuration.append_config_values(options.NEXENTASTOR5_NFS_OPTS)
+        root_helper = cinder_utils.get_root_helper()
+        mount_point_base = self.configuration.nexenta_mount_point_base
+        self.mount_point_base = os.path.realpath(mount_point_base)
+        nfs_options = self.configuration.safe_get('nfs_mount_options')
+        nas_options = self.configuration.safe_get('nas_mount_options')
+        if nfs_options and nas_options:
+            LOG.debug('Overriding NFS mount options: '
+                      'nfs_mount_options = "%(nfs_options)s" with '
+                      'nas_mount_options = "%(nas_options)s"',
+                      {'nfs_options': nfs_options,
+                       'nas_options': nas_options})
+        if nas_options:
+            self.mount_options = nas_options
+        elif nfs_options:
+            self.mount_options = nfs_options
+        else:
+            self.mount_options = None
+        self._remotefsclient = remotefs.RemoteFsClient(
+            self.driver_volume_type,
+            root_helper, execute=execute,
+            nfs_mount_point_base=self.mount_point_base,
+            nfs_mount_options=self.mount_options)
         self.nef = None
-        self.driver_name = self.__class__.__name__
+        self.nas_stat = None
+        self.backend_name = self._get_backend_name()
+        self.nas_driver = self.__class__.__name__
         self.nas_host = self.configuration.nas_host
-        self.root_path = self.configuration.nas_share_path
-        self.mount_point_base = self.configuration.nexenta_mount_point_base
+        self.nas_path = self.configuration.nas_share_path
+        self.nas_pool = self.nas_path.split(posixpath.sep)[0]
+        self.image_cache = self.configuration.nexenta_image_cache
+        self.nbmand = self.configuration.nexenta_nbmand
+        self.smart_compression = (
+            self.configuration.nexenta_smart_compression)
         self.group_snapshot_template = (
             self.configuration.nexenta_group_snapshot_template)
         self.origin_snapshot_template = (
             self.configuration.nexenta_origin_snapshot_template)
+        self.cache_image_template = (
+            self.configuration.nexenta_cache_image_template)
+        self.cache_snapshot_template = (
+            self.configuration.nexenta_cache_snapshot_template)
+        self.migration_service_prefix = (
+            self.configuration.nexenta_migration_service_prefix)
+        self.migration_throttle = (
+            self.configuration.nexenta_migration_throttle)
 
-    def do_setup(self, context):
-        self.nef = jsonrpc.NefProxy(self.driver_volume_type,
-                                    self.root_path,
-                                    self.configuration)
+    def do_setup(self, ctxt):
+        retries = 0
+        while not self._do_setup():
+            retries += 1
+            self.nef.delay(retries)
+
+    def _do_setup(self):
+        try:
+            self.nef = jsonrpc.NefProxy(self.driver_volume_type,
+                                        self.nas_pool, self.nas_path,
+                                        self.configuration)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to initialize RESTful API for backend '
+                      '%(backend_name)s on host %(host)s: %(error)s',
+                      {'backend_name': self.backend_name,
+                       'host': self.host,
+                       'error': error})
+            return False
+        return True
 
     def check_for_setup_error(self):
-        """Check root filesystem, NFS service and NFS share."""
-        filesystem = self.nef.filesystems.get(self.root_path)
-        if filesystem['mountPoint'] == 'none':
-            message = (_('NFS root filesystem %(path)s is not writable')
-                       % {'path': filesystem['mountPoint']})
-            raise jsonrpc.NefException(code='ENOENT', message=message)
-        if not filesystem['isMounted']:
-            message = (_('NFS root filesystem %(path)s is not mounted')
-                       % {'path': filesystem['mountPoint']})
-            raise jsonrpc.NefException(code='ENOTDIR', message=message)
-        payload = {}
-        if filesystem['nonBlockingMandatoryMode']:
-            payload['nonBlockingMandatoryMode'] = False
-        if filesystem['smartCompression']:
-            payload['smartCompression'] = False
-        if payload:
-            self.nef.filesystems.set(self.root_path, payload)
-        service = self.nef.services.get('nfs')
-        if service['state'] != 'online':
-            message = (_('NFS server service is not online: %(state)s')
-                       % {'state': service['state']})
-            raise jsonrpc.NefException(code='ESRCH', message=message)
-        share = self.nef.nfs.get(self.root_path)
-        if share['shareState'] != 'online':
-            message = (_('NFS share %(share)s is not online: %(state)s')
-                       % {'share': self.root_path,
-                          'state': share['shareState']})
-            raise jsonrpc.NefException(code='ESRCH', message=message)
+        retries = 0
+        while not self._check_for_setup_error():
+            retries += 1
+            self.nef.delay(retries)
 
-    @jsonrpc.synchronized
+    def _check_for_setup_error(self):
+        """Check root filesystem, NFS service and NFS share."""
+        payload = {'fields': 'path'}
+        try:
+            self.nef.filesystems.get(self.nas_pool, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get stat of NAS pool %(nas_pool)s: %(error)s',
+                      {'nas_pool': self.nas_pool, 'error': error})
+            return False
+        specs = self.nef.filesystems.properties
+        names = [spec['api'] for spec in specs if 'api' in spec]
+        names.remove('sparseVolume')
+        names.remove('volumeFormat')
+        names.append('mountPoint')
+        names.append('isMounted')
+        fields = ','.join(names)
+        payload = {'fields': fields}
+        try:
+            self.nas_stat = self.nef.filesystems.get(self.nas_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get stat of NAS path %(nas_path)s: %(error)s',
+                      {'nas_path': self.nas_path, 'error': error})
+            return False
+        if self.nas_stat['mountPoint'] == 'none':
+            LOG.error('NAS path %(nas_path)s is not writable',
+                      {'nas_path': self.nas_path})
+            return False
+        if not self.nas_stat['isMounted']:
+            LOG.error('NAS path %(nas_path)s is not mounted',
+                      {'nas_path': self.nas_path})
+            return False
+        try:
+            service = self.nef.services.get('nfs')
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get state of NFS service: %(error)s',
+                      {'error': error})
+            return False
+        if service['state'] != 'online':
+            LOG.error('NFS service is not online: %(state)s',
+                      {'state': service['state']})
+            return False
+        try:
+            share = self.nef.nfs.get(self.nas_path)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get state of NFS share %(share)s: %(error)s',
+                      {'share': self.nas_path, 'error': error})
+            return False
+        if share['shareState'] != 'online':
+            LOG.error('NFS share %(share)s is not online: %(state)s',
+                      {'share': self.nas_path,
+                       'state': share['shareState']})
+            return False
+        payload = {}
+        if self.nas_stat['nonBlockingMandatoryMode'] != self.nbmand:
+            payload['nonBlockingMandatoryMode'] = self.nbmand
+        if self.nas_stat['smartCompression'] != self.smart_compression:
+            payload['smartCompression'] = self.smart_compression
+        if not payload:
+            return True
+        try:
+            self.nef.filesystems.set(self.nas_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to set NAS path %(nas_path)s '
+                      'properties %{payload}s: %(error)s',
+                      {'nas_path': self.nas_path,
+                       'payload': payload, 'error': error})
+            return False
+        self.nas_stat.update(payload)
+        return True
+
+    def _update_volume_properties(self, volume):
+        """Updates the existing volume properties.
+
+        :param volume: volume reference
+        """
+        if not volume['volume_type_id']:
+            return
+        ctxt = context.get_admin_context()
+        volume_type_id = volume['volume_type_id']
+        volume_type = volume_types.get_volume_type(ctxt, volume_type_id)
+        diff = {}
+        host = volume['host']
+        self.retype(ctxt, volume, volume_type, diff, host)
+
+    def _get_volume_reservation(self, volume, volume_size, volume_format):
+        """Calculates the correct reservation size for given volume size.
+
+        Its purpose is to reserve additional space for volume metadata
+        so volume don't unexpectedly run out of room. This function is
+        a copy of the volsize_to_reservation function in libzfs_dataset.c
+        and qcow2_calc_prealloc_size function in qcow2.c
+
+        :param volume: volume reference
+        :param volume_size: volume size in bytes
+        :param volume_format: volume backend file format
+        :returns: reservation size
+        """
+        volume_path = self._get_volume_path(volume)
+        payload = {'fields': 'recordSize,dataCopies'}
+        filesystem = self.nef.filesystems.get(volume_path, payload)
+        block_size = filesystem['recordSize']
+        data_copies = filesystem['dataCopies']
+        reservation = volume_size
+        numdb = 7
+        dn_max_indblkshift = 17
+        spa_blkptrshift = 7
+        spa_dvas_per_bp = 3
+        dnodes_per_level_shift = dn_max_indblkshift - spa_blkptrshift
+        dnodes_per_level = 1 << dnodes_per_level_shift
+        nblocks = reservation // block_size
+        while nblocks > 1:
+            nblocks += dnodes_per_level - 1
+            nblocks //= dnodes_per_level
+            numdb += nblocks
+        numdb *= min(spa_dvas_per_bp, data_copies + 1)
+        reservation *= data_copies
+        numdb *= 1 << dn_max_indblkshift
+        reservation += numdb
+        if volume_format == VOLUME_FORMAT_RAW:
+            meta_size = 0
+        elif volume_format == VOLUME_FORMAT_QCOW:
+            meta_size = 48 + 4 * volume_size // units.Mi
+        elif volume_format == VOLUME_FORMAT_QCOW2:
+            cluster_size = 64 * units.Ki
+            refcount_size = 4
+            int_size = (sys.maxsize.bit_length() + 1) // 8
+            meta_size = 0
+            aligned_volume_size = nexenta_utils.roundup(volume_size,
+                                                        cluster_size)
+            meta_size += cluster_size
+            blocks_per_table = cluster_size // int_size
+            clusters = aligned_volume_size // cluster_size
+            nl2e = nexenta_utils.roundup(clusters, blocks_per_table)
+            meta_size += nl2e * int_size
+            clusters = nl2e * int_size // cluster_size
+            nl1e = nexenta_utils.roundup(clusters, blocks_per_table)
+            meta_size += nl1e * int_size
+            clusters = (aligned_volume_size + meta_size) // cluster_size
+            refcounts_per_block = 8 * cluster_size // (1 << refcount_size)
+            table = blocks = first = 0
+            last = 1
+            while first != last:
+                last = first
+                first = clusters + blocks + table
+                blocks = nexenta_utils.divup(first, refcounts_per_block)
+                table = nexenta_utils.divup(blocks, blocks_per_table)
+                first = clusters + blocks + table
+            meta_size += (blocks + table) * cluster_size
+        elif volume_format == VOLUME_FORMAT_PARALLELS:
+            meta_size = (1 + volume_size // units.Gi // 256) * units.Mi
+        elif volume_format == VOLUME_FORMAT_VDI:
+            meta_size = 512 + 4 * volume_size // units.Mi
+        elif volume_format == VOLUME_FORMAT_VHDX:
+            meta_size = 8 * units.Mi
+        elif volume_format == VOLUME_FORMAT_VMDK:
+            meta_size = 192 * (units.Ki + volume_size // units.Mi)
+        elif volume_format == VOLUME_FORMAT_VPC:
+            meta_size = 512 + 2 * (units.Ki + volume_size // units.Mi)
+        elif volume_format == VOLUME_FORMAT_QED:
+            meta_size = 320 * units.Ki
+        else:
+            message = (_('Volume format %(volume_format)s is not supported')
+                       % {'volume_format': volume_format})
+            raise jsonrpc.NefException(code='EINVAL', message=message)
+        reservation += meta_size
+        volume_meta = reservation - volume_size
+        LOG.debug('Reservation size for %(format)s volume %(volume)s: '
+                  '%(reservation)s, volume data size: %(volume_size)s, '
+                  'volume metadata size: %(volume_meta)s and volume '
+                  'file metadata size: %(meta_size)s',
+                  {'format': volume_format, 'volume': volume['name'],
+                   'reservation': reservation, 'volume_size': volume_size,
+                   'volume_meta': volume_meta, 'meta_size': meta_size})
+        return reservation
+
+    def _set_volume_reservation(self, volume, volume_size, volume_format):
+        volume_reservation = 0
+        if volume_size:
+            volume_reservation = self._get_volume_reservation(volume,
+                                                              volume_size,
+                                                              volume_format)
+        volume_path = self._get_volume_path(volume)
+        payload = {'referencedReservationSize': volume_reservation}
+        try:
+            self.nef.filesystems.set(volume_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to set %(format)s volume %(volume)s '
+                      'reservation size to %(reservation)s: %(error)s',
+                      {'format': volume_format,
+                       'volume': volume['name'],
+                       'reservation': volume_reservation,
+                       'error': error})
+            raise
+
+    def _change_volume_format(self, volume, volume_file, src_format,
+                              dst_format):
+        backup_file = '%(path)s.%(format)s' % {
+            'path': volume_file,
+            'format': src_format
+        }
+        try:
+            self._execute('mv', volume_file, backup_file, run_as_root=True)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to rename backend file %(volume_file)s '
+                         'to %(backup_file)s before converting volume '
+                         '%(volume)s: %(error)s')
+                       % {'volume_file': volume_file,
+                          'backup_file': backup_file,
+                          'volume': volume['name'],
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+        try:
+            self._execute('qemu-img', 'convert',
+                          '-f', src_format,
+                          '-O', dst_format,
+                          backup_file,
+                          volume_file,
+                          run_as_root=True)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to convert %(src_format)s file '
+                         '%(backup_file)s to %(dst_format)s file '
+                         '%(volume_file)s for volume %(volume)s: %(error)s')
+                       % {'src_format': src_format,
+                          'backup_file': backup_file,
+                          'dst_format': dst_format,
+                          'volume_file': volume_file,
+                          'volume': volume['name'],
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+        try:
+            self._execute('rm', '-f', backup_file, run_as_root=True)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to delete %(src_format)s backup '
+                         'file %(backup_file)s after converting '
+                         'volume %(volume)s: %(error)s')
+                       % {'src_format': src_format,
+                          'backup_file': backup_file,
+                          'volume': volume['name'],
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+        LOG.debug('Successfully converted volume %(volume)s from '
+                  '%(src_format)s to %(dst_format)s format',
+                  {'volume': volume['name'],
+                   'src_format': src_format,
+                   'dst_format': dst_format})
+
+    @jsonrpc.synchronized_operation
     def create_volume(self, volume):
         """Creates a volume.
 
         :param volume: volume reference
         """
         volume_path = self._get_volume_path(volume)
+        volume_size = volume['size'] * units.Gi
         properties = self.nef.filesystems.properties
-        payload = self._get_vendor_properties(volume, properties)
-        sparsed_volume = payload.pop('sparseVolume', True)
-        payload.update({'path': volume_path})
+        payload = self._get_vendor_properties(properties, volume)
+        sparse_volume = payload.pop('sparseVolume')
+        volume_format = payload.pop('volumeFormat')
+        specs = {'size': volume_size}
+        if volume_format == VOLUME_FORMAT_QCOW2:
+            specs['preallocation'] = 'metadata'
+        volume_options = ','.join(['%s=%s' % _ for _ in specs.items()])
+        payload['path'] = volume_path
         self.nef.filesystems.create(payload)
+        if not sparse_volume:
+            self._set_volume_reservation(volume, volume_size, volume_format)
+        self._set_volume_acl(volume)
+        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        self._execute('qemu-img', 'create',
+                      '-f', volume_format,
+                      '-o', volume_options,
+                      volume_file,
+                      run_as_root=True)
+        self._unmount_volume(volume, nfs_share, mount_point)
+
+    @jsonrpc.synchronized_operation
+    def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
+        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        volume_info = image_utils.qemu_img_info(volume_file,
+                                                run_as_root=True)
+        volume_format = volume_info.file_format
+        volume_blocksize = self.configuration.volume_dd_blocksize
+        LOG.debug('Copy image %(image)s to %(format)s volume %(volume)s',
+                  {'image': image_id,
+                   'format': volume_format,
+                   'volume': volume['name']})
+        if volume_format not in [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]:
+            volume_format = VOLUME_FORMAT_RAW
+        image_utils.fetch_to_volume_format(ctxt, image_service, image_id,
+                                           volume_file, volume_format,
+                                           volume_blocksize,
+                                           run_as_root=True)
+        image_utils.resize_image(volume_file, volume['size'],
+                                 run_as_root=True)
+        if volume_format not in [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]:
+            volume_new_format = volume_info.file_format
+            self._change_volume_format(volume, volume_file, volume_format,
+                                       volume_new_format)
+        self._unmount_volume(volume, nfs_share, mount_point)
+
+    def _verify_cache_image(self, ctxt, volume, image_meta, image_service):
+        properties = self.nef.filesystems.properties
+        volume_type_specs = self._get_vendor_properties(properties, volume)
+        volume_format = volume_type_specs['volumeFormat']
+        image_id = image_meta['id']
+        image_checksum = image_meta['checksum']
+        namespace = uuid.UUID(image_id, version=4)
+        name = '%s:%s' % (image_checksum, volume_format)
+        name = nexenta_utils.native_string(name)
+        cache_uuid = uuid.uuid5(namespace, name)
+        cache_id = six.text_type(cache_uuid)
+        cache = {
+            'id': cache_id,
+            'name': self.cache_image_template % cache_id,
+            'volume_type_id': volume['volume_type_id']
+        }
+        cache_path = self._get_volume_path(cache)
+        payload = {'fields': 'readOnly'}
+        cache_exist = False
         try:
-            self._set_volume_acl(volume)
-            self._mount_volume(volume)
-            volume_file = self.local_path(volume)
-            if sparsed_volume:
-                self._create_sparsed_file(volume_file, volume['size'])
+            cache_specs = self.nef.filesystems.get(cache_path, payload)
+            if not cache_specs['readOnly']:
+                self.delete_volume(cache)
             else:
-                payload = {'source': True}
-                filesystem = self.nef.filesystems.get(volume_path, payload)
-                compression = filesystem['compressionMode']
-                source = filesystem['source']['compressionMode']
-                if compression != 'off':
-                    payload = {'compressionMode': 'off'}
-                    self.nef.filesystems.set(volume_path, payload)
-                self._create_regular_file(volume_file, volume['size'])
-                if compression != 'off':
-                    if source in ['local', 'received']:
-                        payload = {'compressionMode': compression}
-                    else:
-                        payload = {'compressionMode': None}
-                    self.nef.filesystems.set(volume_path, payload)
-        except jsonrpc.NefException as create_error:
-            try:
-                payload = {'force': True}
-                self.nef.filesystems.delete(volume_path, payload)
-            except jsonrpc.NefException as delete_error:
-                LOG.debug('Failed to delete volume %(path)s: %(error)s',
-                          {'path': volume_path, 'error': delete_error})
-            raise create_error
-        finally:
-            self._unmount_volume(volume)
+                cache_exist = True
+        except jsonrpc.NefException as error:
+            if error.code != 'ENOENT':
+                raise
+        if not cache_exist:
+            with image_utils.temporary_file() as image_file:
+                image_utils.fetch_verify_image(ctxt, image_service,
+                                               image_id, image_file)
+                image_info = image_utils.qemu_img_info(image_file,
+                                                       run_as_root=True)
+        else:
+            nfs_share, mount_point, cache_file = self._mount_volume(cache)
+            image_info = image_utils.qemu_img_info(cache_file,
+                                                   run_as_root=True)
+            self._unmount_volume(cache, nfs_share, mount_point)
+        image_size = nexenta_utils.roundup(image_info.virtual_size, units.Gi)
+        cache['size'] = image_size // units.Gi
+        if cache['size'] > volume['size']:
+            code = 'ENOSPC'
+            message = (_('Unable to clone cache %(cache)s '
+                         'to volume %(volume)s: cache size '
+                         '%(cache_size)sGB is larger than '
+                         'volume size %(volume_size)sGB')
+                       % {'cache': cache['name'],
+                          'volume': volume['name'],
+                          'cache_size': cache['size'],
+                          'volume_size': volume['size']})
+            raise jsonrpc.NefException(code=code, message=message)
+        if not cache_exist:
+            self.create_volume(cache)
+            self.copy_image_to_volume(ctxt, cache, image_service, image_id)
+            payload = {'readOnly': True}
+            self.nef.filesystems.set(cache_path, payload)
+        return cache
 
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
-        LOG.debug('Copy image %(image)s to volume %(volume)s',
-                  {'image': image_id, 'volume': volume['name']})
-        self._mount_volume(volume)
-        super(NexentaNfsDriver, self).copy_image_to_volume(
-            context, volume, image_service, image_id)
-        self._unmount_volume(volume)
+    def _verify_cache_snapshot(self, cache):
+        snapshot = {
+            'id': cache['id'],
+            'name': self.cache_snapshot_template % cache['id'],
+            'volume_id': cache['id'],
+            'volume_name': cache['name'],
+            'volume_size': cache['size']
+        }
+        snapshot_path = self._get_snapshot_path(snapshot)
+        payload = {'fields': 'path'}
+        try:
+            self.nef.snapshots.get(snapshot_path, payload)
+        except jsonrpc.NefException as error:
+            if error.code != 'ENOENT':
+                raise
+            self.create_snapshot(snapshot)
+        return snapshot
 
-    def copy_volume_to_image(self, context, volume, image_service, image_meta):
-        LOG.debug('Copy volume %(volume)s to image %(image)s',
-                  {'volume': volume['name'], 'image': image_meta['id']})
-        self._mount_volume(volume)
-        super(NexentaNfsDriver, self).copy_volume_to_image(
-            context, volume, image_service, image_meta)
-        self._unmount_volume(volume)
+    @jsonrpc.synchronized_clone_image
+    def clone_image(self, ctxt, volume, image_location, image_meta,
+                    image_service):
+        """Create a volume efficiently from an existing image.
 
-    def _ensure_share_unmounted(self, share):
-        """Ensure that NFS share is unmounted on the host.
+        image_location is a string whose format depends on the
+        image service backend in use. The driver should use it
+        to determine whether cloning is possible.
 
-        :param share: share path
+        image_meta is a dictionary that includes 'disk_format' (e.g.
+        raw, qcow2) and other image attributes that allow drivers to
+        decide whether they can clone the image without first requiring
+        conversion.
+
+        image_service is the reference of the image_service to use.
+        Note that this is needed to be passed here for drivers that
+        will want to fetch images from the image service directly.
+
+        Returns a dict of volume properties eg. provider_location,
+        boolean indicating whether cloning occurred.
         """
-        attempts = max(1, self.configuration.nfs_mount_attempts)
-        path = self._get_mount_point_for_share(share)
-        if path not in self._remotefsclient._read_mounts():
-            LOG.debug('NFS share %(share)s is not mounted at %(path)s',
-                      {'share': share, 'path': path})
-            return
-        for attempt in range(attempts):
-            try:
-                self._execute('umount', path, run_as_root=True)
-                LOG.debug('NFS share %(share)s has been unmounted at %(path)s',
-                          {'share': share, 'path': path})
-                break
-            except Exception as error:
-                if attempt == (attempts - 1):
-                    LOG.error('Failed to unmount NFS share %(share)s '
-                              'after %(attempts)s attempts',
-                              {'share': share, 'attempts': attempts})
-                    raise
-                LOG.debug('Unmount attempt %(attempt)s failed: %(error)s, '
-                          'retrying unmount %(share)s from %(path)s',
-                          {'attempt': attempt, 'error': error,
-                           'share': share, 'path': path})
-                self.nef.delay(attempt)
-        self._delete(path)
+        if not self.image_cache:
+            return None, False
+        try:
+            cache = self._verify_cache_image(ctxt, volume,
+                                             image_meta,
+                                             image_service)
+            snapshot = self._verify_cache_snapshot(cache)
+            self.create_volume_from_snapshot(volume, snapshot)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to clone image %(image)s '
+                      'to volume %(volume)s: %(error)s',
+                      {'image': image_meta['id'],
+                       'volume': volume['name'],
+                       'error': error})
+            return None, False
+        return None, True
+
+    @jsonrpc.synchronized_operation
+    def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
+        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        volume_info = image_utils.qemu_img_info(volume_file,
+                                                run_as_root=True)
+        volume_format = volume_info.file_format
+        LOG.debug('Copy %(format)s volume %(volume)s to image %(image)s',
+                  {'format': volume_format,
+                   'volume': volume['name'],
+                   'image': image_meta['id']})
+        image_utils.upload_volume(
+            ctxt, image_service,
+            image_meta, volume_file,
+            volume_format=volume_format,
+            run_as_root=True)
+        self._unmount_volume(volume, nfs_share, mount_point)
 
     def _mount_volume(self, volume):
-        """Ensure that volume is activated and mounted on the host."""
-        share = self._get_volume_share(volume)
-        self._ensure_share_mounted(share)
+        """Ensure that volume is mounted on the host.
+
+        :param volume: volume reference
+        :returns: NFS share, mount point and local volume file path
+        """
+        nfs_share = self._get_volume_share(volume)
+        attempts = max(1, self.configuration.nfs_mount_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                self._remotefsclient.mount(nfs_share)
+            except OSError as error:
+                if attempt == attempts:
+                    LOG.error('Failed to mount NFS share %(nfs_share)s '
+                              'after %(attempts)s attempts: %(error)s',
+                              {'nfs_share': nfs_share,
+                               'attempts': attempts,
+                               'error': error})
+                    raise
+                LOG.debug('Mount attempt %(attempt)s failed: %(error)s, '
+                          'retrying mount NFS share %(nfs_share)s',
+                          {'attempt': attempt,
+                           'error': error,
+                           'nfs_share': nfs_share})
+                self.nef.delay(attempt)
+            else:
+                LOG.debug('NFS share %(nfs_share)s has '
+                          'been successfully mounted',
+                          {'nfs_share': nfs_share})
+                break
+        mount_point = self._get_mount_point_for_share(nfs_share)
+        volume_file = os.path.join(mount_point, VOLUME_FILE_NAME)
+        return nfs_share, mount_point, volume_file
 
     def _remount_volume(self, volume):
         """Workaround for NEX-16457."""
@@ -250,120 +677,89 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.filesystems.unmount(volume_path)
         self.nef.filesystems.mount(volume_path)
 
-    def _unmount_volume(self, volume):
-        """Ensure that volume is unmounted on the host."""
-        try:
-            share = self._get_volume_share(volume)
-        except jsonrpc.NefException as error:
-            if error.code == 'ENOENT':
-                return
-        self._ensure_share_unmounted(share)
+    def _unmount_volume(self, volume, nfs_share=None, mount_point=None):
+        """Ensure that NFS share is unmounted on the host.
 
-    def _create_sparsed_file(self, path, size):
-        """Creates file with 0 disk usage."""
-        if self.configuration.nexenta_qcow2_volumes:
-            self._create_qcow2_file(path, size)
-        else:
-            super(NexentaNfsDriver, self)._create_sparsed_file(path, size)
-
-    def migrate_volume(self, context, volume, host):
-        """Migrate the volume to the specified host.
-
-        Returns a boolean indicating whether the migration occurred,
-        as well as model_update.
-
-        :param context: Security context
-        :param volume: A dictionary describing the volume to migrate
-        :param host: A dictionary describing the host to migrate to, where
-                     host['host'] is its name, and host['capabilities'] is a
-                     dictionary of its reported capabilities.
+        :param volume: volume reference
+        :param nfs_share: NFS share
+        :param mount_point: mount point
         """
-        LOG.debug('Start storage assisted volume migration '
-                  'for volume %(volume)s to host %(host)s',
-                  {'volume': volume['name'],
-                   'host': host['host']})
-        false_ret = (False, None)
-        if 'capabilities' not in host:
-            LOG.debug('No host capabilities found for '
-                      'the destination host %(host)s',
-                      {'host': host['host']})
-            return false_ret
-        capabilities = host['capabilities']
-        required_capabilities = [
-            'vendor_name',
-            'location_info',
-            'storage_protocol',
-            'free_capacity_gb',
-            'nef_url',
-            'nef_port'
-        ]
-        for capability in required_capabilities:
-            if capability not in capabilities:
-                LOG.debug('Required host capability %(capability)s not '
-                          'found for the destination host %(host)s',
-                          {'capability': capability, 'host': host['host']})
-                return false_ret
-        vendor = capabilities['vendor_name']
-        if vendor != self.vendor_name:
-            LOG.debug('Unsupported vendor %(vendor)s found '
-                      'for the destination host %(host)s',
-                      {'vendor': vendor, 'host': host['host']})
-            return false_ret
-        location = capabilities['location_info']
+        if nfs_share is None:
+            try:
+                nfs_share = self._get_volume_share(volume)
+            except jsonrpc.NefException:
+                nas_path = posixpath.join(
+                    self.nas_stat['mountPoint'],
+                    volume['name'])
+                nfs_share = '%(host)s:%(path)s' % {
+                    'host': self.nas_host,
+                    'path': nas_path
+                }
+        if mount_point is None:
+            mount_point = self._get_mount_point_for_share(nfs_share)
+        if mount_point not in self._remotefsclient._read_mounts():
+            LOG.debug('NFS share %(nfs_share)s is not mounted '
+                      'at mount point %(mount_point)s',
+                      {'nfs_share': nfs_share,
+                       'mount_point': mount_point})
+            return
+        attempts = max(1, self.configuration.nfs_mount_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                self._execute('umount', mount_point, run_as_root=True)
+            except OSError as error:
+                if attempt == attempts:
+                    LOG.error('Failed to unmount NFS share %(nfs_share)s '
+                              'from mount point %(mount_point)s after '
+                              '%(attempts)s attempts: %(error)s',
+                              {'nfs_share': nfs_share,
+                               'mount_point': mount_point,
+                               'attempts': attempts,
+                               'error': error})
+                    raise
+                LOG.debug('Unmount attempt %(attempt)s failed: %(error)s, '
+                          'retrying unmount NFS share %(nfs_share)s from '
+                          'mount point %(mount_point)s',
+                          {'attempt': attempt,
+                           'error': error,
+                           'nfs_share': nfs_share,
+                           'mount_point': mount_point})
+                self.nef.delay(attempt)
+            else:
+                LOG.debug('NFS share %(nfs_share)s has been successfully '
+                          'unmounted from mount point %(mount_point)s',
+                          {'nfs_share': nfs_share,
+                           'mount_point': mount_point})
+                break
+        self._delete(mount_point)
+
+    def _migrate_volume(self, volume, scheme, hosts, port, path):
+        """Storage assisted volume migration."""
+        src_hosts = self._get_host_addresses()
+        src_path = self._get_volume_path(volume)
+        dst_path = posixpath.join(path, volume['name'])
+        for dst_host in hosts:
+            if dst_host in src_hosts and src_path == dst_path:
+                LOG.info('Skip local migration for host %(dst_host)s: '
+                         'source volume %(src_path)s and destination '
+                         'volume %(dst_path)s are the same volume',
+                         {'dst_host': dst_host, 'src_path': src_path,
+                          'dst_path': dst_path})
+                return True
+        payload = {'fields': 'name'}
         try:
-            driver, nas_host, nas_path = location.split(':')
-        except ValueError as error:
-            LOG.debug('Failed to split location info %(location)s '
-                      'for the destination host %(host)s: %(error)s',
-                      {'location': location, 'host': host['host'],
-                       'error': error})
-            return false_ret
-        if not (driver and nas_host and nas_path):
-            LOG.debug('Incomplete location info %(location)s '
-                      'found for the destination host %(host)s',
-                      {'location': location, 'host': host['host']})
-            return false_ret
-        if driver != self.driver_name:
-            LOG.debug('Unsupported storage driver %(driver)s '
-                      'found for the destination host %(host)s',
-                      {'driver': driver, 'host': host['host']})
-            return false_ret
-        storage_protocol = capabilities['storage_protocol']
-        if storage_protocol != self.storage_protocol:
-            LOG.debug('Unsupported storage protocol %(protocol)s '
-                      'found for the destination host %(host)s',
-                      {'protocol': storage_protocol,
-                       'host': host['host']})
-            return false_ret
-        free_capacity_gb = capabilities['free_capacity_gb']
-        if free_capacity_gb < volume['size']:
-            LOG.debug('There is not enough space available on the '
-                      'destination host %(host)s to migrate volume '
-                      '%(volume)s, available space: %(free)sG, '
-                      'required space: %(required)sG',
-                      {'host': host['host'], 'volume': volume['name'],
-                       'free': free_capacity_gb,
-                       'required': volume['size']})
-            return false_ret
-        try:
-            payload = {'fields': 'name'}
             self.nef.hpr.list(payload)
         except jsonrpc.NefException as error:
-            LOG.debug('Storage assisted volume migration is unavailable '
-                      'for the destination host %(host)s: %(error)s',
-                      {'host': host['host'], 'error': error})
-            return false_ret
-        src_path = self._get_volume_path(volume)
-        dst_path = posixpath.join(nas_path, volume['name'])
-        dst_port = capabilities['nef_port']
-        src_hosts = self._get_host_addresses()
-        dst_hosts = capabilities['nef_url'].split(',')
-        service_name = 'cinder-migrate-%s' % volume['name']
-        service_created = service_running = service_success = False
-        while dst_hosts and not service_created:
-            dst_host = dst_hosts.pop()
-            if dst_host is not None:
-                dst_host = dst_host.strip()
+            LOG.error('Storage assisted volume migration '
+                      'is unavailable: %(error)s',
+                      {'error': error})
+            return False
+        service_name = '%(prefix)s-%(volume)s' % {
+            'prefix': self.migration_service_prefix,
+            'volume': volume['name']
+        }
+        service_created = False
+        for dst_host in hosts:
             payload = {
                 'name': service_name,
                 'sourceDataset': src_path,
@@ -374,71 +770,73 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 payload['isSource'] = True
                 payload['remoteNode'] = {
                     'host': dst_host,
-                    'port': dst_port
+                    'port': port,
+                    'proto': scheme
                 }
-            elif src_path == dst_path:
-                LOG.debug('Skip local to local replication: '
-                          'source volume %(src_path)s and '
-                          'destination volume %(dst_path)s '
-                          'are the same volume',
-                          {'src_path': src_path,
-                           'dst_path': dst_path})
-                return True, None
+                if self.migration_throttle:
+                    payload['transportOptions'] = {
+                        'throttle': self.migration_throttle * units.Mi
+                    }
             try:
                 self.nef.hpr.create(payload)
                 service_created = True
+                break
             except jsonrpc.NefException as error:
-                LOG.debug('Failed to create replication service '
+                LOG.error('Failed to create migration service '
                           'with payload %(payload)s: %(error)s',
                           {'payload': payload, 'error': error})
-                if error.code not in ('ENOENT', 'EINVAL'):
-                    return false_ret
+        service_running = False
         if service_created:
             try:
                 self.nef.hpr.start(service_name)
                 service_running = True
             except jsonrpc.NefException as error:
-                LOG.debug('Failed to start replication service '
+                LOG.error('Failed to start migration service '
                           '%(service_name)s: %(error)s',
                           {'service_name': service_name,
                            'error': error})
-        retry_count = 0
-        while service_running and not service_success:
+        service_success = False
+        service_retries = 0
+        while service_running:
+            service_retries += 1
+            self.nef.delay(service_retries)
+            payload = {'fields': 'state,progress,runNumber,lastError'}
             try:
-                service = self.nef.hpr.get(service_name)
+                service = self.nef.hpr.get(service_name, payload)
             except jsonrpc.NefException as error:
-                LOG.debug('Failed to stat replication service '
+                LOG.error('Failed to stat migration service '
                           '%(service_name)s: %(error)s',
                           {'service_name': service_name,
                            'error': error})
-                break
-            state = service['state']
-            if state == 'faulted':
+                if service_retries > self.nef.retries:
+                    break
+            service_state = service['state']
+            service_counter = service['runNumber']
+            service_progress = service['progress']
+            if service_state == 'faulted':
                 service_error = service['lastError']
-                LOG.debug('Replication service %(service_name)s '
+                LOG.error('Migration service %(service_name)s '
                           'failed with error: %(service_error)s',
                           {'service_name': service_name,
                            'service_error': service_error})
-                break
-            elif state == 'disabled':
-                LOG.debug('Replication service %(service_name)s '
-                          'successfully replicated %(src_path)s '
-                          'to %(dst_host)s:%(dst_path)s',
-                          {'service_name': service_name,
-                           'src_path': src_path,
-                           'dst_host': dst_host,
-                           'dst_path': dst_path})
+                service_running = False
+            elif service_state == 'disabled' and service_counter > 0:
+                LOG.info('Migration service %(service_name)s '
+                         'successfully replicated %(src_path)s '
+                         'to %(dst_host)s:%(dst_path)s',
+                         {'service_name': service_name,
+                          'src_path': src_path,
+                          'dst_host': dst_host,
+                          'dst_path': dst_path})
                 service_running = False
                 service_success = True
-                break
             else:
-                progress = service['progress']
-                LOG.debug('Replication service %(service_name)s '
-                          'is running, progress %(progress)s%%',
-                          {'service_name': service_name,
-                           'progress': progress})
-                self.nef.delay(retry_count)
-                retry_count += 1
+                LOG.info('Migration service %(service_name)s '
+                         'is %(service_state)s, progress '
+                         '%(service_progress)s%%',
+                         {'service_name': service_name,
+                          'service_state': service_state,
+                          'service_progress': service_progress})
         if service_created:
             payload = {
                 'destroySourceSnapshots': True,
@@ -448,30 +846,149 @@ class NexentaNfsDriver(nfs.NfsDriver):
             try:
                 self.nef.hpr.delete(service_name, payload)
             except jsonrpc.NefException as error:
-                LOG.debug('Failed to delete replication service '
+                LOG.error('Failed to delete migration service '
                           '%(service_name)s: %(error)s',
                           {'service_name': service_name,
                            'error': error})
         if not service_success:
-            return false_ret
+            return False
         try:
             self.delete_volume(volume)
         except jsonrpc.NefException as error:
-            LOG.debug('Failed to delete source '
+            LOG.error('Failed to delete source '
                       'volume %(volume)s: %(error)s',
                       {'volume': volume['name'],
                        'error': error})
-        return True, None
+        return True
 
-    def create_export(self, context, volume):
+    def migrate_volume(self, ctxt, volume, host):
+        """Migrate the volume to the specified host.
+
+        Returns a boolean indicating whether the migration occurred,
+        as well as model_update.
+
+        :param ctxt: Security context of the caller.
+        :param volume: A dictionary describing the volume to migrate
+        :param host: A dictionary describing the host to migrate to, where
+                     host['host'] is its name, and host['capabilities'] is a
+                     dictionary of its reported capabilities.
+        """
+        LOG.info('Start storage assisted volume migration '
+                 'for volume %(volume)s to host %(host)s',
+                 {'volume': volume['name'],
+                  'host': host['host']})
+        false_ret = (False, None)
+        if 'capabilities' not in host:
+            LOG.error('No host capabilities found for '
+                      'the destination host %(host)s',
+                      {'host': host['host']})
+            return false_ret
+        capabilities = host['capabilities']
+        required_capabilities = [
+            'vendor_name',
+            'location_info',
+            'storage_protocol',
+            'free_capacity_gb'
+        ]
+        for capability in required_capabilities:
+            if not (capability in capabilities and capabilities[capability]):
+                LOG.error('Required host capability %(capability)s not '
+                          'found for the destination host %(host)s',
+                          {'capability': capability, 'host': host['host']})
+                return false_ret
+        vendor = capabilities['vendor_name']
+        if vendor != self.vendor_name:
+            LOG.error('Unsupported vendor %(vendor)s found '
+                      'for the destination host %(host)s',
+                      {'vendor': vendor, 'host': host['host']})
+            return false_ret
+        location = capabilities['location_info']
+        try:
+            nas_driver, nas_host, nas_path = location.split(':')
+        except ValueError as error:
+            LOG.error('Failed to parse location info %(location)s '
+                      'for the destination host %(host)s: %(error)s',
+                      {'location': location, 'host': host['host'],
+                       'error': error})
+            return false_ret
+        if not (nas_driver and nas_host and nas_path):
+            LOG.error('Incomplete location info %(location)s '
+                      'found for the destination host %(host)s',
+                      {'location': location, 'host': host['host']})
+            return false_ret
+        if nas_driver != self.nas_driver:
+            LOG.error('Unsupported storage driver %(nas_driver)s '
+                      'found for the destination host %(host)s',
+                      {'nas_driver': nas_driver,
+                       'host': host['host']})
+            return false_ret
+        storage_protocol = capabilities['storage_protocol']
+        if storage_protocol != self.storage_protocol:
+            LOG.error('Unsupported storage protocol %(protocol)s '
+                      'found for the destination host %(host)s',
+                      {'protocol': storage_protocol,
+                       'host': host['host']})
+            return false_ret
+        free_capacity_gb = capabilities['free_capacity_gb']
+        if free_capacity_gb < volume['size']:
+            LOG.error('There is not enough space available on the '
+                      'destination host %(host)s to migrate volume '
+                      '%(volume)s, available space: %(free)sG, '
+                      'required space: %(required)sG',
+                      {'host': host['host'],
+                       'volume': volume['name'],
+                       'free': free_capacity_gb,
+                       'required': volume['size']})
+            return false_ret
+        nef_scheme = None
+        nef_hosts = []
+        nef_port = None
+        if 'nef_hosts' in capabilities and capabilities['nef_hosts']:
+            for nef_host in capabilities['nef_hosts'].split(','):
+                nef_host = nef_host.strip()
+                if nef_host:
+                    nef_hosts.append(nef_host)
+        elif 'nef_url' in capabilities and capabilities['nef_url']:
+            url = six.moves.urllib.parse.urlparse(capabilities['nef_url'])
+            if url.scheme and url.hostname and url.port:
+                nef_scheme = url.scheme
+                nef_hosts.append(url.hostname)
+                nef_port = url.port
+            else:
+                for nef_host in capabilities['nef_url'].split(','):
+                    nef_host = nef_host.strip()
+                    if nef_host:
+                        nef_hosts.append(nef_host)
+        if not nef_hosts:
+            LOG.error('NEF management address not found for the '
+                      'destination host %(host)s: %(capabilities)s',
+                      {'host': host['host'],
+                       'capabilities': capabilities})
+            return false_ret
+        if not nef_scheme:
+            if 'nef_scheme' in capabilities and capabilities['nef_scheme']:
+                nef_scheme = capabilities['nef_scheme']
+            else:
+                nef_scheme = self.nef.scheme
+        if not nef_port:
+            if 'nef_port' in capabilities and capabilities['nef_port']:
+                nef_port = capabilities['nef_port']
+            else:
+                nef_port = self.nef.port
+        if self._migrate_volume(volume, nef_scheme, nef_hosts, nef_port,
+                                nas_path):
+            return (True, None)
+        return false_ret
+
+    def create_export(self, ctxt, volume):
         """Driver entry point to get the export info for a new volume."""
         pass
 
-    def ensure_export(self, context, volume):
+    def ensure_export(self, ctxt, volume):
         """Driver entry point to get the export info for an existing volume."""
         pass
 
-    def remove_export(self, context, volume):
+    def remove_export(self, ctxt, volume):
         """Driver entry point to remove an export for a volume."""
         pass
 
@@ -493,68 +1010,115 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param connector: a connector object
         :returns: dictionary of connection information
         """
-        LOG.debug('Initialize volume connection for %(volume)s',
-                  {'volume': volume['name']})
-        share = self._get_volume_share(volume)
-        data = {
-            'export': share,
-            'name': 'volume'
+        LOG.debug('Initialize volume connection for %(volume)s '
+                  'and connector %(connector)s',
+                  {'volume': volume['name'],
+                   'connector': connector})
+        volume_path = self._get_volume_path(volume)
+        payload = {
+            'fields': 'nonBlockingMandatoryMode,source',
+            'source': True
         }
-        nfs_options = self.configuration.safe_get('nfs_mount_options')
-        nas_options = self.configuration.safe_get('nas_mount_options')
-        if nfs_options and nas_options:
-            LOG.debug('Overriding NFS mount options for volume %(volume)s: '
-                      'nfs_mount_options = "%(nfs_options)s" with '
-                      'nas_mount_options = "%(nas_options)s"',
-                      {'volume': volume['name'],
-                       'nfs_options': nfs_options,
-                       'nas_options': nas_options})
-        if nas_options:
-            data['options'] = '-o %s' % nas_options
-        elif nfs_options:
-            data['options'] = '-o %s' % nfs_options
-        info = {
+        volume_specs = self.nef.filesystems.get(volume_path, payload)
+        if volume_specs['nonBlockingMandatoryMode'] != self.nbmand:
+            payload = {'nonBlockingMandatoryMode': self.nbmand}
+            if 'source' in volume_specs:
+                source = volume_specs['source']
+                value = source['nonBlockingMandatoryMode']
+                if value == 'inherited':
+                    self.nef.filesystems.set(self.nas_path, payload)
+                elif value in ['local', 'received']:
+                    self.nef.filesystems.set(volume_path, payload)
+            else:
+                self.nef.filesystems.set(volume_path, payload)
+            self._remount_volume(volume)
+        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        volume_info = image_utils.qemu_img_info(volume_file,
+                                                run_as_root=True)
+        self._unmount_volume(volume, nfs_share, mount_point)
+        data = {
+            'export': nfs_share,
+            'format': volume_info.file_format,
+            'name': VOLUME_FILE_NAME
+        }
+        if self.mount_options:
+            data['options'] = '-o %s' % self.mount_options
+        connection_info = {
             'driver_volume_type': self.driver_volume_type,
             'mount_point_base': self.mount_point_base,
             'data': data
         }
-        return info
+        return connection_info
 
-    @jsonrpc.synchronized
+    @jsonrpc.synchronized_operation
     def delete_volume(self, volume):
         """Deletes a volume.
 
         :param volume: volume reference
         """
-        volume_path = self._get_volume_path(volume)
         self._unmount_volume(volume)
-        delete_payload = {'force': True, 'snapshots': True}
+        volume_path = self._get_volume_path(volume)
+        payload = {'fields': 'originalSnapshot'}
         try:
-            self.nef.filesystems.delete(volume_path, delete_payload)
+            volume_spec = self.nef.filesystems.get(volume_path, payload)
+        except jsonrpc.NefException as error:
+            if error.code == 'ENOENT':
+                return
+            raise
+        volume_origin = volume_spec['originalSnapshot']
+        payload = {'force': True, 'snapshots': True}
+        try:
+            self.nef.filesystems.delete(volume_path, payload)
         except jsonrpc.NefException as error:
             if error.code != 'EEXIST':
                 raise
-            snapshots_tree = {}
-            snapshots_payload = {'parent': volume_path, 'fields': 'path'}
-            snapshots = self.nef.snapshots.list(snapshots_payload)
+            snapshot_tree = {}
+            payload = {'parent': volume_path, 'fields': 'path'}
+            snapshots = self.nef.snapshots.list(payload)
             for snapshot in snapshots:
-                clones_payload = {'fields': 'clones,creationTxg'}
-                data = self.nef.snapshots.get(snapshot['path'], clones_payload)
-                if data['clones']:
-                    snapshots_tree[data['creationTxg']] = data['clones'][0]
-            if snapshots_tree:
-                clone_path = snapshots_tree[max(snapshots_tree)]
+                snapshot_path = snapshot['path']
+                payload = {'fields': 'clones,creationTxg'}
+                snapshot_spec = self.nef.snapshots.get(snapshot_path, payload)
+                if snapshot_spec['clones']:
+                    snapshot_txg = snapshot_spec['creationTxg']
+                    snapshot_clones = snapshot_spec['clones']
+                    first_clone = snapshot_clones[0]
+                    snapshot_tree[snapshot_txg] = first_clone
+            if snapshot_tree:
+                latest_txg = max(snapshot_tree)
+                clone_path = snapshot_tree[latest_txg]
                 self.nef.filesystems.promote(clone_path)
-            self.nef.filesystems.delete(volume_path, delete_payload)
+            payload = {'force': True, 'snapshots': True}
+            self.nef.filesystems.delete(volume_path, payload)
+        if not volume_origin:
+            return
+        origin_path, snapshot_name = volume_origin.split('@')
+        origin_name = posixpath.basename(origin_path)
+        if nexenta_utils.match_template(self.origin_snapshot_template,
+                                        snapshot_name):
+            payload = {'defer': True}
+            try:
+                self.nef.snapshots.delete(volume_origin, payload)
+            except Exception:
+                pass
+        elif (nexenta_utils.match_template(self.cache_snapshot_template,
+                                           snapshot_name) and
+              nexenta_utils.match_template(self.cache_image_template,
+                                           origin_name)):
+            payload = {'force': True, 'snapshots': True}
+            try:
+                self.nef.filesystems.delete(origin_path, payload)
+            except Exception:
+                pass
 
     def _delete(self, path):
         """Override parent method for safe remove mountpoint."""
         try:
-            os.rmdir(path)
+            self._execute('rm', '-d', path, run_as_root=True)
             LOG.debug('The mountpoint %(path)s has been successfully removed',
                       {'path': path})
         except OSError as error:
-            LOG.debug('Failed to remove mountpoint %(path)s: %(error)s',
+            LOG.error('Failed to remove mountpoint %(path)s: %(error)s',
                       {'path': path, 'error': error.strerror})
 
     def extend_volume(self, volume, new_size):
@@ -565,29 +1129,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         LOG.info('Extend volume %(volume)s, new size: %(size)sGB',
                  {'volume': volume['name'], 'size': new_size})
-        self._mount_volume(volume)
-        volume_file = self.local_path(volume)
         properties = self.nef.filesystems.properties
-        payload = self._get_vendor_properties(volume, properties)
-        sparsed_volume = payload.pop('sparseVolume', True)
-        if sparsed_volume:
-            self._execute('truncate', '-s',
-                          '%dG' % new_size,
-                          volume_file,
-                          run_as_root=True)
-        else:
-            seek = volume['size'] * units.Ki
-            count = (new_size - volume['size']) * units.Ki
-            self._execute('dd',
-                          'if=/dev/zero',
-                          'of=%s' % volume_file,
-                          'bs=%d' % units.Mi,
-                          'seek=%d' % seek,
-                          'count=%d' % count,
-                          run_as_root=True)
-        self._unmount_volume(volume)
+        payload = self._get_vendor_properties(properties, volume)
+        sparse_volume = payload.pop('sparseVolume')
+        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        if not sparse_volume:
+            volume_info = image_utils.qemu_img_info(volume_file,
+                                                    run_as_root=True)
+            volume_size = new_size * units.Gi
+            volume_format = volume_info.file_format
+            self._set_volume_reservation(volume, volume_size, volume_format)
+        image_utils.resize_image(volume_file, new_size, run_as_root=True)
+        self._unmount_volume(volume, nfs_share, mount_point)
 
-    @jsonrpc.synchronized
+    @jsonrpc.synchronized_operation
     def create_snapshot(self, snapshot):
         """Creates a snapshot.
 
@@ -597,7 +1152,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = {'path': snapshot_path}
         self.nef.snapshots.create(payload)
 
-    @jsonrpc.synchronized
+    @jsonrpc.synchronized_operation
     def delete_snapshot(self, snapshot):
         """Deletes a snapshot.
 
@@ -607,7 +1162,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = {'defer': True}
         self.nef.snapshots.delete(snapshot_path, payload)
 
-    @jsonrpc.synchronized
+    @jsonrpc.synchronized_operation
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create new volume from other's snapshot on appliance.
 
@@ -616,17 +1171,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         LOG.debug('Create volume %(volume)s from snapshot %(snapshot)s',
                   {'volume': volume['name'], 'snapshot': snapshot['name']})
+        volume_path = self._get_volume_path(volume)
         snapshot_path = self._get_snapshot_path(snapshot)
-        clone_path = self._get_volume_path(volume)
-        payload = {'targetPath': clone_path}
+        payload = {'targetPath': volume_path}
         self.nef.snapshots.clone(snapshot_path, payload)
         self._remount_volume(volume)
         self._set_volume_acl(volume)
         if volume['size'] > snapshot['volume_size']:
-            new_size = volume['size']
-            volume['size'] = snapshot['volume_size']
-            self.extend_volume(volume, new_size)
-            volume['size'] = new_size
+            self.extend_volume(volume, volume['size'])
+        self._update_volume_properties(volume)
 
     def create_cloned_volume(self, volume, src_vref):
         """Creates a clone of the specified volume.
@@ -644,7 +1197,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self.create_volume_from_snapshot(volume, snapshot)
         except jsonrpc.NefException as error:
-            LOG.debug('Failed to create clone %(clone)s '
+            LOG.error('Failed to create clone %(clone)s '
                       'from volume %(volume)s: %(error)s',
                       {'clone': volume['name'],
                        'volume': src_vref['name'],
@@ -654,35 +1207,35 @@ class NexentaNfsDriver(nfs.NfsDriver):
             try:
                 self.delete_snapshot(snapshot)
             except jsonrpc.NefException as error:
-                LOG.debug('Failed to delete temporary snapshot '
+                LOG.error('Failed to delete temporary snapshot '
                           '%(volume)s@%(snapshot)s: %(error)s',
                           {'volume': src_vref['name'],
                            'snapshot': snapshot['name'],
                            'error': error})
 
-    def create_consistencygroup(self, context, group):
+    def create_consistencygroup(self, ctxt, group):
         """Creates a consistency group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the dictionary of the consistency group to be created.
         :returns: group_model_update
         """
         group_model_update = {}
         return group_model_update
 
-    def create_group(self, context, group):
+    def create_group(self, ctxt, group):
         """Creates a group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the group object.
         :returns: model_update
         """
-        return self.create_consistencygroup(context, group)
+        return self.create_consistencygroup(ctxt, group)
 
-    def delete_consistencygroup(self, context, group, volumes):
+    def delete_consistencygroup(self, ctxt, group, volumes):
         """Deletes a consistency group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the dictionary of the consistency group to be deleted.
         :param volumes: a list of volume dictionaries in the group.
         :returns: group_model_update, volumes_model_update
@@ -693,21 +1246,21 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.delete_volume(volume)
         return group_model_update, volumes_model_update
 
-    def delete_group(self, context, group, volumes):
+    def delete_group(self, ctxt, group, volumes):
         """Deletes a group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the group object.
         :param volumes: a list of volume objects in the group.
         :returns: model_update, volumes_model_update
         """
-        return self.delete_consistencygroup(context, group, volumes)
+        return self.delete_consistencygroup(ctxt, group, volumes)
 
-    def update_consistencygroup(self, context, group, add_volumes=None,
+    def update_consistencygroup(self, ctxt, group, add_volumes=None,
                                 remove_volumes=None):
         """Updates a consistency group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the dictionary of the consistency group to be updated.
         :param add_volumes: a list of volume dictionaries to be added.
         :param remove_volumes: a list of volume dictionaries to be removed.
@@ -718,23 +1271,23 @@ class NexentaNfsDriver(nfs.NfsDriver):
         remove_volumes_update = []
         return group_model_update, add_volumes_update, remove_volumes_update
 
-    def update_group(self, context, group, add_volumes=None,
+    def update_group(self, ctxt, group, add_volumes=None,
                      remove_volumes=None):
         """Updates a group.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the group object.
         :param add_volumes: a list of volume objects to be added.
         :param remove_volumes: a list of volume objects to be removed.
         :returns: model_update, add_volumes_update, remove_volumes_update
         """
-        return self.update_consistencygroup(context, group, add_volumes,
+        return self.update_consistencygroup(ctxt, group, add_volumes,
                                             remove_volumes)
 
-    def create_cgsnapshot(self, context, cgsnapshot, snapshots):
+    def create_cgsnapshot(self, ctxt, cgsnapshot, snapshots):
         """Creates a consistency group snapshot.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param cgsnapshot: the dictionary of the cgsnapshot to be created.
         :param snapshots: a list of snapshot dictionaries in the cgsnapshot.
         :returns: group_model_update, snapshots_model_update
@@ -742,12 +1295,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         group_model_update = {}
         snapshots_model_update = []
         cgsnapshot_name = self.group_snapshot_template % cgsnapshot['id']
-        cgsnapshot_path = '%s@%s' % (self.root_path, cgsnapshot_name)
+        cgsnapshot_path = '%s@%s' % (self.nas_path, cgsnapshot_name)
         create_payload = {'path': cgsnapshot_path, 'recursive': True}
         self.nef.snapshots.create(create_payload)
         for snapshot in snapshots:
             volume_name = snapshot['volume_name']
-            volume_path = posixpath.join(self.root_path, volume_name)
+            volume_path = posixpath.join(self.nas_path, volume_name)
             snapshot_name = snapshot['name']
             snapshot_path = '%s@%s' % (volume_path, cgsnapshot_name)
             rename_payload = {'newName': snapshot_name}
@@ -756,20 +1309,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.snapshots.delete(cgsnapshot_path, delete_payload)
         return group_model_update, snapshots_model_update
 
-    def create_group_snapshot(self, context, group_snapshot, snapshots):
+    def create_group_snapshot(self, ctxt, group_snapshot, snapshots):
         """Creates a group_snapshot.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group_snapshot: the GroupSnapshot object to be created.
         :param snapshots: a list of Snapshot objects in the group_snapshot.
         :returns: model_update, snapshots_model_update
         """
-        return self.create_cgsnapshot(context, group_snapshot, snapshots)
+        return self.create_cgsnapshot(ctxt, group_snapshot, snapshots)
 
-    def delete_cgsnapshot(self, context, cgsnapshot, snapshots):
+    def delete_cgsnapshot(self, ctxt, cgsnapshot, snapshots):
         """Deletes a consistency group snapshot.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param cgsnapshot: the dictionary of the cgsnapshot to be created.
         :param snapshots: a list of snapshot dictionaries in the cgsnapshot.
         :returns: group_model_update, snapshots_model_update
@@ -780,22 +1333,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.delete_snapshot(snapshot)
         return group_model_update, snapshots_model_update
 
-    def delete_group_snapshot(self, context, group_snapshot, snapshots):
+    def delete_group_snapshot(self, ctxt, group_snapshot, snapshots):
         """Deletes a group_snapshot.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group_snapshot: the GroupSnapshot object to be deleted.
         :param snapshots: a list of snapshot objects in the group_snapshot.
         :returns: model_update, snapshots_model_update
         """
-        return self.delete_cgsnapshot(context, group_snapshot, snapshots)
+        return self.delete_cgsnapshot(ctxt, group_snapshot, snapshots)
 
-    def create_consistencygroup_from_src(self, context, group, volumes,
+    def create_consistencygroup_from_src(self, ctxt, group, volumes,
                                          cgsnapshot=None, snapshots=None,
                                          source_cg=None, source_vols=None):
         """Creates a consistency group from source.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the dictionary of the consistency group to be created.
         :param volumes: a list of volume dictionaries in the group.
         :param cgsnapshot: the dictionary of the cgsnapshot as source.
@@ -811,7 +1364,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 self.create_volume_from_snapshot(volume, snapshot)
         elif source_cg and source_vols:
             snapshot_name = self.origin_snapshot_template % group['id']
-            snapshot_path = '%s@%s' % (self.root_path, snapshot_name)
+            snapshot_path = '%s@%s' % (self.nas_path, snapshot_name)
             create_payload = {'path': snapshot_path, 'recursive': True}
             self.nef.snapshots.create(create_payload)
             for volume, source_vol in zip(volumes, source_vols):
@@ -826,12 +1379,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.nef.snapshots.delete(snapshot_path, delete_payload)
         return group_model_update, volumes_model_update
 
-    def create_group_from_src(self, context, group, volumes,
+    def create_group_from_src(self, ctxt, group, volumes,
                               group_snapshot=None, snapshots=None,
                               source_group=None, source_vols=None):
         """Creates a group from source.
 
-        :param context: the context of the caller.
+        :param ctxt: the context of the caller.
         :param group: the Group object to be created.
         :param volumes: a list of Volume objects in the group.
         :param group_snapshot: the GroupSnapshot object as source.
@@ -840,28 +1393,19 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param source_vols: a list of volume objects in the source_group.
         :returns: model_update, volumes_model_update
         """
-        return self.create_consistencygroup_from_src(context, group, volumes,
+        return self.create_consistencygroup_from_src(ctxt, group, volumes,
                                                      group_snapshot, snapshots,
                                                      source_group, source_vols)
-
-    def _local_volume_dir(self, volume):
-        """Get volume dir (mounted locally fs path) for given volume.
-
-        :param volume: volume reference
-        """
-        share = self._get_volume_share(volume)
-        if six.PY3:
-            share = share.encode('utf-8')
-        path = hashlib.md5(share).hexdigest()
-        return os.path.join(self.mount_point_base, path)
 
     def local_path(self, volume):
         """Get volume path (mounted locally fs path) for given volume.
 
         :param volume: volume reference
         """
-        volume_dir = self._local_volume_dir(volume)
-        return os.path.join(volume_dir, 'volume')
+        nfs_share = self._get_volume_share(volume)
+        mount_point = self._get_mount_point_for_share(nfs_share)
+        volume_file = os.path.join(mount_point, VOLUME_FILE_NAME)
+        return volume_file
 
     def _set_volume_acl(self, volume):
         """Sets access permissions for given volume.
@@ -893,19 +1437,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
             filesystem = self.nef.filesystems.get(volume_path, get_payload)
         if not filesystem['isMounted']:
             self.nef.filesystems.mount(volume_path)
-        share = '%s:%s' % (self.nas_host, filesystem['mountPoint'])
-        return share
+        nfs_share = '%s:%s' % (self.nas_host, filesystem['mountPoint'])
+        return nfs_share
 
     def _get_volume_path(self, volume):
         """Return ZFS dataset path for the volume."""
-        return posixpath.join(self.root_path, volume['name'])
+        volume_name = volume['name']
+        volume_path = posixpath.join(self.nas_path, volume_name)
+        return volume_path
 
     def _get_snapshot_path(self, snapshot):
         """Return ZFS snapshot path for the snapshot."""
         volume_name = snapshot['volume_name']
         snapshot_name = snapshot['name']
-        volume_path = posixpath.join(self.root_path, volume_name)
-        return '%s@%s' % (volume_path, snapshot_name)
+        volume_path = posixpath.join(self.nas_path, volume_name)
+        snapshot_path = '%s@%s' % (volume_path, snapshot_name)
+        return snapshot_path
 
     def get_volume_stats(self, refresh=False):
         """Get volume stats.
@@ -914,32 +1461,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         if refresh or not self._stats:
             self._update_volume_stats()
-
         return self._stats
 
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor Appliance."""
-        payload = {'fields': 'bytesAvailable,bytesUsed,pool'}
-        dataset = self.nef.filesystems.get(self.root_path, payload)
-        pool_name = dataset['pool']
-        free_capacity_gb = dataset['bytesAvailable'] // units.Gi
-        allocated_capacity_gb = dataset['bytesUsed'] // units.Gi
-        total_capacity_gb = free_capacity_gb + allocated_capacity_gb
-        volume_backend_name = (
-            self.configuration.safe_get('volume_backend_name'))
-        if not volume_backend_name:
-            LOG.debug('Failed to get configured volume backend name')
-            volume_backend_name = '%(product)s_%(protocol)s' % {
-                'product': self.product_name,
-                'protocol': self.storage_protocol
-            }
         description = (
             self.configuration.safe_get('nexenta_dataset_description'))
         if not description:
             description = '%(product)s %(host)s:%(path)s' % {
                 'product': self.product_name,
-                'host': self.configuration.nas_host,
-                'path': self.configuration.nas_share_path
+                'host': self.nas_host,
+                'path': self.nas_path
             }
         max_over_subscription_ratio = (
             self.configuration.safe_get('max_over_subscription_ratio'))
@@ -948,45 +1480,63 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if reserved_percentage is None:
             reserved_percentage = 0
         location_info = '%(driver)s:%(host)s:%(path)s' % {
-            'driver': self.driver_name,
-            'host': self.configuration.nas_host,
-            'path': self.configuration.nas_share_path
+            'driver': self.nas_driver,
+            'host': self.nas_host,
+            'path': self.nas_path
         }
         display_name = 'Capabilities of %(product)s %(protocol)s driver' % {
             'product': self.product_name,
             'protocol': self.storage_protocol
         }
-        visibility = 'public'
-        self._stats = {
+        stats = {
+            'backend_state': 'down',
             'driver_version': self.VERSION,
             'vendor_name': self.vendor_name,
             'storage_protocol': self.storage_protocol,
-            'volume_backend_name': volume_backend_name,
+            'volume_backend_name': self.backend_name,
             'location_info': location_info,
             'description': description,
             'display_name': display_name,
-            'pool_name': pool_name,
+            'pool_name': self.nas_pool,
             'multiattach': True,
-            'QoS_support': False,
+            'QoS_support': True,
             'consistencygroup_support': True,
             'consistent_group_snapshot_enabled': True,
             'online_extend_support': True,
             'sparse_copy_volume': True,
             'thin_provisioning_support': True,
             'thick_provisioning_support': True,
-            'total_capacity_gb': total_capacity_gb,
-            'allocated_capacity_gb': allocated_capacity_gb,
-            'free_capacity_gb': free_capacity_gb,
+            'total_capacity_gb': 'unknown',
+            'allocated_capacity_gb': 'unknown',
+            'free_capacity_gb': 'unknown',
             'max_over_subscription_ratio': max_over_subscription_ratio,
             'reserved_percentage': reserved_percentage,
-            'visibility': visibility,
+            'nef_scheme': self.nef.scheme,
+            'nef_hosts': ','.join(self.nef.hosts),
             'nef_port': self.nef.port,
-            'nef_url': self.nef.host
+            'nef_url': self.nef.url()
         }
+        payload = {'fields': 'bytesAvailable,bytesUsed'}
+        try:
+            nas_stat = self.nef.filesystems.get(self.nas_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to get backend statistics for host %(host)s '
+                      'and volume backend %(backend_name)s: %(error)s',
+                      {'host': self.host,
+                       'backend_name': self.backend_name,
+                       'error': error})
+        else:
+            available = nas_stat['bytesAvailable'] // units.Gi
+            used = nas_stat['bytesUsed'] // units.Gi
+            stats['free_capacity_gb'] = available
+            stats['allocated_capacity_gb'] = used
+            stats['total_capacity_gb'] = available + used
+            stats['backend_state'] = 'up'
+        self._stats = stats
         LOG.debug('Updated volume backend statistics for host %(host)s '
-                  'and volume backend %(volume_backend_name)s: %(stats)s',
+                  'and volume backend %(backend_name)s: %(stats)s',
                   {'host': self.host,
-                   'volume_backend_name': volume_backend_name,
+                   'backend_name': self.backend_name,
                    'stats': self._stats})
 
     def _get_existing_volume(self, existing_ref):
@@ -1003,14 +1553,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        % {'keys': keys})
             raise jsonrpc.NefException(code='EINVAL', message=message)
         payload = {
-            'parent': self.root_path,
+            'parent': self.nas_path,
             'fields': 'path',
             'recursive': False
         }
         for key, value in types.items():
             if key in existing_ref:
                 if value == 'path':
-                    path = posixpath.join(self.root_path,
+                    path = posixpath.join(self.nas_path,
                                           existing_ref[key])
                 else:
                     path = existing_ref[key]
@@ -1035,7 +1585,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    % {'reference': existing_ref, 'reason': reason})
         raise jsonrpc.NefException(code=code, message=message)
 
-    @jsonrpc.synchronized
+    @jsonrpc.synchronized_operation
     def manage_existing(self, volume, existing_ref):
         """Brings an existing backend storage object under Cinder management.
 
@@ -1074,6 +1624,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             volume_path = self._get_volume_path(volume)
             payload = {'newPath': volume_path}
             self.nef.filesystems.rename(existing_volume_path, payload)
+        self._update_volume_properties(volume)
 
     def manage_existing_get_size(self, volume, existing_ref):
         """Return size of volume to be managed by manage_existing.
@@ -1087,22 +1638,28 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         existing_volume = self._get_existing_volume(existing_ref)
         self._set_volume_acl(existing_volume)
-        self._mount_volume(existing_volume)
-        local_path = self.local_path(existing_volume)
+        nfs_share, mount_point, existing_volume_file = (
+            self._mount_volume(existing_volume))
         try:
-            volume_size = os.path.getsize(local_path)
+            existing_volume_info = image_utils.qemu_img_info(
+                existing_volume_file,
+                run_as_root=True)
         except OSError as error:
             code = errno.errorcode[error.errno]
-            message = (_('Manage existing volume %(name)s failed: '
-                         'unable to get size of volume data file '
-                         '%(file)s: %(error)s')
-                       % {'name': existing_volume['name'],
-                          'file': local_path,
+            message = (_('Manage existing volume %(volume)s failed, '
+                         'unable to get size of volume backend file '
+                         '%(volume_file)s: %(error)s')
+                       % {'volume': existing_volume['name'],
+                          'volume_file': existing_volume_file,
                           'error': error.strerror})
             raise jsonrpc.NefException(code=code, message=message)
         finally:
-            self._unmount_volume(existing_volume)
-        return volume_size // units.Gi
+            self._unmount_volume(existing_volume, nfs_share, mount_point)
+        existing_volume_size = existing_volume_info.virtual_size // units.Gi
+        LOG.debug('Manage existing volume: %(volume)s size is %(size)sG',
+                  {'volume': existing_volume['name'],
+                   'size': existing_volume_size})
+        return existing_volume_size
 
     def unmanage(self, volume):
         """Removes the specified volume from Cinder management.
@@ -1118,86 +1675,178 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         pass
 
-    def update_migrated_volume(self, context, volume, new_volume,
+    def update_migrated_volume(self, ctxt, volume, new_volume,
                                original_volume_status):
         """Return model update for migrated volume.
 
         This method should rename the back-end volume name on the
         destination host back to its original name on the source host.
 
-        :param context: The context of the caller
+        :param ctxt: The context of the caller
         :param volume: The original volume that was migrated to this backend
         :param new_volume: The migration volume object that was created on
                            this backend as part of the migration process
         :param original_volume_status: The status of the original volume
         :returns: model_update to update DB with any needed changes
         """
-        name_id = None
-        path = self._get_volume_path(volume)
-        new_path = self._get_volume_path(new_volume)
-        payload = {'newPath': path}
+        volume_renamed = False
+        volume_path = self._get_volume_path(volume)
+        new_volume_path = self._get_volume_path(new_volume)
+        bak_volume_path = '%s-backup' % volume_path
+        if volume['host'] == new_volume['host']:
+            volume['_name_id'] = new_volume['id']
+            payload = {'newPath': bak_volume_path}
+            try:
+                self.nef.filesystems.rename(volume_path, payload)
+            except jsonrpc.NefException as error:
+                LOG.error('Failed to create backup copy of original '
+                          'volume %(volume)s: %(error)s',
+                          {'volume': volume['name'],
+                           'error': error})
+                if error.code != 'ENOENT':
+                    raise
+            else:
+                volume_renamed = True
+        payload = {'newPath': volume_path}
         try:
-            self.nef.filesystems.rename(new_path, payload)
-        except jsonrpc.NefException as error:
-            LOG.debug('Failed to rename volume %(new_volume)s '
-                      'to %(volume)s after migration: %(error)s',
+            self.nef.filesystems.rename(new_volume_path, payload)
+        except jsonrpc.NefException as rename_error:
+            LOG.error('Failed to rename temporary volume %(new_volume)s '
+                      'to original %(volume)s after migration: %(error)s',
                       {'new_volume': new_volume['name'],
                        'volume': volume['name'],
-                       'error': error})
-            name_id = new_volume._name_id or new_volume.id
-        model_update = {'_name_id': name_id}
-        return model_update
+                       'error': rename_error})
+            if volume_renamed:
+                payload = {'newPath': volume_path}
+                try:
+                    self.nef.filesystems.rename(bak_volume_path, payload)
+                except jsonrpc.NefException as restore_error:
+                    LOG.error('Failed to restore backup copy of original '
+                              'volume %(volume)s: %(error)s',
+                              {'volume': volume['name'],
+                               'error': restore_error})
+            raise rename_error
+        if volume_renamed:
+            payload = {'newPath': new_volume_path}
+            try:
+                self.nef.filesystems.rename(bak_volume_path, payload)
+            except jsonrpc.NefException as error:
+                LOG.error('Failed to rename backup copy of original '
+                          'volume %(volume)s to temporary volume '
+                          '%(new_volume)s: %(error)s',
+                          {'volume': volume['name'],
+                           'new_volume': new_volume['name'],
+                           'error': error})
+        return {'_name_id': None, 'provider_location': None}
 
-    def retype(self, context, volume, new_type, diff, host):
+    def before_volume_copy(self, ctxt, src_volume, dst_volume, remote=None):
+        """Driver-specific actions before copy volume data.
+
+        This method will be called before _copy_volume_data during volume
+        migration
+        """
+        connector_properties = cinder_utils.brick_get_connector_properties()
+        attach_info, dst_volume = self._attach_volume(ctxt, dst_volume,
+                                                      connector_properties,
+                                                      remote=True)
+        dst_volume_file = attach_info['device']['path']
+        dst_volume_info = image_utils.qemu_img_info(dst_volume_file,
+                                                    run_as_root=True)
+        self._detach_volume(ctxt, attach_info, dst_volume,
+                            connector_properties, force=True)
+        src_nfs_share, src_mount_point, src_volume_file = (
+            self._mount_volume(src_volume))
+        src_volume_info = image_utils.qemu_img_info(src_volume_file,
+                                                    run_as_root=True)
+        if src_volume_info.file_format != dst_volume_info.file_format:
+            self._change_volume_format(src_volume, src_volume_file,
+                                       src_volume_info.file_format,
+                                       dst_volume_info.file_format)
+        self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
+
+    def retype(self, ctxt, volume, new_type, diff, host):
         """Retype from one volume type to another."""
         LOG.debug('Retype volume %(volume)s to host %(host)s '
                   'and volume type %(type)s with diff %(diff)s',
-                  {'volume': volume['name'], 'host': host['host'],
+                  {'volume': volume['name'], 'host': host,
                    'type': new_type['name'], 'diff': diff})
-        retyped = False
-        migrated, model_update = self.migrate_volume(context, volume, host)
         volume_path = self._get_volume_path(volume)
-        payload = {'source': True}
-        volume_specs = self.nef.filesystems.get(volume_path, payload)
-        payload = {}
-        extra_specs = volume_types.get_volume_type_extra_specs(new_type['id'])
         vendor_specs = self.nef.filesystems.properties
+        names = [_['api'] for _ in vendor_specs if 'api' in _]
+        names.remove('sparseVolume')
+        names.remove('volumeFormat')
+        names.append('source')
+        fields = ','.join(names)
+        payload = {'fields': fields, 'source': True}
+        volume_specs = self.nef.filesystems.get(volume_path, payload)
+        volume_type_specs = self._get_vendor_properties(vendor_specs,
+                                                        volume,
+                                                        new_type)
+        sparse_volume = volume_type_specs['sparseVolume']
+        volume_new_format = volume_type_specs['volumeFormat']
+        payload = {}
         for vendor_spec in vendor_specs:
-            property_name = vendor_spec['name']
             api = vendor_spec['api']
-            if 'retype' in vendor_spec:
-                LOG.debug('Skip retype vendor volume property '
-                          '%(property_name)s. %(reason)s',
-                          {'property_name': property_name,
-                           'reason': vendor_spec['retype']})
-                continue
-            if property_name in extra_specs:
-                extra_spec = extra_specs[property_name]
-                value = self._get_vendor_value(extra_spec, vendor_spec)
+            if api in volume_type_specs:
+                value = volume_type_specs[api]
+                if api in volume_specs:
+                    if volume_specs[api] == value:
+                        continue
+                if 'retype' in vendor_spec:
+                    code = 'EINVAL'
+                    message = (_('Failed to retype volume %(volume)s '
+                                 'to host %(host)s and volume type '
+                                 '%(type)s. %(reason)s')
+                               % {'volume': volume['name'],
+                                  'host': host,
+                                  'type': new_type['name'],
+                                  'reason': vendor_spec['retype']})
+                    raise jsonrpc.NefException(code=code, message=message)
                 payload[api] = value
             elif (api in volume_specs and 'source' in volume_specs and
                   api in volume_specs['source'] and
                   volume_specs['source'][api] in ['local', 'received']):
-                if 'cfg' in vendor_spec:
-                    cfg = vendor_spec['cfg']
-                    value = self.configuration.safe_get(cfg)
-                    if volume_specs[api] != value:
-                        payload[api] = value
-                else:
-                    if 'inherit' in vendor_spec:
-                        LOG.debug('Skip inherit vendor volume property '
-                                  '%(property_name)s. %(reason)s',
-                                  {'property_name': property_name,
-                                   'reason': vendor_spec['inherit']})
-                        continue
-                    payload[api] = None
+                if volume_specs[api] == vendor_spec['default']:
+                    continue
+                if 'inherit' in vendor_spec:
+                    LOG.debug('Unable to inherit property %(name)s '
+                              'from volume type %(type)s for volume '
+                              '%(volume)s. %(reason)s',
+                              {'name': api,
+                               'type': new_type['name'],
+                               'volume': volume['name'],
+                               'reason': vendor_spec['inherit']})
+                    continue
+                payload[api] = None
+        if 'sparseVolume' in payload:
+            sparse_volume = payload.pop('sparseVolume')
+        if 'volumeFormat' in payload:
+            volume_new_format = payload.pop('volumeFormat')
         try:
             self.nef.filesystems.set(volume_path, payload)
-            retyped = True
         except jsonrpc.NefException as error:
-            LOG.debug('Failed to retype volume %(volume)s: %(error)s',
-                      {'volume': volume['name'], 'error': error})
-        return retyped or migrated, model_update
+            LOG.error('Failed to retype volume %(volume)s to '
+                      'host %(host)s and volume type %(type)s '
+                      'with payload %(payload)s: %(error)s',
+                      {'volume': volume['name'],
+                       'host': host,
+                       'type': new_type['name'],
+                       'payload': payload,
+                       'error': error})
+            raise
+        nfs_share, mount_point, volume_file = self._mount_volume(volume)
+        volume_info = image_utils.qemu_img_info(volume_file,
+                                                run_as_root=True)
+        volume_size = volume_info.virtual_size
+        volume_format = volume_info.file_format
+        if volume_format != volume_new_format:
+            self._change_volume_format(volume, volume_file, volume_format,
+                                       volume_new_format)
+        self._unmount_volume(volume, nfs_share, mount_point)
+        if sparse_volume:
+            volume_size = 0
+        self._set_volume_reservation(volume, volume_size, volume_new_format)
+        return True, None
 
     def _init_vendor_properties(self):
         """Create a dictionary of vendor unique properties.
@@ -1229,15 +1878,24 @@ class NexentaNfsDriver(nfs.NfsDriver):
         : return vendor name
         """
         properties = {}
-        vendor_properties = []
         namespace = self.nef.filesystems.namespace
-        keys = ('enum', 'default', 'minimum', 'maximum')
-        vendor_properties += self.nef.filesystems.properties
+        vendor_properties = self.nef.filesystems.properties
+        keys = ['enum', 'default', 'minimum', 'maximum']
         for vendor_spec in vendor_properties:
             property_spec = {}
             for key in keys:
                 if key in vendor_spec:
-                    property_spec[key] = vendor_spec[key]
+                    value = vendor_spec[key]
+                    property_spec[key] = value
+            api = vendor_spec['api']
+            if 'cfg' in vendor_spec:
+                key = vendor_spec['cfg']
+                value = self.configuration.safe_get(key)
+                if value not in [None, '']:
+                    property_spec['default'] = value
+            elif api in self.nas_stat:
+                value = self.nas_stat[api]
+                property_spec['default'] = value
             property_name = vendor_spec['name']
             property_title = vendor_spec['title']
             property_description = vendor_spec['description']
@@ -1260,27 +1918,36 @@ class NexentaNfsDriver(nfs.NfsDriver):
             )
         return properties, namespace
 
-    def _get_vendor_properties(self, volume, vendor_specs):
-        properties = extra_specs = {}
-        type_id = volume.get('volume_type_id', None)
-        if type_id:
-            extra_specs = volume_types.get_volume_type_extra_specs(type_id)
+    def _get_vendor_properties(self, vendor_specs, volume, volume_type=None):
+        properties = {}
+        extra_specs = {}
+        if volume_type:
+            volume_type_id = volume_type['id']
+        else:
+            volume_type_id = volume['volume_type_id']
+        if volume_type_id:
+            extra_specs = volume_types.get_volume_type_extra_specs(
+                volume_type_id)
         for vendor_spec in vendor_specs:
-            property_name = vendor_spec['name']
-            if property_name in extra_specs:
-                extra_spec = extra_specs[property_name]
+            api = vendor_spec['api']
+            name = vendor_spec['name']
+            if name in extra_specs:
+                extra_spec = extra_specs[name]
                 value = self._get_vendor_value(extra_spec, vendor_spec)
             elif 'cfg' in vendor_spec:
-                cfg = vendor_spec['cfg']
-                value = self.configuration.safe_get(cfg)
+                key = vendor_spec['cfg']
+                value = self.configuration.safe_get(key)
+                if value in [None, '']:
+                    continue
+            elif volume_type and api in self.nas_stat:
+                value = self.nas_stat[api]
             else:
                 continue
-            api = vendor_spec['api']
             properties[api] = value
-            LOG.debug('Get vendor property name %(property_name)s '
-                      'with API name %(api)s and %(type)s value '
+            LOG.debug('Get vendor property name %(name)s with '
+                      'API name %(api)s and %(type)s value '
                       '%(value)s for volume %(volume)s',
-                      {'property_name': property_name,
+                      {'name': name,
                        'api': api,
                        'type': type(value).__name__,
                        'value': value,
@@ -1345,15 +2012,25 @@ class NexentaNfsDriver(nfs.NfsDriver):
         return value
 
     def _get_host_addresses(self):
-        """Return NexentaStor IP addresses list."""
+        """Returns NexentaStor IP addresses list."""
         addresses = []
-        items = self.nef.netaddrs.list()
-        for item in items:
-            cidr = six.text_type(item['address'])
-            addr, mask = cidr.split('/')
-            obj = ipaddress.ip_address(addr)
-            if not obj.is_loopback:
-                addresses.append(obj.exploded)
+        netaddrs = self.nef.netaddrs.list()
+        for netaddr in netaddrs:
+            cidr = six.text_type(netaddr['address'])
+            ip = cidr.split('/')[0]
+            instance = ipaddress.ip_address(ip)
+            if not instance.is_loopback:
+                addresses.append(instance.exploded)
         LOG.debug('Configured IP addresses: %(addresses)s',
                   {'addresses': addresses})
         return addresses
+
+    def _get_backend_name(self):
+        backend_name = self.configuration.safe_get('volume_backend_name')
+        if not backend_name:
+            LOG.error('Failed to get configured volume backend name')
+            backend_name = '%(product)s_%(protocol)s' % {
+                'product': self.product_name,
+                'protocol': self.storage_protocol
+            }
+        return backend_name
