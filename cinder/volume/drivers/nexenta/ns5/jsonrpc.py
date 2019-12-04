@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -28,6 +27,25 @@ from cinder import utils
 
 LOG = logging.getLogger(__name__)
 
+HTTPS_PORT = 8443
+HTTP_PORT = 8080
+HTTPS = 'https'
+HTTP = 'http'
+AUTO = 'auto'
+NFS = 'nfs'
+ISCSI = 'iscsi'
+
+
+def synchronized_operation(method):
+    def wrapper(instance, *args, **kwargs):
+        lock = instance.nef.lock
+
+        @utils.synchronized(lock, external=True)
+        def wrapped():
+            return method(instance, *args, **kwargs)
+        return wrapped()
+    return wrapper
+
 
 class NefException(exception.VolumeDriverException):
     def __init__(self, data=None, **kwargs):
@@ -51,9 +69,8 @@ class NefException(exception.VolumeDriverException):
         for key in defaults:
             if key not in kwargs:
                 kwargs[key] = defaults[key]
-        message = (_('%(message)s (source: %(source)s, '
-                     'name: %(name)s, code: %(code)s)')
-                   % kwargs)
+        message = ('%(message)s (source: %(source)s, '
+                   'name: %(name)s, code: %(code)s)') % kwargs
         self.code = kwargs['code']
         del kwargs['message']
         super(NefException, self).__init__(message, **kwargs)
@@ -63,11 +80,12 @@ class NefRequest(object):
     def __init__(self, proxy, method):
         self.proxy = proxy
         self.method = method
+        self.attempts = proxy.retries + 1
+        self.payload = None
+        self.error = None
         self.path = None
-        self.lock = False
         self.time = 0
         self.data = []
-        self.payload = {}
         self.stat = {}
         self.hooks = {
             'response': self.hook
@@ -78,246 +96,234 @@ class NefRequest(object):
         }
 
     def __call__(self, path, payload=None):
-        LOG.debug('NEF request start: %(method)s %(path)s %(payload)s',
+        LOG.debug('Start NEF request: %(method)s %(path)s %(payload)s',
                   {'method': self.method, 'path': path, 'payload': payload})
+        self.path = path
+        self.payload = payload
+        for attempt in range(self.attempts):
+            self.data = []
+            if self.error:
+                self.proxy.delay(attempt)
+                if not self.find_host():
+                    continue
+                LOG.debug('Retry NEF request: %(method)s %(path)s %(payload)s '
+                          '[%(attempt)s/%(attempts)s], reason: %(error)s',
+                          {'method': self.method, 'path': path,
+                           'payload': payload, 'attempt': attempt,
+                           'attempts': self.attempts, 'error': self.error})
+            try:
+                response = self.request(self.method, self.path, self.payload)
+            except Exception as error:
+                if isinstance(error, NefException):
+                    self.error = error
+                else:
+                    message = six.text_type(error)
+                    self.error = NefException(message=message)
+                continue
+            LOG.debug('Finish NEF request: %(method)s %(path)s %(payload)s, '
+                      'total response time: %(time)s seconds, '
+                      'total requests count: %(count)s, '
+                      'requests statistics: %(stat)s, '
+                      'response content: %(content)s',
+                      {'method': self.method,
+                       'path': self.path,
+                       'payload': self.payload,
+                       'time': self.time,
+                       'count': sum(self.stat.values()),
+                       'stat': self.stat,
+                       'content': response.content})
+            if response.ok and not response.content:
+                return None
+            content = json.loads(response.content)
+            if not response.ok:
+                raise NefException(content)
+            if isinstance(content, dict) and 'data' in content:
+                return self.data
+            return content
+        LOG.error('Failed NEF request: %(method)s %(path)s '
+                  '%(payload)s, request reached maximum retry '
+                  'attempts: %(attempts)s, reason: %(error)s',
+                  {'method': self.method, 'path': path,
+                   'payload': payload, 'attempts': self.attempts,
+                   'error': self.error})
+        raise self.error
+
+    def request(self, method, path, payload):
         if self.method not in ['get', 'delete', 'put', 'post']:
-            message = (_('NEF API does not support %(method)s method')
+            message = (_('Request method %(method)s not supported')
                        % {'method': self.method})
             raise NefException(code='EINVAL', message=message)
         if not path:
-            message = _('NEF API call requires collection path')
+            message = _('Request path is required')
             raise NefException(code='EINVAL', message=message)
-        self.path = path
+        url = self.proxy.url(path)
+        kwargs = dict(self.kwargs)
         if payload:
             if not isinstance(payload, dict):
-                message = _('NEF API call payload must be a dictionary')
+                message = _('Request payload must be a dictionary')
                 raise NefException(code='EINVAL', message=message)
-            if self.method in ['get', 'delete']:
-                self.payload = {'params': payload}
-            elif self.method in ['put', 'post']:
-                self.payload = {'data': json.dumps(payload)}
-        try:
-            response = self.request(self.method, self.path, **self.payload)
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout) as error:
-            LOG.debug('Failed to %(method)s %(path)s %(payload)s: %(error)s',
-                      {'method': self.method, 'path': self.path,
-                       'payload': self.payload, 'error': error})
-            if not self.failover():
-                raise
-            LOG.debug('Retry initial request after failover: '
-                      '%(method)s %(path)s %(payload)s',
-                      {'method': self.method,
-                       'path': self.path,
-                       'payload': self.payload})
-            response = self.request(self.method, self.path, **self.payload)
-        LOG.debug('NEF request done: %(method)s %(path)s %(payload)s, '
-                  'total response time: %(time)s seconds, '
-                  'total requests count: %(count)s, '
-                  'requests statistics: %(stat)s',
-                  {'method': self.method,
-                   'path': self.path,
-                   'payload': self.payload,
-                   'time': self.time,
-                   'count': sum(self.stat.values()),
-                   'stat': self.stat})
-        if response.ok and not response.content:
-            return None
-        content = json.loads(response.content)
-        if not response.ok:
-            raise NefException(content)
-        if isinstance(content, dict) and 'data' in content:
-            return self.data
-        return content
-
-    def request(self, method, path, **kwargs):
-        url = self.proxy.url(path)
-        LOG.debug('Perform session request: %(method)s %(url)s %(body)s',
-                  {'method': method, 'url': url, 'body': kwargs})
-        kwargs.update(self.kwargs)
+            if method in ['get', 'delete']:
+                kwargs['params'] = payload
+            elif method in ['put', 'post']:
+                kwargs['data'] = json.dumps(payload)
+        LOG.debug('Session request: %(method)s %(url)s %(data)s',
+                  {'method': method, 'url': url, 'data': kwargs})
         return self.proxy.session.request(method, url, **kwargs)
 
     def hook(self, response, **kwargs):
-        initial_text = (_('initial request %(method)s %(path)s %(body)s')
-                        % {'method': self.method,
-                           'path': self.path,
-                           'body': self.payload})
-        request_text = (_('session request %(method)s %(url)s %(body)s')
-                        % {'method': response.request.method,
-                           'url': response.request.url,
-                           'body': response.request.body})
-        response_text = (_('session response %(code)s %(content)s')
-                         % {'code': response.status_code,
-                            'content': response.content})
-        text = (_('%(request_text)s and %(response_text)s')
-                % {'request_text': request_text,
-                   'response_text': response_text})
-        LOG.debug('Hook start on %(text)s', {'text': text})
-
+        text = (_('session request %(method)s %(url)s %(body)s '
+                  'and session response %(code)s %(content)s')
+                % {'method': response.request.method,
+                   'url': response.request.url,
+                   'body': response.request.body,
+                   'code': response.status_code,
+                   'content': response.content})
+        LOG.debug('Start request hook on %(text)s', {'text': text})
         if response.status_code not in self.stat:
             self.stat[response.status_code] = 0
         self.stat[response.status_code] += 1
         self.time += response.elapsed.total_seconds()
-
+        attempt = self.stat[response.status_code]
+        limit = len(self.proxy.hosts) * self.attempts
         if response.ok and not response.content:
-            LOG.debug('Hook done on %(text)s: '
-                      'empty response content',
-                      {'text': text})
             return response
-
-        if not response.content:
-            message = (_('There is no response content '
-                         'is available for %(text)s')
-                       % {'text': text})
-            raise NefException(code='ENODATA', message=message)
-
         try:
             content = json.loads(response.content)
         except (TypeError, ValueError) as error:
-            message = (_('Failed to decode JSON for %(text)s: %(error)s')
+            message = (_('Failed request hook on %(text)s: '
+                         'JSON parser error: %(error)s')
                        % {'text': text, 'error': error})
-            raise NefException(code='ENOMSG', message=message)
-
+            raise NefException(code='EINVAL', message=message)
+        if response.ok and content is None:
+            return response
+        if not isinstance(content, dict):
+            message = (_('Failed request hook on %(text)s: '
+                         'no valid content found')
+                       % {'text': text})
+            raise NefException(code='EINVAL', message=message)
+        if attempt > limit and not response.ok:
+            return response
         method = 'get'
         if response.status_code == requests.codes.unauthorized:
-            if self.stat[response.status_code] > self.proxy.retries:
+            if 'code' in content and content['code'] == 'ELICENSE':
                 raise NefException(content)
-            self.auth()
-            LOG.debug('Retry %(text)s after authentication',
-                      {'text': request_text})
+            if not self.auth():
+                raise NefException(content)
             request = response.request.copy()
             request.headers.update(self.proxy.session.headers)
             return self.proxy.session.send(request, **kwargs)
         elif response.status_code == requests.codes.not_found:
-            if self.lock:
-                LOG.debug('Hook done on %(text)s: '
-                          'nested failover is detected',
-                          {'text': text})
-                return response
-            if self.stat[response.status_code] > self.proxy.retries:
+            if not self.check_host():
                 raise NefException(content)
-            if not self.failover():
-                LOG.debug('Hook done on %(text)s: '
-                          'no valid hosts found',
-                          {'text': text})
-                return response
-            LOG.debug('Retry %(text)s after failover',
-                      {'text': initial_text})
-            self.data = []
-            return self.request(self.method, self.path, **self.payload)
+            return response
         elif response.status_code == requests.codes.server_error:
-            if not (isinstance(content, dict) and
-                    'code' in content and
-                    content['code'] == 'EBUSY'):
+            if 'code' in content and content['code'] == 'EBUSY':
                 raise NefException(content)
-            if self.stat[response.status_code] > self.proxy.retries:
-                raise NefException(content)
-            self.proxy.delay(self.stat[response.status_code])
-            LOG.debug('Retry %(text)s after delay',
-                      {'text': initial_text})
-            self.data = []
-            return self.request(self.method, self.path, **self.payload)
+            return response
         elif response.status_code == requests.codes.accepted:
-            path = self.getpath(content, 'monitor')
+            path, payload = self.parse(content, 'monitor')
             if not path:
-                message = (_('There is no monitor path '
-                             'available for %(text)s')
+                message = (_('Failed request hook on %(text)s: '
+                             'monitor path not found')
                            % {'text': text})
-                raise NefException(code='ENOMSG', message=message)
-            self.proxy.delay(self.stat[response.status_code])
-            return self.request(method, path)
+                raise NefException(code='ENODATA', message=message)
+            self.proxy.delay(attempt)
+            return self.request(method, path, payload)
         elif response.status_code == requests.codes.ok:
-            if not (isinstance(content, dict) and 'data' in content):
-                LOG.debug('Hook done on %(text)s: there '
-                          'is no JSON data available',
+            if 'data' not in content or not content['data']:
+                LOG.debug('Finish request hook on %(text)s: '
+                          'non-paginated content',
                           {'text': text})
                 return response
-            LOG.debug('Append %(count)s data items to response',
-                      {'count': len(content['data'])})
-            self.data += content['data']
-            path = self.getpath(content, 'next')
+            data = content['data']
+            LOG.debug('Continue request hook on %(text)s: '
+                      'add %(count)s data items to response',
+                      {'text': text, 'count': len(data)})
+            self.data += data
+            path, payload = self.parse(content, 'next')
             if not path:
-                LOG.debug('Hook done on %(text)s: there '
-                          'is no next path available',
+                LOG.debug('Finish request hook on %(text)s: '
+                          'no next page found',
                           {'text': text})
                 return response
-            LOG.debug('Perform next session request %(method)s %(path)s',
-                      {'method': method, 'path': path})
-            return self.request(method, path)
-        LOG.debug('Hook done on %(text)s and '
-                  'returned original response',
+            if self.payload:
+                payload.update(self.payload)
+            LOG.debug('Continue request hook with new request '
+                      '%(method)s %(path)s %(payload)s',
+                      {'method': method, 'path': path,
+                       'payload': payload})
+            return self.request(method, path, payload)
+        LOG.debug('Finish request hook on %(text)s',
                   {'text': text})
         return response
 
     def auth(self):
         method = 'post'
-        path = 'auth/login'
+        path = '/auth/login'
         payload = {
             'username': self.proxy.username,
             'password': self.proxy.password
         }
-        data = json.dumps(payload)
-        kwargs = {'data': data}
         self.proxy.delete_bearer()
-        response = self.request(method, path, **kwargs)
+        response = self.request(method, path, payload)
         content = json.loads(response.content)
-        if not (isinstance(content, dict) and 'token' in content):
-            message = (_('There is no authentication token available '
-                         'for authentication request %(method)s %(url)s '
-                         '%(body)s and response %(code)s %(content)s')
-                       % {'method': response.request.method,
-                          'url': response.request.url,
-                          'body': response.request.body,
-                          'code': response.status_code,
-                          'content': response.content})
-            raise NefException(code='ENODATA', message=message)
-        token = content['token']
-        self.proxy.update_token(token)
+        if 'token' in content:
+            token = content['token']
+            if token:
+                self.proxy.update_token(token)
+                return True
+        return False
 
-    def failover(self):
-        result = False
-        self.lock = True
+    def check_host(self):
         method = 'get'
-        root = self.proxy.root
+        payload = {
+            'path': self.proxy.pool,
+            'fields': 'path'
+        }
+        LOG.info('Attempt to find pool %(pool)s on host %(host)s',
+                 {'pool': self.proxy.pool,
+                  'host': self.proxy.host})
+        try:
+            response = self.request(method, self.proxy.root, payload)
+        except Exception as error:
+            LOG.error('Failed to find pool %(pool)s '
+                      'on host %(host)s: %(error)s',
+                      {'pool': self.proxy.pool,
+                       'host': self.proxy.host,
+                       'error': error})
+            return False
+        content = json.loads(response.content)
+        if 'data' not in content or not content['data']:
+            LOG.error('Pool %(pool)s not found on host %(host)s',
+                      {'pool': self.proxy.pool,
+                       'host': self.proxy.host})
+            return False
+        LOG.info('Found pool %(pool)s on host %(host)s',
+                 {'pool': self.proxy.pool,
+                  'host': self.proxy.host})
+        return True
+
+    def find_host(self):
         for host in self.proxy.hosts:
             self.proxy.update_host(host)
-            LOG.debug('Try to failover path '
-                      '%(root)s to host %(host)s',
-                      {'root': root, 'host': host})
-            try:
-                response = self.request(method, root)
-            except (requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout) as error:
-                LOG.debug('Skip unavailable host %(host)s '
-                          'due to error: %(error)s',
-                          {'host': host, 'error': error})
-                continue
-            LOG.debug('Failover result: %(code)s %(content)s',
-                      {'code': response.status_code,
-                       'content': response.content})
-            if response.status_code == requests.codes.ok:
-                LOG.debug('Successful failover path '
-                          '%(root)s to host %(host)s',
-                          {'root': root, 'host': host})
-                result = True
-                break
-            else:
-                LOG.debug('Skip unsuitable host %(host)s: '
-                          'there is no %(root)s path found',
-                          {'host': host, 'root': root})
-        self.lock = False
-        return result
+            if self.check_host():
+                return True
+        return False
 
     @staticmethod
-    def getpath(content, name):
-        if isinstance(content, dict) and 'links' in content:
-            for link in content['links']:
-                if not isinstance(link, dict):
-                    continue
-                if 'rel' in link and 'href' in link:
-                    if link['rel'] == name:
-                        return link['href']
-        return None
+    def parse(content, name):
+        if 'links' in content:
+            links = content['links']
+            if isinstance(links, list):
+                for link in links:
+                    if (isinstance(link, dict) and
+                            'href' in link and
+                            'rel' in link and
+                            link['rel'] == name):
+                        url = six.moves.urllib.parse.urlparse(link['href'])
+                        payload = six.moves.urllib.parse.parse_qs(url.query)
+                        return url.path, payload
+        return None, None
 
 
 class NefCollections(object):
@@ -441,7 +447,7 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
             {
                 'name': self.key('blocksize'),
                 'api': 'volumeBlockSize',
-                'cfg': 'nexenta_ns5_blocksize',
+                'cfg': 'nexenta_blocksize',
                 'title': 'Block size',
                 'retype': _('Volume block size cannot be changed after '
                             'the volume has been created.'),
@@ -546,14 +552,13 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
             {
                 'name': self.key('thin_provisioning'),
                 'api': 'sparseVolume',
-                'cfg': 'nexenta_sparse',
+                'cfg': 'nexenta_sparsed_volumes',
                 'title': 'Thin provisioning',
-                'retype': _('Volume provisioning type cannot be changed '
-                            'after the volume has been created.'),
+                'inherit': _('Provisioning type cannot be inherit.'),
                 'description': _('Controls if a volume is created sparse '
                                  '(with no space reservation).'),
                 'type': 'boolean',
-                'default': False
+                'default': True
             },
             {
                 'name': self.key('sync'),
@@ -602,16 +607,12 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
         self.subj = 'filesystem'
         for prop in self.properties:
             if prop['name'] == self.key('blocksize'):
-                del prop['cfg']
+                del prop['retype']
                 prop['api'] = 'recordSize'
                 prop['description'] = _('Specifies a suggested block size '
                                         'for a volume.')
                 prop['enum'] = [512, 1024, 2048, 4096, 8192, 16384, 32768,
                                 65536, 131072, 262144, 524288, 1048576]
-                prop['default'] = 131072
-            elif prop['name'] == self.key('thin_provisioning'):
-                prop['cfg'] = 'nexenta_sparsed_volumes'
-                prop['default'] = True
         self.properties.append({
             'name': self.key('rate_limit'),
             'api': 'rateLimit',
@@ -622,6 +623,25 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
             'default': 0
         })
         self.properties.append({
+            'name': self.key('nbmand'),
+            'api': 'nonBlockingMandatoryMode',
+            'title': 'Non-blocking mandatory locking',
+            'description': _('Allow or disallow non-blocking mandatory '
+                             'locking semantics for a volume.'),
+            'type': 'boolean',
+            'default': False
+        })
+        self.properties.append({
+            'name': self.key('smart_compression'),
+            'api': 'smartCompression',
+            'title': 'Smart compression',
+            'description': _('Allow or disallow dynamically tracks volume '
+                             'compression ratios to determine if a volume '
+                             'data is compressible or not.'),
+            'type': 'boolean',
+            'default': False
+        })
+        self.properties.append({
             'name': self.key('snapdir'),
             'api': 'snapshotDirectory',
             'title': '.zfs directory visibility',
@@ -630,6 +650,17 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
                              'the volume file system.'),
             'type': 'boolean',
             'default': False
+        })
+        self.properties.append({
+            'name': self.key('format'),
+            'api': 'volumeFormat',
+            'cfg': 'nexenta_volume_format',
+            'title': 'Volume format',
+            'description': _('Controls volume format.'),
+            'enum': ['raw', 'qcow', 'qcow2', 'parallels',
+                     'vdi', 'vhdx', 'vmdk', 'vpc', 'qed'],
+            'type': 'string',
+            'default': 'raw'
         })
 
     def mount(self, name, payload=None):
@@ -676,7 +707,7 @@ class NefRsf(NefCollections):
 
     def __init__(self, proxy):
         super(NefRsf, self).__init__(proxy)
-        self.root = 'rsf/clusters'
+        self.root = '/rsf/clusters'
         self.subj = 'RSF Clusters'
 
 
@@ -767,8 +798,7 @@ class NefNetAddresses(NefCollections):
 
 
 class NefProxy(object):
-    def __init__(self, proto, path, conf):
-        self.session = requests.Session()
+    def __init__(self, proto, pool, path, conf):
         self.settings = NefSettings(self)
         self.filesystems = NefFilesystems(self)
         self.volumegroups = NefVolumeGroups(self)
@@ -785,52 +815,58 @@ class NefProxy(object):
         self.logicalunits = NefLogicalUnits(self)
         self.netaddrs = NefNetAddresses(self)
         self.lock = None
+        self.auto = False
         self.tokens = {}
         self.headers = {
             'Content-Type': 'application/json',
             'X-XSS-Protection': '1'
         }
-        if conf.nexenta_use_https:
-            self.scheme = 'https'
+        if conf.nexenta_use_https is None:
+            self.scheme = conf.nexenta_rest_protocol
+            if self.scheme == AUTO:
+                self.auto = True
+                self.scheme = HTTPS
         else:
-            self.scheme = 'http'
+            if conf.nexenta_use_https:
+                self.scheme = HTTPS
+            else:
+                self.scheme = HTTP
+        if conf.nexenta_rest_port:
+            self.port = conf.nexenta_rest_port
+        else:
+            if self.scheme == HTTPS:
+                self.port = HTTPS_PORT
+            else:
+                self.port = HTTP_PORT
         self.username = conf.nexenta_user
         self.password = conf.nexenta_password
         self.hosts = []
         if conf.nexenta_rest_address:
             for host in conf.nexenta_rest_address.split(','):
                 self.hosts.append(host.strip())
-        if proto == 'nfs':
-            self.root = self.filesystems.path(path)
-            if not self.hosts:
-                self.hosts.append(conf.nas_host)
-        elif proto == 'iscsi':
-            self.root = self.volumegroups.path(path)
-            if not self.hosts:
-                self.hosts.append(conf.nexenta_host)
+        elif proto == ISCSI and conf.nexenta_host:
+            self.hosts.append(conf.nexenta_host)
+        elif proto == NFS and conf.nas_host:
+            self.hosts.append(conf.nas_host)
         else:
-            message = (_('Storage protocol %(proto)s not supported')
-                       % {'proto': proto})
-            raise NefException(code='EPROTO', message=message)
+            message = (_('NexentaStor Rest API address is not defined, '
+                         'please check the Cinder configuration file for '
+                         'NexentaStor backend and nexenta_rest_address, '
+                         'nexenta_host or nas_host configuration options'))
+            raise NefException(code='EINVAL', message=message)
         self.host = self.hosts[0]
-        if conf.nexenta_rest_port:
-            self.port = conf.nexenta_rest_port
-        else:
-            if conf.nexenta_use_https:
-                self.port = 8443
-            else:
-                self.port = 8080
-        self.proto = proto
+        self.pool = pool
         self.path = path
+        self.root = self.filesystems.root
+        self.retries = conf.nexenta_rest_retry_count
         self.backoff_factor = conf.nexenta_rest_backoff_factor
-        self.retries = len(self.hosts) * conf.nexenta_rest_retry_count
         self.timeout = (conf.nexenta_rest_connect_timeout +
                         conf.nexenta_rest_read_timeout)
-        max_retries = conf.nexenta_rest_retry_count
-        adapter = requests.adapters.HTTPAdapter(max_retries=max_retries)
+        self.session = requests.Session()
         self.session.verify = conf.driver_ssl_cert_verify
+        if self.session.verify and conf.driver_ssl_cert_path:
+            self.session.verify = conf.driver_ssl_cert_path
         self.session.headers.update(self.headers)
-        self.session.mount('%s://' % self.scheme, adapter)
         self.update_lock()
 
     def __getattr__(self, name):
@@ -890,42 +926,24 @@ class NefProxy(object):
         if not guid:
             guid = ':'.join(sorted(self.hosts))
         lock = '%s:%s' % (guid, self.path)
-        if six.PY3:
+        if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
         self.lock = hashlib.md5(lock).hexdigest()
         LOG.debug('NEF coordination lock: %(lock)s',
                   {'lock': self.lock})
 
-    def url(self, path):
-        if not path:
-            message = _('NEF API url requires path')
-            raise NefException(code='EINVAL', message=message)
+    def url(self, path=''):
         netloc = '%s:%d' % (self.host, self.port)
         components = (self.scheme, netloc, path, None, None)
         url = six.moves.urllib.parse.urlunsplit(components)
         return url
 
     def delay(self, attempt):
-        interval = int(self.backoff_factor * (2 ** (attempt - 1)))
+        if self.retries > 0:
+            attempt %= self.retries
+            if attempt == 0:
+                attempt = self.retries
+        interval = float(self.backoff_factor * (2 ** (attempt - 1)))
         LOG.debug('Waiting for %(interval)s seconds',
                   {'interval': interval})
         greenthread.sleep(interval)
-
-
-def synchronized(method):
-    def wrapper(instance, *args, **kwargs):
-        lock = instance.nef.lock
-        LOG.debug('Synchronized call for %(instance)s '
-                  '%(method)s(%(args)s, %(kwargs)s) '
-                  'and coordination lock: %(lock)s',
-                  {'instance': instance,
-                   'method': method,
-                   'args': args,
-                   'kwargs': kwargs,
-                   'lock': lock})
-
-        @utils.synchronized(lock, external=True)
-        def wrapped():
-            return method(instance, *args, **kwargs)
-        return wrapped()
-    return wrapper
