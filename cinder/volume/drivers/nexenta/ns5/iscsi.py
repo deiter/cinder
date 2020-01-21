@@ -1,4 +1,4 @@
-# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -93,6 +93,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         1.4.9 - Added image caching using clone_image method.
         1.5.0 - Added flag backend_state to report backend status.
               - Added retry on driver initialization failure.
+        1.5.1 - Support for location header.
     """
 
     VERSION = '1.5.0'
@@ -1080,20 +1081,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'targetGroup': target_group,
             'hostGroup': host_group
         }
-        self.nef.mappings.create(payload)
-        mappings = {}
+        uid = self.nef.mappings.create(payload)
+        payload = {'fields': 'lun'}
         for attempt in range(1, self.nef.retries + 1):
-            mappings = self.nef.mappings.list(payload)
-            if mappings:
-                break
-            self.nef.delay(attempt)
-        if not mappings:
-            message = (_('LUN mapping %(payload)s created for '
-                         'volume %(volume)s was not found')
-                       % {'payload': payload,
-                          'volume': volume['name']})
-            raise jsonrpc.NefException(code='ENOTBLK', message=message)
-        lun = mappings[0]['lun']
+            try:
+                mapping = self.nef.mappings.get(uid, payload)
+            except jsonrpc.NefException:
+                if attempt == self.nef.retries:
+                    raise
+                self.nef.delay(attempt)
+            else:
+                lun = mapping['lun']
         props_luns = [lun] * len(props_iqns)
 
         if multipath:
@@ -1821,7 +1819,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             else:
                 size = cinder_volume_names[parent]['size']
                 payload = {'fields': 'clones'}
-                props = self.nef.snapshots.get(path)
+                props = self.nef.snapshots.get(path, payload)
                 clones = props['clones']
                 unmanaged_clones = []
                 for clone in clones:

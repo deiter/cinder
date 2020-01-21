@@ -1,4 +1,4 @@
-# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -121,6 +121,11 @@ class NefRequest(object):
                        'stat': self.stat,
                        'content': response.content})
             if response.ok and not response.content:
+                if 'location' in response.headers:
+                    location = response.headers['location']
+                    name = posixpath.basename(location)
+                    data = six.moves.urllib.parse.unquote_plus(name)
+                    return data
                 return None
             content = json.loads(response.content)
             if not response.ok:

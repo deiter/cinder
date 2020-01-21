@@ -1,4 +1,4 @@
-# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -2016,7 +2016,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             else:
                 size = cinder_volume_names[parent]['size']
                 payload = {'fields': 'clones'}
-                props = self.nef.snapshots.get(path)
+                props = self.nef.snapshots.get(path, payload)
                 clones = props['clones']
                 unmanaged_clones = []
                 for clone in clones:
