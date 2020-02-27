@@ -94,9 +94,10 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         1.5.0 - Added flag backend_state to report backend status.
               - Added retry on driver initialization failure.
         1.5.1 - Support for location header.
+        1.5.2 - Fixed list manageable volumes.
     """
 
-    VERSION = '1.5.0'
+    VERSION = '1.5.2'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -1602,8 +1603,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             cinder_volume_names[key] = value
         payload = {
             'parent': self.san_path,
-            'fields': 'name,guid,path,volumeSize',
-            'recursive': False
+            'fields': 'name,guid,path,volumeSize'
         }
         volumes = self.nef.volumes.list(payload)
         for volume in volumes:
