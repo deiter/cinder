@@ -837,6 +837,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param nfs_share: NFS share
         :param mount_point: mount point
         """
+        if self.nas_nohide:
+            return
         if nfs_share is None:
             try:
                 nfs_share = self._get_volume_share(volume)
