@@ -1587,9 +1587,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param volume: volume reference
         """
-        nfs_share = self._get_volume_share(volume)
-        mount_point = self._get_mount_point_for_share(nfs_share)
-        volume_file = os.path.join(mount_point, VOLUME_FILE_NAME)
+        if self.nas_nohide:
+            mount_point = self._get_mount_point_for_share(self.nas_share)
+            volume_file = os.path.join(mount_point, volume['name'],
+                                       VOLUME_FILE_NAME)
+        else:
+            nfs_share = self._get_volume_share(volume)
+            mount_point = self._get_mount_point_for_share(nfs_share)
+            volume_file = os.path.join(mount_point, VOLUME_FILE_NAME)
         return volume_file
 
     def _set_volume_acl(self, volume):
