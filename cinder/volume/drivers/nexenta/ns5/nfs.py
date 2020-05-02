@@ -1608,7 +1608,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         }
         self.nef.filesystems.acl(volume_path, payload)
 
-    def _get_img_info(self, image_path):
+    def _get_image_info(self, image_path):
         """Return an object from qemu-img info."""
         info = image_utils.qemu_img_info(
             image_path, force_share=True,
