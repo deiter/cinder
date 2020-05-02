@@ -120,9 +120,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.9.2 - Added support for NexentaStor5 vSolution API.
         1.9.3 - Added support for nohide NFS option.
               - Added support for NAS secure operations.
+        1.9.4 - Fixed concurrency issues.
     """
 
-    VERSION = '1.9.3'
+    VERSION = '1.9.4'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
