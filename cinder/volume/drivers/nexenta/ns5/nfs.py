@@ -574,8 +574,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        volume_info = image_utils.qemu_img_info(
-            volume_file, force_share=True, run_as_root=self._execute_as_root)
+        volume_info = self._get_image_info(volume_file)
         volume_format = volume_info.file_format
         volume_blocksize = self.configuration.volume_dd_blocksize
         LOG.debug('Copy image %(image)s to %(format)s volume %(volume)s',
@@ -627,14 +626,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if not cache_exist:
             with image_utils.TemporaryImages.fetch(image_service, ctxt,
                                                    image_id) as image_file:
-                image_info = image_utils.qemu_img_info(
-                    image_file, force_share=True,
-                    run_as_root=self._execute_as_root)
+                image_info = self._get_image_info(image_file)
         else:
             nfs_share, mount_point, cache_file = self._mount_volume(cache)
-            image_info = image_utils.qemu_img_info(
-                cache_file, force_share=True,
-                run_as_root=self._execute_as_root)
+            image_info = self._get_image_info(cache_file)
             self._unmount_volume(cache, nfs_share, mount_point)
         image_size = nexenta_utils.roundup(image_info.virtual_size, units.Gi)
         cache['size'] = image_size // units.Gi
@@ -761,8 +756,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
     def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        volume_info = image_utils.qemu_img_info(
-            volume_file, force_share=True, run_as_root=self._execute_as_root)
+        volume_info = self._get_image_info(volume_file)
         volume_format = volume_info.file_format
         LOG.debug('Copy %(format)s volume %(volume)s to image %(image)s',
                   {'format': volume_format,
@@ -1188,8 +1182,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 self.nef.filesystems.set(volume_path, payload)
             self._remount_volume(volume)
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        volume_info = image_utils.qemu_img_info(
-            volume_file, force_share=True, run_as_root=self._execute_as_root)
+        volume_info = self._get_image_info(volume_file)
         self._unmount_volume(volume, nfs_share, mount_point)
         volume_format = volume_info.file_format
         volume_name = VOLUME_FILE_NAME
@@ -1307,9 +1300,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         sparse_volume = payload.pop('sparseVolume')
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
         if not sparse_volume:
-            volume_info = image_utils.qemu_img_info(
-                volume_file, force_share=True,
-                run_as_root=self._execute_as_root)
+            volume_info = self._get_image_info(volume_file)
             volume_size = new_size * units.Gi
             volume_format = volume_info.file_format
             self._set_volume_reservation(volume, volume_size, volume_format)
@@ -1616,6 +1607,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
         }
         self.nef.filesystems.acl(volume_path, payload)
 
+    def _get_img_info(self, image_path):
+        """Return an object from qemu-img info."""
+        info = image_utils.qemu_img_info(
+            image_path, force_share=True,
+            run_as_root=self._execute_as_root)
+        return info
+
     def _get_volume_share(self, volume):
         """Return NFS share path for the volume."""
         volume_path = self._get_volume_path(volume)
@@ -1916,10 +1914,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         nfs_share, mount_point, existing_volume_file = (
             self._mount_volume(existing_volume))
         try:
-            existing_volume_info = image_utils.qemu_img_info(
-                existing_volume_file,
-                force_share=True,
-                run_as_root=self._execute_as_root)
+            existing_volume_info = self._get_image_info(existing_volume_file)
         except OSError as error:
             code = errno.errorcode[error.errno]
             message = (_('Manage existing volume %(volume)s failed, '
@@ -2296,16 +2291,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                                       connector_properties,
                                                       remote=True)
         dst_volume_file = attach_info['device']['path']
-        dst_volume_info = image_utils.qemu_img_info(
-            dst_volume_file, force_share=True,
-            run_as_root=self._execute_as_root)
+        dst_volume_info = self._get_image_info(dst_volume_file)
         self._detach_volume(ctxt, attach_info, dst_volume,
                             connector_properties, force=True)
         src_nfs_share, src_mount_point, src_volume_file = (
             self._mount_volume(src_volume))
-        src_volume_info = image_utils.qemu_img_info(
-            src_volume_file, force_share=True,
-            run_as_root=self._execute_as_root)
+        src_volume_info = self._get_image_info(src_volume_file)
         if src_volume_info.file_format != dst_volume_info.file_format:
             self._change_volume_format(src_volume, src_volume_file,
                                        src_volume_info.file_format,
@@ -2386,8 +2377,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        'error': error})
             raise
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        volume_info = image_utils.qemu_img_info(
-            volume_file, force_share=True, run_as_root=self._execute_as_root)
+        volume_info = self._get_image_info(volume_file)
         volume_size = volume_info.virtual_size
         volume_format = volume_info.file_format
         if volume_format != volume_new_format:
