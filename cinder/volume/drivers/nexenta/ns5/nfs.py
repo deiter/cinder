@@ -1191,10 +1191,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_info = image_utils.qemu_img_info(
             volume_file, force_share=True, run_as_root=self._execute_as_root)
         self._unmount_volume(volume, nfs_share, mount_point)
+        volume_format = volume_info.file_format
+        volume_name = VOLUME_FILE_NAME
+        if self.nas_nohide:
+            volume_name = os.path.join(volume['name'], volume_name)
         data = {
             'export': nfs_share,
-            'format': volume_info.file_format,
-            'name': VOLUME_FILE_NAME
+            'format': volume_format,
+            'name': volume_name
         }
         if self.mount_options:
             data['options'] = '-o %s' % self.mount_options
