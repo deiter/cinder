@@ -775,18 +775,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
             run_as_root=self._execute_as_root)
         self._unmount_volume(volume, nfs_share, mount_point)
 
-    def _mount_volume(self, volume):
-        """Ensure that volume is mounted on the host.
+    def _mount_share(self, nfs_share):
+        """Ensure that NFS share is mounted on the host.
 
-        :param volume: volume reference
-        :returns: NFS share, mount point and local volume file path
+        :param nfs_share: NFS share
+        :returns: mount point
         """
-        nfs_share = self._get_volume_share(volume)
         attempts = max(1, self.configuration.nfs_mount_attempts)
         for attempt in range(1, attempts + 1):
             try:
                 self._remotefsclient.mount(nfs_share)
-            except OSError as error:
+            except Exception as error:
                 if attempt == attempts:
                     LOG.error('Failed to mount NFS share %(nfs_share)s '
                               'after %(attempts)s attempts: %(error)s',
@@ -806,7 +805,23 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           {'nfs_share': nfs_share})
                 break
         mount_point = self._get_mount_point_for_share(nfs_share)
-        volume_file = os.path.join(mount_point, VOLUME_FILE_NAME)
+        return mount_point
+
+    def _mount_volume(self, volume):
+        """Ensure that volume is mounted on the host.
+
+        :param volume: volume reference
+        :returns: NFS share, mount point and local volume file path
+        """
+        if self.nas_nohide:
+            nfs_share = self.nas_share
+            mount_point = self._mount_share(nfs_share)
+            volume_file = os.path.join(mount_point, volume['name'],
+                                       VOLUME_FILE_NAME)
+        else:
+            nfs_share = self._get_volume_share(volume)
+            mount_point = self._mount_share(nfs_share)
+            volume_file = os.path.join(mount_point, VOLUME_FILE_NAME)
         return nfs_share, mount_point, volume_file
 
     def _remount_volume(self, volume):
