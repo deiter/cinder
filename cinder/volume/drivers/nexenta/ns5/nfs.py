@@ -163,6 +163,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             root_helper, execute=execute,
             nfs_mount_point_base=self.mount_point_base,
             nfs_mount_options=self.mount_options)
+        self._context = None
         self.nef = None
         self.nas_stat = None
         self.nas_share = None
@@ -198,6 +199,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         return options.NEXENTASTOR5_NFS_OPTS
 
     def do_setup(self, ctxt):
+        self._context = ctxt
         retries = 0
         while not self._do_setup():
             retries += 1
@@ -1317,9 +1319,18 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param snapshot: snapshot reference
         """
+        volume_id = snapshot.get('volume_id')
+        volume = self.db.volume_get(self._context, volume_id)
+        volume_metadata = volume.get('metadata')
+        volume_format = volume_metadata.get('format')
+        model_update = {}
+        if volume_format:
+            snapshot_metadata = {'format': volume_format}
+            model_update = {'metadata': snapshot_metadata}
         snapshot_path = self._get_snapshot_path(snapshot)
         payload = {'path': snapshot_path}
         self.nef.snapshots.create(payload)
+        return model_update
 
     def delete_snapshot(self, snapshot):
         """Deletes a snapshot.
