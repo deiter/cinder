@@ -550,6 +550,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         sparse_volume = payload.pop('sparseVolume')
         volume_format = payload.pop('volumeFormat')
         volume_vsolution = payload.pop('vSolution')
+        volume_metadata = {'format': volume_format}
+        model_update = {'metadata': volume_metadata}
         payload['path'] = volume_path
         self.nef.filesystems.create(payload)
         if not sparse_volume:
@@ -571,6 +573,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           volume_file,
                           run_as_root=self._execute_as_root)
             self._unmount_volume(volume, nfs_share, mount_point)
+        return model_update
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
