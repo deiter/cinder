@@ -1319,11 +1319,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param snapshot: snapshot reference
         """
+        model_update = {}
         volume_id = snapshot.get('volume_id')
         volume = self.db.volume_get(self._context, volume_id)
-        volume_metadata = volume.get('metadata')
-        volume_format = volume_metadata.get('format')
-        model_update = {}
+        volume_format = volume.metadata.get('format')
         if volume_format:
             snapshot_metadata = {'format': volume_format}
             model_update = {'metadata': snapshot_metadata}
