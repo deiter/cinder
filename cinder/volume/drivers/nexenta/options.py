@@ -192,6 +192,12 @@ NEXENTASTOR5_ISCSI_OPTS = [
                help='Block size for datasets.')
 ]
 
+NEXENTASTOR5_NFS_OPTS = [
+    cfg.BoolOpt('nexenta_vsolution',
+                default=False,
+                help='Enables NexentaStor vSolution API.')
+]
+
 NEXENTA_NFS_OPTS = [
     cfg.StrOpt('nexenta_volume_format',
                default='raw',
@@ -348,7 +354,7 @@ NEXENTASTOR4_NFS_OPTS = (
     NEXENTASTOR4_RRMGR_OPTS
 )
 
-NEXENTASTOR5_NFS_OPTS = (
+NEXENTASTOR5_NFS_OPTS += (
     NEXENTASTOR_CONNECTION_OPTS +
     NEXENTASTOR_DATASET_OPTS +
     NEXENTA_NFS_OPTS

@@ -387,6 +387,39 @@ class NefSettings(NefCollections):
         return NotImplemented
 
 
+class NefVsolutions(NefCollections):
+
+    def __init__(self, proxy):
+        super(NefVsolutions, self).__init__(proxy)
+        self.root = '/vsolution/filesystems'
+        self.subj = 'vsolution'
+        self.slot = 'files'
+
+    def path(self, parent, name):
+        quoted_parent = six.moves.urllib.parse.quote_plus(parent)
+        quoted_name = six.moves.urllib.parse.quote_plus(name)
+        return posixpath.join(self.root, quoted_parent, self.slot, quoted_name)
+
+    def get(self, name, payload=None):
+        return NotImplemented
+
+    def set(self, name, payload=None):
+        return NotImplemented
+
+    def list(self, payload=None):
+        return NotImplemented
+
+    def create(self, parent, name, payload=None):
+        LOG.debug('Create %(subj)s: %(parent)s/%(name)s %(payload)s',
+                  {'subj': self.subj, 'parent': parent, 'name': name,
+                   'payload': payload})
+        path = self.path(parent, name)
+        self.proxy.post(path, payload)
+
+    def delete(self, name, payload=None):
+        return NotImplemented
+
+
 class NefDatasets(NefCollections):
 
     def __init__(self, proxy):
@@ -655,6 +688,15 @@ class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
             'type': 'string',
             'default': 'raw'
         })
+        self.properties.append({
+            'name': self.key('vsolution'),
+            'api': 'vSolution',
+            'cfg': 'nexenta_vsolution',
+            'title': 'vSolution API',
+            'description': _('Enables NexentaStor vSolution API.'),
+            'type': 'boolean',
+            'default': False
+        })
 
     def mount(self, name, payload=None):
         LOG.debug('Mount %(subj)s %(name)s: %(payload)s',
@@ -793,6 +835,7 @@ class NefNetAddresses(NefCollections):
 class NefProxy(object):
     def __init__(self, proto, pool, path, conf):
         self.settings = NefSettings(self)
+        self.vsolutions = NefVsolutions(self)
         self.filesystems = NefFilesystems(self)
         self.volumegroups = NefVolumeGroups(self)
         self.volumes = NefVolumes(self)

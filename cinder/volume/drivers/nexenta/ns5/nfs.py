@@ -117,9 +117,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.9.1 - Added flag backend_state to report backend status.
               - Added retry on driver initialization failure.
               - Added QoS support in terms of I/O throttling rate.
+        1.9.2 - Added support for NexentaStor5 vSolution API.
     """
 
-    VERSION = '1.9.1'
+    VERSION = '1.9.2'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -226,6 +227,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         names = [spec['api'] for spec in specs if 'api' in spec]
         names.remove('sparseVolume')
         names.remove('volumeFormat')
+        names.remove('vSolution')
         names.append('mountPoint')
         names.append('isMounted')
         fields = ','.join(names)
@@ -474,22 +476,26 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = self._get_vendor_properties(properties, volume)
         sparse_volume = payload.pop('sparseVolume')
         volume_format = payload.pop('volumeFormat')
-        specs = {'size': volume_size}
-        if volume_format == VOLUME_FORMAT_QCOW2:
-            specs['preallocation'] = 'metadata'
-        volume_options = ','.join(['%s=%s' % _ for _ in specs.items()])
+        volume_vsolution = payload.pop('vSolution')
         payload['path'] = volume_path
         self.nef.filesystems.create(payload)
         if not sparse_volume:
             self._set_volume_reservation(volume, volume_size, volume_format)
         self._set_volume_acl(volume)
-        nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        self._execute('qemu-img', 'create',
-                      '-f', volume_format,
-                      '-o', volume_options,
-                      volume_file,
-                      run_as_root=True)
-        self._unmount_volume(volume, nfs_share, mount_point)
+        payload = {'size': volume_size}
+        if volume_vsolution and volume_format == VOLUME_FORMAT_RAW:
+            self.nef.vsolutions.create(volume_path, VOLUME_FILE_NAME, payload)
+        else:
+            nfs_share, mount_point, volume_file = self._mount_volume(volume)
+            if volume_format == VOLUME_FORMAT_QCOW2:
+                payload['preallocation'] = 'metadata'
+            volume_options = ','.join(['%s=%s' % _ for _ in payload.items()])
+            self._execute('qemu-img', 'create',
+                          '-f', volume_format,
+                          '-o', volume_options,
+                          volume_file,
+                          run_as_root=True)
+            self._unmount_volume(volume, nfs_share, mount_point)
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
@@ -2164,6 +2170,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         names = [_['api'] for _ in vendor_specs if 'api' in _]
         names.remove('sparseVolume')
         names.remove('volumeFormat')
+        names.remove('vSolution')
         names.append('source')
         fields = ','.join(names)
         payload = {'fields': fields, 'source': True}
@@ -2211,6 +2218,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             sparse_volume = payload.pop('sparseVolume')
         if 'volumeFormat' in payload:
             volume_new_format = payload.pop('volumeFormat')
+        if 'vSolution' in payload:
+            del payload['vSolution']
         try:
             self.nef.filesystems.set(volume_path, payload)
         except jsonrpc.NefException as error:
