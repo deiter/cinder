@@ -36,6 +36,7 @@ ISCSI = 'iscsi'
 
 
 class NefException(exception.VolumeDriverException):
+
     def __init__(self, data=None, **kwargs):
         defaults = {
             'name': 'NexentaError',
@@ -65,6 +66,7 @@ class NefException(exception.VolumeDriverException):
 
 
 class NefRequest(object):
+
     def __init__(self, proxy, method):
         self.proxy = proxy
         self.method = method
@@ -833,6 +835,7 @@ class NefNetAddresses(NefCollections):
 
 
 class NefProxy(object):
+
     def __init__(self, proto, pool, path, conf):
         self.settings = NefSettings(self)
         self.vsolutions = NefVsolutions(self)

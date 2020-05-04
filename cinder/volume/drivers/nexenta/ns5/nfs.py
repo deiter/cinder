@@ -57,7 +57,7 @@ VOLUME_FORMAT_QED = 'qed'
 
 @interface.volumedriver
 class NexentaNfsDriver(nfs.NfsDriver):
-    """Executes volume driver commands on Nexenta Appliance.
+    """Executes volume driver commands on NexentaStor Appliance.
 
     Version history:
 
@@ -132,7 +132,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
     driver_volume_type = 'nfs'
 
     def __init__(self, execute=processutils.execute, *args, **kwargs):
-        self._remotefsclient = None
         super(NexentaNfsDriver, self).__init__(*args, **kwargs)
         if not self.configuration:
             message = (_('%(product_name)s %(storage_protocol)s '
@@ -579,6 +578,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
+        #volume_metadata = volume.get('metadata', {})
+        #volume_format = volume.metadata.xxxx
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
         volume_info = self._get_image_info(volume_file)
         volume_format = volume_info.file_format
@@ -1321,7 +1322,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         model_update = {}
         volume_id = snapshot.get('volume_id')
-        volume_metadata = self.db.volume_metadata_get(self._context, volume_id)
+        volume = self.db.volume_get(self._context, volume_id)
+        # TODO
+        #volume_metadata = self.db.volume_metadata_get(self._context, volume_id)
+        volume_metadata = self._get_volume_metadata(volume)
         volume_format = volume_metadata.get('format')
         if volume_format:
             snapshot_metadata = {'format': volume_format}
@@ -1647,6 +1651,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_name = volume['name']
         volume_path = posixpath.join(self.nas_path, volume_name)
         return volume_path
+
+    def _get_volume_metadata(self, volume):
+        volume_metadata = {}
+        if isinstance(volume, objects.Volume) and 'metadata' in volume:
+            volume_metadata = volume['metadata']
+        elif 'volume_metadata' in volume:
+            for item in volume['volume_metadata']:
+                key = item['key']
+                value = item['value']
+                volume_metadata[key] = value
+        return volume_metadata
 
     def _get_snapshot_path(self, snapshot):
         """Return ZFS snapshot path for the snapshot."""
