@@ -111,11 +111,10 @@ class VolumeFile(object):
         if self.volume_format == VOLUME_FORMAT_QCOW2:
             payload['preallocation'] = 'metadata'
         volume_options = ','.join(['%s=%s' % _ for _ in payload.items()])
-        self._execute('qemu-img', 'create',
+        self.execute('qemu-img', 'create',
                       '-o', volume_options,
                       '-f', self.volume_format,
-                      self.volume_file
-                      run_as_root=self.root)
+                      self.volume_file)
 
     def execute(*cmd, **kwargs):
         if 'run_as_root' not in kwargs:
