@@ -73,7 +73,7 @@ class VolumeDataset(object):
         payload = self.payload
         payload['path'] = self.volume_path
         self.driver.nef.filesystems.create(payload)
-        self.driver._set_volume_acl(volume)
+        self.driver._set_volume_acl(self.volume)
 
         payload = {'size': self.file_size}
         if self.vsolution and self.file_format == VOLUME_FORMAT_RAW:
@@ -86,8 +86,8 @@ class VolumeDataset(object):
             volume_file = VolumeFile(self.driver, self.volume,
                                      self.file_format)
             volume_file.create(payload)
-        if not self.volume:
-            self.driver._set_volume_reservation(volume, self.file_size, self.file_format)
+        if not self.sparse:
+            self.driver._set_volume_reservation(self.volume, self.file_size, self.file_format)
 
 class VolumeFile(object):
     def __init__(self, driver, volume, volume_format):
