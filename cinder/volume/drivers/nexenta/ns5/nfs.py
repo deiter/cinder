@@ -108,7 +108,7 @@ class VolumeFile(object):
                                        self.file_name,
                                        payload)
         else:
-            if self.format_format == VOLUME_FORMAT_QCOW2:
+            if self.file_format == VOLUME_FORMAT_QCOW2:
                 payload['preallocation'] = 'metadata'
             volume_options = ','.join(['%s=%s' % _ for _ in payload.items()])
             self.execute('qemu-img', 'create',
