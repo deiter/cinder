@@ -77,6 +77,10 @@ def roundup(numerator, denominator):
     return divup(numerator, denominator) * denominator
 
 
+def roundgb(numerator):
+    return roundup(numerator, units.Gi) // units.Gi
+
+
 def match_template(template, name):
     if not (name and isinstance(name, six.string_types) and
             template and isinstance(template, six.string_types)):
@@ -96,3 +100,19 @@ def match_template(template, name):
     except ValueError:
         return False
     return True
+
+
+def prt2tpg(portals):
+    """Convert list of dicts to list.
+
+    :param portals: list of portals dicts
+    :returns flat list of portals
+    """
+    tpg = []
+    for portal in portals:
+        hostport = '%(host)s:%(port)s' % {
+            'host': portal['address'],
+            'port': portal['port']
+        }
+        tpg.append(hostport)
+    return tpg

@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -13,18 +12,18 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 """
-Unit tests for OpenStack Cinder volume driver
+Unit tests for NexentaStor5 NFS Cinder volume driver
 """
+
 import hashlib
 import os
 import posixpath
+from unittest import mock
 
-import mock
 from oslo_utils import units
 
 from cinder import context
 from cinder import db
-from cinder import test
 from cinder.tests.unit.consistencygroup.fake_cgsnapshot import (
     fake_cgsnapshot_obj as fake_cgsnapshot)
 from cinder.tests.unit.consistencygroup.fake_consistencygroup import (
@@ -33,6 +32,7 @@ from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit.fake_snapshot import fake_snapshot_obj as fake_snapshot
 from cinder.tests.unit.fake_volume import fake_volume_obj as fake_volume
 from cinder.tests.unit.image import fake as fake_image
+from cinder.tests.unit import test
 from cinder.volume import configuration as conf
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta.ns5 import nfs

@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -13,17 +12,18 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 """
-Unit tests for OpenStack Cinder volume driver
+Unit tests for NexentaStor4 Cinder volume driver
 """
 
-import mock
-from mock import patch
+from unittest import mock
+from unittest.mock import patch
+
 from oslo_utils import units
 
 from cinder import context
 from cinder import db
 from cinder import exception
-from cinder import test
+from cinder.tests.unit import test
 from cinder.volume import configuration as conf
 from cinder.volume.drivers.nexenta import iscsi
 from cinder.volume.drivers.nexenta import jsonrpc

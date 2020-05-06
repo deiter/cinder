@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -13,20 +12,20 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 """
-Unit tests for NexentaStor 5 REST API helper
+Unit tests for NexentaStor5 REST API helper
 """
 
 import copy
 import hashlib
 import json
 import posixpath
+from unittest import mock
 import uuid
 
-import mock
 import requests
 import six
 
-from cinder import test
+from cinder.tests.unit import test
 from cinder.volume import configuration as conf
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 

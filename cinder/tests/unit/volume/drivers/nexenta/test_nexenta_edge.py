@@ -1,6 +1,4 @@
-#
-# Copyright 2015 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -15,12 +13,12 @@
 #    under the License.
 
 import json
-import mock
-from mock import patch
+from unittest import mock
+from unittest.mock import patch
 
 from cinder import context
 from cinder import exception
-from cinder import test
+from cinder.tests.unit import test
 from cinder.volume import configuration as conf
 from cinder.volume.drivers.nexenta.nexentaedge import iscsi
 
@@ -113,11 +111,13 @@ class TestNexentaEdgeISCSIDriver(test.TestCase):
         ]
 
         def my_side_effect(*args, **kwargs):
-                return {'data': {
+            return {
+                'data': {
                     'X-ISCSI-TargetName': ISCSI_TARGET_NAME,
                     'X-ISCSI-TargetID': 1,
-                    'X-VIPS': json.dumps(vips)}
+                    'X-VIPS': json.dumps(vips)
                 }
+            }
 
         self.mock_api.side_effect = my_side_effect
         self.driver.do_setup(self.context)
@@ -131,11 +131,13 @@ class TestNexentaEdgeISCSIDriver(test.TestCase):
         ]
 
         def my_side_effect(*args, **kwargs):
-                return {'data': {
+            return {
+                'data': {
                     'X-ISCSI-TargetName': ISCSI_TARGET_NAME,
                     'X-ISCSI-TargetID': 1,
-                    'X-VIPS': json.dumps(vips)}
+                    'X-VIPS': json.dumps(vips)
                 }
+            }
 
         self.mock_api.side_effect = my_side_effect
         self.assertRaises(exception.NexentaException,

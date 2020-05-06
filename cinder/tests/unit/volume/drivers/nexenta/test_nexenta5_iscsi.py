@@ -1,5 +1,4 @@
-# Copyright 2019 Nexenta Systems, Inc.
-# All Rights Reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -13,16 +12,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 """
-Unit tests for OpenStack Cinder volume driver
+Unit tests for NexentaStor5 iSCSI Cinder volume driver
 """
+
+from unittest import mock
 import uuid
 
-import mock
 from oslo_utils import units
 
 from cinder import context
 from cinder import db
-from cinder import test
 from cinder.tests.unit.consistencygroup.fake_cgsnapshot import (
     fake_cgsnapshot_obj as fake_cgsnapshot)
 from cinder.tests.unit.consistencygroup.fake_consistencygroup import (
@@ -30,6 +29,7 @@ from cinder.tests.unit.consistencygroup.fake_consistencygroup import (
 from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit.fake_snapshot import fake_snapshot_obj as fake_snapshot
 from cinder.tests.unit.fake_volume import fake_volume_obj as fake_volume
+from cinder.tests.unit import test
 from cinder.volume import configuration as conf
 from cinder.volume.drivers.nexenta.ns5 import iscsi
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
@@ -47,6 +47,8 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.cfg.volume_backend_name = 'nexenta_iscsi'
         self.cfg.nexenta_group_snapshot_template = 'group-snapshot-%s'
         self.cfg.nexenta_origin_snapshot_template = 'origin-snapshot-%s'
+        self.cfg.nexenta_cache_image_template = 'cache-image-%s'
+        self.cfg.nexenta_cache_snapshot_template = 'cache-snapshot-%s'
         self.cfg.nexenta_migration_service_prefix = 'cinder-migration'
         self.cfg.nexenta_migration_throttle = 100
         self.cfg.nexenta_dataset_description = ''
@@ -59,8 +61,9 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.cfg.nexenta_iscsi_target_portal_port = 3260
         self.cfg.nexenta_target_prefix = 'iqn:cinder'
         self.cfg.nexenta_target_group_prefix = 'cinder'
-        self.cfg.nexenta_ns5_blocksize = 32
+        # self.cfg.nexenta_ns5_blocksize = 32
         self.cfg.nexenta_sparse = True
+        self.cfg.nexenta_image_cache = True
         self.cfg.nexenta_lu_writebackcache_disabled = True
         self.cfg.nexenta_dataset_compression = 'on'
         self.cfg.nexenta_dataset_dedup = 'off'
@@ -69,7 +72,7 @@ class TestNexentaISCSIDriver(test.TestCase):
         self.cfg.nexenta_volume = 'pool'
         self.cfg.driver_ssl_cert_verify = False
         self.cfg.nexenta_luns_per_target = 20
-        self.cfg.driver_ssl_cert_verify = False
+        self.cfg.nexenta_blocksize = 8192
         self.cfg.nexenta_iscsi_target_portals = '1.1.1.1:3260,2.2.2.2:3260'
         self.cfg.nexenta_iscsi_target_host_group = 'all'
         self.cfg.nexenta_rest_address = '1.1.1.1'
