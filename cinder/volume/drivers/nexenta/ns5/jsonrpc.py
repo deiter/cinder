@@ -324,7 +324,6 @@ class NefCollections(object):
     def __init__(self, proxy):
         self.proxy = proxy
         self.namespace = 'nexenta'
-        self.prefix = 'instance'
         self.root = '/collections'
         self.subj = 'collection'
         self.properties = []
@@ -334,7 +333,7 @@ class NefCollections(object):
         return posixpath.join(self.root, quoted_name)
 
     def key(self, name):
-        return '%s:%s_%s' % (self.namespace, self.prefix, name)
+        return '%s:%s_%s' % (self.namespace, self.subj, name)
 
     def get(self, name, payload=None):
         LOG.debug('Get properties of %(subj)s %(name)s: %(payload)s',
@@ -392,8 +391,41 @@ class NefVsolutions(NefCollections):
     def __init__(self, proxy):
         super(NefVsolutions, self).__init__(proxy)
         self.root = '/vsolution/filesystems'
-        self.subj = 'vsolution'
+        self.subj = 'volume'
         self.slot = 'files'
+        self.properties = [
+            {
+                'name': self.key('format'),
+                'api': 'volumeFormat',
+                'cfg': 'nexenta_volume_format',
+                'title': 'Volume format',
+                'description': _('Controls volume format.'),
+                'enum': ['raw', 'qcow', 'qcow2', 'parallels',
+                         'vdi', 'vhdx', 'vmdk', 'vpc', 'qed'],
+                'type': 'string',
+                'default': 'raw'
+            },
+            {
+                'name': self.key('thin_provisioning'),
+                'api': 'sparseVolume',
+                'cfg': 'nexenta_sparsed_volumes',
+                'title': 'Thin provisioning',
+                'inherit': _('Provisioning type cannot be inherit.'),
+                'description': _('Controls if a volume is created sparse '
+                                 '(with no space reservation).'),
+                'type': 'boolean',
+                'default': True
+            },
+            {
+                'name': self.key('vsolution'),
+                'api': 'vSolution',
+                'cfg': 'nexenta_vsolution',
+                'title': 'vSolution API',
+                'description': _('Enables NexentaStor vSolution API.'),
+                'type': 'boolean',
+                'default': False
+            }
+        ]
 
     def path(self, parent, name):
         quoted_parent = six.moves.urllib.parse.quote_plus(parent)
@@ -453,36 +485,8 @@ class NefVolumeGroups(NefDatasets, NefCollections):
     def __init__(self, proxy):
         super(NefVolumeGroups, self).__init__(proxy)
         self.root = '/storage/volumeGroups'
-        self.subj = 'volume group'
-
-    def rollback(self, name, payload=None):
-        LOG.debug('Rollback %(subj)s %(name)s: %(payload)s',
-                  {'subj': self.subj, 'name': name, 'payload': payload})
-        path = posixpath.join(self.path(name), 'rollback')
-        return self.proxy.post(path, payload)
-
-
-class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
-
-    def __init__(self, proxy):
-        super(NefVolumes, self).__init__(proxy)
-        self.prefix = 'volume'
-        self.root = '/storage/volumes'
-        self.subj = 'volume'
+        self.subj = 'volumegroup'
         self.properties = [
-            {
-                'name': self.key('blocksize'),
-                'api': 'volumeBlockSize',
-                'cfg': 'nexenta_blocksize',
-                'title': 'Block size',
-                'retype': _('Volume block size cannot be changed after '
-                            'the volume has been created.'),
-                'description': _('Controls the block size of a volume.'),
-                'type': 'integer',
-                'enum': [512, 1024, 2048, 4096, 8192,
-                         16384, 32768, 65536, 131072],
-                'default': 32768
-            },
             {
                 'name': self.key('checksum'),
                 'api': 'checksumMode',
@@ -576,17 +580,6 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
                 'default': 'all'
             },
             {
-                'name': self.key('thin_provisioning'),
-                'api': 'sparseVolume',
-                'cfg': 'nexenta_sparsed_volumes',
-                'title': 'Thin provisioning',
-                'inherit': _('Provisioning type cannot be inherit.'),
-                'description': _('Controls if a volume is created sparse '
-                                 '(with no space reservation).'),
-                'type': 'boolean',
-                'default': True
-            },
-            {
                 'name': self.key('sync'),
                 'api': 'syncMode',
                 'title': 'Sync mode',
@@ -618,6 +611,46 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
             }
         ]
 
+    def rollback(self, name, payload=None):
+        LOG.debug('Rollback %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
+        path = posixpath.join(self.path(name), 'rollback')
+        return self.proxy.post(path, payload)
+
+
+class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
+
+    def __init__(self, proxy):
+        super(NefVolumes, self).__init__(proxy)
+        self.root = '/storage/volumes'
+        self.subj = 'volume'
+        self.properties += [
+            {
+                'name': self.key('blocksize'),
+                'api': 'volumeBlockSize',
+                'cfg': 'nexenta_blocksize',
+                'title': 'Block size',
+                'retype': _('Volume block size cannot be changed after '
+                            'the volume has been created.'),
+                'description': _('Specifies the block size of the volume.'),
+                'type': 'integer',
+                'enum': [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
+                         131072],
+                'default': 32768
+            },
+            {
+                'name': self.key('thin_provisioning'),
+                'api': 'sparseVolume',
+                'cfg': 'nexenta_sparsed_volumes',
+                'title': 'Thin provisioning',
+                'inherit': _('Provisioning type cannot be inherit.'),
+                'description': _('Controls if a volume is created sparse '
+                                 '(with no space reservation).'),
+                'type': 'boolean',
+                'default': True
+            }
+        ]
+
     def promote(self, name, payload=None):
         LOG.debug('Promote %(subj)s %(name)s: %(payload)s',
                   {'subj': self.subj, 'name': name, 'payload': payload})
@@ -625,78 +658,69 @@ class NefVolumes(NefVolumeGroups, NefDatasets, NefCollections):
         return self.proxy.post(path, payload)
 
 
-class NefFilesystems(NefVolumes, NefVolumeGroups, NefDatasets, NefCollections):
+class NefFilesystems(NefVolumeGroups, NefDatasets, NefCollections):
 
     def __init__(self, proxy):
         super(NefFilesystems, self).__init__(proxy)
         self.root = '/storage/filesystems'
         self.subj = 'filesystem'
-        for prop in self.properties:
-            if prop['name'] == self.key('blocksize'):
-                del prop['retype']
-                prop['api'] = 'recordSize'
-                prop['description'] = _('Specifies a suggested block size '
-                                        'for a volume.')
-                prop['enum'] = [512, 1024, 2048, 4096, 8192, 16384, 32768,
-                                65536, 131072, 262144, 524288, 1048576]
-        self.properties.append({
-            'name': self.key('rate_limit'),
-            'api': 'rateLimit',
-            'title': 'Transfer rate limit',
-            'description': _('Controls a transfer rate limit '
-                             '(bytes per second) for a volume.'),
-            'type': 'integer',
-            'default': 0
-        })
-        self.properties.append({
-            'name': self.key('nbmand'),
-            'api': 'nonBlockingMandatoryMode',
-            'title': 'Non-blocking mandatory locking',
-            'description': _('Allow or disallow non-blocking mandatory '
-                             'locking semantics for a volume.'),
-            'type': 'boolean',
-            'default': False
-        })
-        self.properties.append({
-            'name': self.key('smart_compression'),
-            'api': 'smartCompression',
-            'title': 'Smart compression',
-            'description': _('Allow or disallow dynamically tracks volume '
-                             'compression ratios to determine if a volume '
-                             'data is compressible or not.'),
-            'type': 'boolean',
-            'default': False
-        })
-        self.properties.append({
-            'name': self.key('snapdir'),
-            'api': 'snapshotDirectory',
-            'title': '.zfs directory visibility',
-            'description': _('Controls whether the .zfs directory '
-                             'is hidden or visible in the root of '
-                             'the volume file system.'),
-            'type': 'boolean',
-            'default': False
-        })
-        self.properties.append({
-            'name': self.key('format'),
-            'api': 'volumeFormat',
-            'cfg': 'nexenta_volume_format',
-            'title': 'Volume format',
-            'description': _('Controls volume format.'),
-            'enum': ['raw', 'qcow', 'qcow2', 'parallels',
-                     'vdi', 'vhdx', 'vmdk', 'vpc', 'qed'],
-            'type': 'string',
-            'default': 'raw'
-        })
-        self.properties.append({
-            'name': self.key('vsolution'),
-            'api': 'vSolution',
-            'cfg': 'nexenta_vsolution',
-            'title': 'vSolution API',
-            'description': _('Enables NexentaStor vSolution API.'),
-            'type': 'boolean',
-            'default': False
-        })
+        self.properties += [
+            {
+                'name': self.key('blocksize'),
+                'api': 'recordSize',
+                'cfg': 'nexenta_blocksize',
+                'title': 'Block size',
+                'description': _('Specifies the maximum size of a logical '
+                                 'block for a volume.')
+                'type': 'integer',
+                'enum': [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
+                         131072, 262144, 524288, 1048576],
+                'default': 32768
+            },
+                'name': self.key('nbmand'),
+                'api': 'nonBlockingMandatoryMode',
+                'title': 'Non-blocking mandatory locking',
+                'description': _('Allow or disallow non-blocking mandatory '
+                                 'locking semantics for a volume.'),
+                'type': 'boolean',
+                'default': False
+            },
+            {
+                'name': self.key('rate_limit'),
+                'api': 'rateLimit',
+                'title': 'Transfer rate limit',
+                'description': _('Controls a transfer rate limit '
+                                 '(bytes per second) for a volume.'),
+                'type': 'integer',
+                'default': 0
+            },
+            {
+                'name': self.key('smart_compression'),
+                'api': 'smartCompression',
+                'title': 'Smart compression',
+                'description': _('Allow or disallow dynamically tracks '
+                                 'volume compression ratios to determine '
+                                 'if a volume data is compressible or not.'),
+                'type': 'boolean',
+                'default': False
+            },
+            {
+                'name': self.key('snapdir'),
+                'api': 'snapshotDirectory',
+                'title': '.zfs directory visibility',
+                'description': _('Controls whether the .zfs directory is '
+                                 'hidden or visible in the root of the '
+                                 'volume file system.'),
+                'type': 'boolean',
+                'default': False
+            }
+        ]
+
+    def promote(self, name, payload=None):
+        LOG.debug('Promote %(subj)s %(name)s: %(payload)s',
+                  {'subj': self.subj, 'name': name, 'payload': payload})
+        path = posixpath.join(self.path(name), 'promote')
+        return self.proxy.post(path, payload)
 
     def mount(self, name, payload=None):
         LOG.debug('Mount %(subj)s %(name)s: %(payload)s',
@@ -722,7 +746,7 @@ class NefHpr(NefCollections):
     def __init__(self, proxy):
         super(NefHpr, self).__init__(proxy)
         self.root = '/hpr/services'
-        self.subj = 'HPR service'
+        self.subj = 'hpr'
 
     def activate(self, path):
         LOG.debug('Activate dataset: %(path)s',
@@ -743,7 +767,7 @@ class NefRsf(NefCollections):
     def __init__(self, proxy):
         super(NefRsf, self).__init__(proxy)
         self.root = '/rsf/clusters'
-        self.subj = 'RSF Clusters'
+        self.subj = 'cluster'
 
 
 class NefServices(NefCollections):
@@ -759,7 +783,7 @@ class NefNfs(NefCollections):
     def __init__(self, proxy):
         super(NefNfs, self).__init__(proxy)
         self.root = '/nas/nfs'
-        self.subj = 'NFS'
+        self.subj = 'nfs'
 
 
 class NefTargets(NefCollections):
@@ -767,7 +791,7 @@ class NefTargets(NefCollections):
     def __init__(self, proxy):
         super(NefTargets, self).__init__(proxy)
         self.root = '/san/iscsi/targets'
-        self.subj = 'iSCSI target'
+        self.subj = 'target'
 
 
 class NefHostGroups(NefCollections):
@@ -775,7 +799,7 @@ class NefHostGroups(NefCollections):
     def __init__(self, proxy):
         super(NefHostGroups, self).__init__(proxy)
         self.root = '/san/hostgroups'
-        self.subj = 'host group'
+        self.subj = 'hostgroup'
 
 
 class NefTargetsGroups(NefCollections):
@@ -783,7 +807,7 @@ class NefTargetsGroups(NefCollections):
     def __init__(self, proxy):
         super(NefTargetsGroups, self).__init__(proxy)
         self.root = '/san/targetgroups'
-        self.subj = 'target group'
+        self.subj = 'targetgroup'
 
 
 class NefLunMappings(NefCollections):
@@ -791,16 +815,15 @@ class NefLunMappings(NefCollections):
     def __init__(self, proxy):
         super(NefLunMappings, self).__init__(proxy)
         self.root = '/san/lunMappings'
-        self.subj = 'LUN mapping'
+        self.subj = 'mapping'
 
 
 class NefLogicalUnits(NefCollections):
 
     def __init__(self, proxy):
         super(NefLogicalUnits, self).__init__(proxy)
-        self.prefix = 'logical_unit'
         self.root = '/san/logicalUnits'
-        self.subj = 'logical unit'
+        self.subj = 'logicalunit'
         self.properties = [
             {
                 'name': self.key('writeback_cache_disabled'),
@@ -829,7 +852,7 @@ class NefNetAddresses(NefCollections):
     def __init__(self, proxy):
         super(NefNetAddresses, self).__init__(proxy)
         self.root = '/network/addresses'
-        self.subj = 'network address'
+        self.subj = 'address'
 
 
 class NefProxy(object):
