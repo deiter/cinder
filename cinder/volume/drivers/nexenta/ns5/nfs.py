@@ -55,6 +55,135 @@ VOLUME_FORMAT_VPC = 'vpc'
 VOLUME_FORMAT_QED = 'qed'
 
 
+class VolumeDataset(object):
+    def __init__(self, driver, volume):
+        self.driver = driver
+        self.volume = volume
+        self.volume_path = driver._get_volume_path(volume)
+        self.file_size = volume['size'] * units.Gi
+        self.file_name = VOLUME_FILE_NAME
+        properties = driver.nef.filesystems.properties
+        payload = self.driver._get_vendor_properties(properties, volume)
+        self.sparse = payload.pop('sparseVolume')
+        self.file_format = payload.pop('volumeFormat')
+        self.vsolution = payload.pop('vSolution')
+        self.payload = payload
+
+    def create(self):
+        payload = self.payload
+        payload['path'] = self.path
+        self.driver.nef.filesystems.create(payload)
+        self.driver._set_volume_acl(volume)
+        payload = {'size': self.file_size}
+        if self.vsolution and self.file_format == VOLUME_FORMAT_RAW:
+            if self.driver.nas_secure_file_permissions:
+                payload['mode'] = '660'
+            self.driver.nef.vsolutions.create(self.volume_path,
+                                              self.file_name,
+                                              payload)
+        else:
+            volume_file = VolumeFile(self.driver, self.volume,
+                                     self.file_format)
+            volume_file.create(payload)
+        if not self.volume:
+            self.driver._set_volume_reservation(volume, self.file_size, self.file_format)
+
+class VolumeFile(object):
+    def __init__(self, driver, volume, volume_format):
+        self.driver = driver
+        self.volume = volume
+        self.volume_format = volume_format
+        self.volume_name = volume['name']
+        self.volume_file = driver.local_path(volume)
+        self.root = driver._execute_as_root
+        self.mount()
+
+    def __del__(self):
+        self.unmount()
+
+    def mount(self):
+        self.driver._mount_volume(self.volume)
+
+    def unmount(self):
+        self.driver._unmount_volume(self.volume)
+
+    def create(self, payload):
+        if self.volume_format == VOLUME_FORMAT_QCOW2:
+            payload['preallocation'] = 'metadata'
+        volume_options = ','.join(['%s=%s' % _ for _ in payload.items()])
+        self._execute('qemu-img', 'create',
+                      '-o', volume_options,
+                      '-f', self.volume_format,
+                      self.volume_file
+                      run_as_root=self.root)
+
+    def execute(*cmd, **kwargs):
+        if 'run_as_root' not in kwargs:
+            kwargs['run_as_root'] = self.root
+        self.driver._execute(*cmd, **kwargs)
+
+    def convert(self, new_format):
+        backup_file = '%(path)s.%(format)s' % {
+            'path': self.volume_file,
+            'format': self.volume_format
+        }
+        try:
+            self.execute('mv', self.volume_file, backup_file)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to rename backend file %(volume_file)s '
+                         'to %(backup_file)s before converting volume '
+                         '%(volume)s: %(error)s')
+                       % {'volume_file': self.volume_file,
+                          'backup_file': backup_file,
+                          'volume': self.volume_name,
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+        try:
+            self.execute('qemu-img', 'convert', '-f', self.volume_format,
+                         '-O', new_format, backup_file, self.volume_file)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to convert %(src_format)s volume file '
+                         '%(backup_file)s to %(dst_format)s volume file '
+                         '%(volume_file)s for volume %(volume)s: %(error)s')
+                       % {'src_format': self.volume_format,
+                          'backup_file': backup_file,
+                          'dst_format': new_format,
+                          'volume_file': self.volume_file,
+                          'volume': self.volume_name,
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+        try:
+            self.execute('rm', '-f', backup_file)
+        except OSError as error:
+            code = errno.errorcode[error.errno]
+            message = (_('Failed to delete %(src_format)s backup '
+                         'file %(backup_file)s after converting '
+                         'volume %(volume)s: %(error)s')
+                       % {'src_format': src_format,
+                          'backup_file': backup_file,
+                          'volume': volume['name'],
+                          'error': error.strerror})
+            raise jsonrpc.NefException(code=code, message=message)
+        LOG.debug('Successfully converted volume %(volume)s from '
+                  '%(src_format)s to %(dst_format)s format',
+                  {'volume': volume['name'],
+                   'src_format': src_format,
+                   'dst_format': dst_format})
+        backup_volume = '%(path)s.%(format)s' % {
+            'path': self.volume_path,
+            'format': self.volume_format
+        }
+
+    @property
+    def info(self):
+        return image_utils.qemu_img_info(
+            self.image,
+            force_share=True,
+            run_as_root=self.root)
+
+
 @interface.volumedriver
 class NexentaNfsDriver(nfs.NfsDriver):
     """Executes volume driver commands on Nexenta Appliance.
@@ -465,100 +594,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        'error': error})
             raise
 
-    def _change_volume_format(self, volume, volume_file, src_format,
-                              dst_format):
-        backup_file = '%(path)s.%(format)s' % {
-            'path': volume_file,
-            'format': src_format
-        }
-        try:
-            self._execute('mv', volume_file, backup_file,
-                          run_as_root=self._execute_as_root)
-        except OSError as error:
-            code = errno.errorcode[error.errno]
-            message = (_('Failed to rename backend file %(volume_file)s '
-                         'to %(backup_file)s before converting volume '
-                         '%(volume)s: %(error)s')
-                       % {'volume_file': volume_file,
-                          'backup_file': backup_file,
-                          'volume': volume['name'],
-                          'error': error.strerror})
-            raise jsonrpc.NefException(code=code, message=message)
-        try:
-            self._execute('qemu-img', 'convert',
-                          '-f', src_format,
-                          '-O', dst_format,
-                          backup_file,
-                          volume_file,
-                          run_as_root=self._execute_as_root)
-        except OSError as error:
-            code = errno.errorcode[error.errno]
-            message = (_('Failed to convert %(src_format)s file '
-                         '%(backup_file)s to %(dst_format)s file '
-                         '%(volume_file)s for volume %(volume)s: %(error)s')
-                       % {'src_format': src_format,
-                          'backup_file': backup_file,
-                          'dst_format': dst_format,
-                          'volume_file': volume_file,
-                          'volume': volume['name'],
-                          'error': error.strerror})
-            raise jsonrpc.NefException(code=code, message=message)
-        try:
-            self._execute('rm', '-f', backup_file,
-                          run_as_root=self._execute_as_root)
-        except OSError as error:
-            code = errno.errorcode[error.errno]
-            message = (_('Failed to delete %(src_format)s backup '
-                         'file %(backup_file)s after converting '
-                         'volume %(volume)s: %(error)s')
-                       % {'src_format': src_format,
-                          'backup_file': backup_file,
-                          'volume': volume['name'],
-                          'error': error.strerror})
-            raise jsonrpc.NefException(code=code, message=message)
-        LOG.debug('Successfully converted volume %(volume)s from '
-                  '%(src_format)s to %(dst_format)s format',
-                  {'volume': volume['name'],
-                   'src_format': src_format,
-                   'dst_format': dst_format})
-
-    @coordination.synchronized('{self.nef.lock}')
     def create_volume(self, volume):
         """Creates a volume.
 
         :param volume: volume reference
         """
-        volume_path = self._get_volume_path(volume)
-        volume_size = volume['size'] * units.Gi
-        properties = self.nef.filesystems.properties
-        payload = self._get_vendor_properties(properties, volume)
-        sparse_volume = payload.pop('sparseVolume')
-        volume_format = payload.pop('volumeFormat')
-        volume_vsolution = payload.pop('vSolution')
-        payload['path'] = volume_path
-        self.nef.filesystems.create(payload)
-        if not sparse_volume:
-            self._set_volume_reservation(volume, volume_size, volume_format)
-        self._set_volume_acl(volume)
-        payload = {'size': volume_size}
-        if volume_vsolution and volume_format == VOLUME_FORMAT_RAW:
-            if self.nas_secure_file_permissions:
-                payload['mode'] = '660'
-            self.nef.vsolutions.create(volume_path, VOLUME_FILE_NAME, payload)
-        else:
-            nfs_share, mount_point, volume_file = self._mount_volume(volume)
-            if volume_format == VOLUME_FORMAT_QCOW2:
-                payload['preallocation'] = 'metadata'
-            volume_options = ','.join(['%s=%s' % _ for _ in payload.items()])
-            self._execute('qemu-img', 'create',
-                          '-f', volume_format,
-                          '-o', volume_options,
-                          volume_file,
-                          run_as_root=self._execute_as_root)
-            self._unmount_volume(volume, nfs_share, mount_point)
+        volume_dataset = VolumeDataset(self, volume)
+        volume_dataset.create()
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
+        extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
         volume_info = self._get_image_info(volume_file)
         volume_format = volume_info.file_format
@@ -567,7 +613,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'image': image_id,
                    'format': volume_format,
                    'volume': volume['name']})
-        if volume_format not in [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]:
+        if volume_info.file_format not in extendable_formats:
             volume_format = VOLUME_FORMAT_RAW
         image_utils.fetch_to_volume_format(ctxt, image_service, image_id,
                                            volume_file, volume_format,
@@ -575,44 +621,39 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                            run_as_root=self._execute_as_root)
         image_utils.resize_image(volume_file, volume['size'],
                                  run_as_root=self._execute_as_root)
-        if volume_format not in [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]:
-            volume_new_format = volume_info.file_format
+        if volume_info.file_format not in extendable_formats:
             self._change_volume_format(volume, volume_file, volume_format,
-                                       volume_new_format)
+                                       volume_info.file_format)
         self._unmount_volume(volume, nfs_share, mount_point)
 
-    def _verify_cache_image(self, ctxt, volume, image_meta, image_service):
-        properties = self.nef.filesystems.properties
-        volume_type_specs = self._get_vendor_properties(properties, volume)
-        volume_format = volume_type_specs['volumeFormat']
-        image_id = image_meta['id']
-        image_checksum = image_meta['checksum']
-        namespace = uuid.UUID(image_id, version=4)
-        name = '%s:%s' % (image_checksum, volume_format)
-        name = nexenta_utils.native_string(name)
-        cache_uuid = uuid.uuid5(namespace, name)
-        cache_id = six.text_type(cache_uuid)
-        cache = {
-            'id': cache_id,
-            'name': self.cache_image_template % cache_id,
-            'volume_type_id': volume['volume_type_id']
-        }
+    @coordination.synchronized('{self.nef.lock}-{cache[name]}')
+    def _create_cache_image(self, ctxt, cache, image_meta, image_service):
+        cache_exist = False
         cache_path = self._get_volume_path(cache)
         payload = {'fields': 'readOnly'}
-        cache_exist = False
         try:
             cache_specs = self.nef.filesystems.get(cache_path, payload)
-            if not cache_specs['readOnly']:
-                self.delete_volume(cache)
-            else:
+            if cache_specs['readOnly']:
                 cache_exist = True
+            else:
+                self.delete_volume(cache)
         except jsonrpc.NefException as error:
             if error.code != 'ENOENT':
                 raise
         if not cache_exist:
-            with image_utils.TemporaryImages.fetch(image_service, ctxt,
-                                                   image_id) as image_file:
-                image_info = self._get_image_info(image_file)
+            properties = self.nef.filesystems.properties
+            payload = self._get_vendor_properties(properties, cache)
+            sparse_cache = payload.pop('sparseVolume')
+            cache_format = payload.pop('volumeFormat')
+            cache_vsolution = payload.pop('vSolution')
+            payload['path'] = cache_path
+            self.nef.filesystems.create(payload)
+            self._set_volume_acl(cache)
+            
+            self.create_volume(cache)
+            self.copy_image_to_volume(ctxt, cache, image_service, image_id)
+            payload = {'readOnly': True}
+            self.nef.filesystems.set(cache_path, payload)
         else:
             nfs_share, mount_point, cache_file = self._mount_volume(cache)
             image_info = self._get_image_info(cache_file)
@@ -631,10 +672,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'volume_size': volume['size']})
             raise jsonrpc.NefException(code=code, message=message)
         if not cache_exist:
-            self.create_volume(cache)
-            self.copy_image_to_volume(ctxt, cache, image_service, image_id)
-            payload = {'readOnly': True}
-            self.nef.filesystems.set(cache_path, payload)
         return cache
 
     def _verify_cache_snapshot(self, cache):
@@ -655,7 +692,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.create_snapshot(snapshot)
         return snapshot
 
-    @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
     def clone_image(self, ctxt, volume, image_location, image_meta,
                     image_service):
         """Create a volume efficiently from an existing image.
@@ -678,11 +714,39 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         if not self.image_cache:
             return None, False
+
+        properties = self.nef.filesystems.properties
+        volume_type_specs = self._get_vendor_properties(properties, volume)
+
+        image_id = image_meta['id']
+        image_checksum = image_meta['checksum']
+        image_format = volume_type_specs['volumeFormat']
+        image_size = nexenta_utils.roundup(image_meta['size'], units.Gi)
+
+        image_name = '%(checksum)s:%(format)s' % {
+            'checksum': image_checksum,
+            'format': image_format
+        }
+
+        namespace = uuid.UUID(image_id, version=4)
+        name = nexenta_utils.native_string(image_name)
+
+        cache_id = six.text_type(uuid.uuid5(namespace, name))
+        cache_name = self.cache_image_template % cache_id
+        cache_size = image_size // units.Gi
+        cache_type_id = volume['volume_type_id']
+
+        cache = {
+            'id': cache_id,
+            'name': cache_name,
+            'size': cache_size,
+            'volume_type_id': cache_type_id
+        }
+
         try:
-            cache = self._verify_cache_image(ctxt, volume,
-                                             image_meta,
-                                             image_service)
-            snapshot = self._verify_cache_snapshot(cache)
+            snapshot = self._create_cache(ctxt, cache,
+                                          image_meta,
+                                          image_service)
             self.create_volume_from_snapshot(volume, snapshot)
         except jsonrpc.NefException as error:
             LOG.error('Failed to clone image %(image)s '
@@ -1121,13 +1185,50 @@ class NexentaNfsDriver(nfs.NfsDriver):
         }
         return connection_info
 
-    @coordination.synchronized('{self.nef.lock}')
+    def _demote_volume(self, volume, origin_path):
+        """Demote a volume.
+
+        :param volume: volume reference
+        :param origin_path: origin path
+        """
+        volume_path = self._get_volume_path(volume)
+        payload = {'parent': volume_path, 'fields': 'path'}
+        try:
+            items = self.nef.snapshots.list(payload)
+        except jsonrpc.NefException as error:
+            if error.code == 'ENOENT':
+                return origin_path
+            raise
+        snapshot_txg = 0
+        snapshot_path = None
+        clone_path = None
+        for item in items:
+            payload = {'fields': 'clones,creationTxg'}
+            try:
+                snapshot = self.nef.snapshots.get(item['path'], payload)
+            except jsonrpc.NefException as error:
+                if error.code == 'ENOENT':
+                    continue
+                raise
+            if snapshot['clones'] and snapshot['creationTxg'] > snapshot_txg:
+                clone_path = snapshot['clones'][0]
+                snapshot_txg = snapshot['creationTxg']
+                snapshot_path = snapshot['path']
+        if clone_path:
+            try:
+                self.nef.filesystems.promote(clone_path)
+            except jsonrpc.NefException as error:
+                if error.code in ['ENOENT', 'EBADARG']:
+                    return origin_path
+                raise
+            return snapshot_path
+        return origin_path
+
     def delete_volume(self, volume):
         """Deletes a volume.
 
         :param volume: volume reference
         """
-        self._unmount_volume(volume)
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'originalSnapshot'}
         try:
@@ -1136,51 +1237,30 @@ class NexentaNfsDriver(nfs.NfsDriver):
             if error.code == 'ENOENT':
                 return
             raise
-        volume_origin = volume_spec['originalSnapshot']
+        volume_exist = True
+        self._unmount_volume(volume)
+        origin = volume_spec['originalSnapshot']
         payload = {'force': True, 'snapshots': True}
-        try:
-            self.nef.filesystems.delete(volume_path, payload)
-        except jsonrpc.NefException as error:
-            if error.code != 'EEXIST':
+        while volume_exist:
+            try:
+                self.nef.filesystems.delete(volume_path, payload)
+            except jsonrpc.NefException as error:
+                if error.code == 'EEXIST':
+                    origin = self._demote_volume(volume, origin)
+                    continue
                 raise
-            snapshot_tree = {}
-            payload = {'parent': volume_path, 'fields': 'path'}
-            snapshots = self.nef.snapshots.list(payload)
-            for snapshot in snapshots:
-                snapshot_path = snapshot['path']
-                payload = {'fields': 'clones,creationTxg'}
-                snapshot_spec = self.nef.snapshots.get(snapshot_path, payload)
-                if snapshot_spec['clones']:
-                    snapshot_txg = snapshot_spec['creationTxg']
-                    snapshot_clones = snapshot_spec['clones']
-                    first_clone = snapshot_clones[0]
-                    snapshot_tree[snapshot_txg] = first_clone
-            if snapshot_tree:
-                latest_txg = max(snapshot_tree)
-                clone_path = snapshot_tree[latest_txg]
-                self.nef.filesystems.promote(clone_path)
-            payload = {'force': True, 'snapshots': True}
-            self.nef.filesystems.delete(volume_path, payload)
-        if not volume_origin:
+            volume_exist = False
+        if not origin:
             return
-        origin_path, snapshot_name = volume_origin.split('@')
+        origin_path, snapshot_name = origin.split('@')
+        if not nexenta_utils.match_template(self.cache_snapshot_template,
+                                            snapshot_name):
+            return
         origin_name = posixpath.basename(origin_path)
-        if nexenta_utils.match_template(self.origin_snapshot_template,
-                                        snapshot_name):
-            payload = {'defer': True}
-            try:
-                self.nef.snapshots.delete(volume_origin, payload)
-            except Exception:
-                pass
-        elif (nexenta_utils.match_template(self.cache_snapshot_template,
-                                           snapshot_name) and
-              nexenta_utils.match_template(self.cache_image_template,
-                                           origin_name)):
-            payload = {'force': True, 'snapshots': True}
-            try:
-                self.nef.filesystems.delete(origin_path, payload)
-            except Exception:
-                pass
+        if not nexenta_utils.match_template(self.cache_image_template,
+                                            origin_name):
+            return
+        self._delete_cache(origin_name, origin_path)
 
     def _delete(self, path):
         """Override parent method for safe remove mountpoint."""
@@ -1520,15 +1600,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def _get_volume_share(self, volume):
         """Return NFS share path for the volume."""
         volume_path = self._get_volume_path(volume)
-        get_payload = {'fields': 'mountPoint,isMounted'}
-        filesystem = self.nef.filesystems.get(volume_path, get_payload)
+        payload = {'fields': 'mountPoint,isMounted'}
+        filesystem = self.nef.filesystems.get(volume_path, payload)
         if filesystem['mountPoint'] == 'none':
-            activate_payload = {'datasetName': volume_path}
-            self.nef.hpr.activate(activate_payload)
-            filesystem = self.nef.filesystems.get(volume_path, get_payload)
+            self.nef.hpr.activate(volume_path)
+            filesystem = self.nef.filesystems.get(volume_path, payload)
         if not filesystem['isMounted']:
             self.nef.filesystems.mount(volume_path)
-        nfs_share = '%s:%s' % (self.nas_host, filesystem['mountPoint'])
+        nfs_share = '%(host)s:%(path)s' % {
+            'host': self.nas_host,
+            'path': filesystem['mountPoint']
+        }
         return nfs_share
 
     def _get_volume_path(self, volume):

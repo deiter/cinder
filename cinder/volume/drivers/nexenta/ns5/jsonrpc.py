@@ -724,11 +724,11 @@ class NefHpr(NefCollections):
         self.root = '/hpr/services'
         self.subj = 'HPR service'
 
-    def activate(self, payload=None):
-        LOG.debug('Activate %(payload)s',
-                  {'payload': payload})
-        root = posixpath.dirname(self.root)
-        path = posixpath.join(root, 'activate')
+    def activate(self, path):
+        LOG.debug('Activate dataset: %(path)s',
+                  {'path': path})
+        path = '/hpr/activate'
+        payload = {'datasetName': path}
         return self.proxy.post(path, payload)
 
     def start(self, name, payload=None):
