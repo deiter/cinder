@@ -671,7 +671,7 @@ class NefFilesystems(NefVolumeGroups, NefDatasets, NefCollections):
                 'cfg': 'nexenta_blocksize',
                 'title': 'Block size',
                 'description': _('Specifies the maximum size of a logical '
-                                 'block for a volume.')
+                                 'block for a volume.'),
                 'type': 'integer',
                 'enum': [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
                          131072, 262144, 524288, 1048576],
