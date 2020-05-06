@@ -71,9 +71,10 @@ class VolumeDataset(object):
 
     def create(self):
         payload = self.payload
-        payload['path'] = self.path
+        payload['path'] = self.volume_path
         self.driver.nef.filesystems.create(payload)
         self.driver._set_volume_acl(volume)
+
         payload = {'size': self.file_size}
         if self.vsolution and self.file_format == VOLUME_FORMAT_RAW:
             if self.driver.nas_secure_file_permissions:
