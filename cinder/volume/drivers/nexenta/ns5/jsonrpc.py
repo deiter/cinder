@@ -677,6 +677,7 @@ class NefFilesystems(NefVolumeGroups, NefDatasets, NefCollections):
                          131072, 262144, 524288, 1048576],
                 'default': 32768
             },
+            {
                 'name': self.key('nbmand'),
                 'api': 'nonBlockingMandatoryMode',
                 'title': 'Non-blocking mandatory locking',
