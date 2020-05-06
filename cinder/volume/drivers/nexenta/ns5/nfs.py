@@ -101,10 +101,11 @@ class VolumeFile(object):
 
     def create(self):
         payload = {'size': self.file_size}
-        if self.file_remote and volume_format == VOLUME_FORMAT_RAW:
+        if self.file_remote and self.file_format == VOLUME_FORMAT_RAW:
             if self.driver.nas_secure_file_permissions:
                 payload['mode'] = '660'
-            self.nef.vsolutions.create(self.volume_path, self.file_name,
+            self.nef.vsolutions.create(self.volume_path,
+                                       self.file_name,
                                        payload)
         else:
             if self.format_format == VOLUME_FORMAT_QCOW2:
