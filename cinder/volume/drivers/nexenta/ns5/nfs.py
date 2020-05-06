@@ -670,7 +670,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'cache_size': cache['size'],
                           'volume_size': volume['size']})
             raise jsonrpc.NefException(code=code, message=message)
-        if not cache_exist:
+        #if not cache_exist:
         return cache
 
     def _verify_cache_snapshot(self, cache):
