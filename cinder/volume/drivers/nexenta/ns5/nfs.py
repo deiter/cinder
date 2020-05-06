@@ -622,7 +622,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
         volume_file = VolumeFile(self, volume)
-        volume_file.copy_image(volume, image_service, image_id)
+        volume_file.copy_image(ctxt, volume, image_service, image_id)
 
     @coordination.synchronized('{self.nef.lock}-{cache[name]}')
     def _verify_cache(self, ctxt, cache, image_meta, image_service):
