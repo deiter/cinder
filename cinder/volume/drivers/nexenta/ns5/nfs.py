@@ -193,7 +193,7 @@ class VolumeFile(object):
     @property
     def info(self):
         return image_utils.qemu_img_info(
-            self.volume_file,
+            self.file_path,
             force_share=True,
             run_as_root=self.root)
 
