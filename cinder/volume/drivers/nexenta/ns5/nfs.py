@@ -121,7 +121,7 @@ class VolumeFile(object):
             kwargs['run_as_root'] = self.root
         self.driver._execute(*cmd, **kwargs)
 
-    def copy_image_to_volume(self, context, image_service, image_id):
+    def copy_image(self, context, image_service, image_id):
         volume_info = self.info
         extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
         volume_blocksize = self.driver.configuration.volume_dd_blocksize
@@ -622,7 +622,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
         volume_file = VolumeFile(self, volume)
         volume_file.copy_image(volume, image_service, image_id)
-
 
     @coordination.synchronized('{self.nef.lock}-{cache[name]}')
     def _verify_cache(self, ctxt, cache, image_meta, image_service):
