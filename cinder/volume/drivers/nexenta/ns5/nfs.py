@@ -123,13 +123,14 @@ class VolumeFile(object):
 
     def copy_image(self, context, image_service, image_id):
         info = self.info
+        file_format = info.file_format
+        file_blocksize = self.driver.configuration.volume_dd_blocksize
         extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
-        volume_blocksize = self.driver.configuration.volume_dd_blocksize
         if info.file_format not in extendable_formats:
             file_format = VOLUME_FORMAT_RAW
         image_utils.fetch_to_volume_format(context, image_service,
                                            image_id, self.file_path,
-                                           file_format, volume_blocksize,
+                                           file_format, file_blocksize,
                                            run_as_root=self.root)
         image_utils.resize_image(self.file_path, self.volume_size,
                                  run_as_root=self.root)
