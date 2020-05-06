@@ -386,9 +386,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
             return False
         specs = self.nef.filesystems.properties
         names = [spec['api'] for spec in specs if 'api' in spec]
-        names.remove('sparseVolume')
-        names.remove('volumeFormat')
-        names.remove('vSolution')
         names.append('mountPoint')
         names.append('isMounted')
         fields = ','.join(names)
