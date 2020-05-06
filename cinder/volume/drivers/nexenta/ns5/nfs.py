@@ -116,7 +116,7 @@ class VolumeFile(object):
                          '-f', self.file_format,
                          self.file_path)
 
-    def execute(*cmd, **kwargs):
+    def execute(self, *cmd, **kwargs):
         if 'run_as_root' not in kwargs:
             kwargs['run_as_root'] = self.root
         self.driver._execute(*cmd, **kwargs)
