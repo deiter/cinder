@@ -121,18 +121,20 @@ class VolumeFile(object):
             kwargs['run_as_root'] = self.root
         self.driver._execute(*cmd, **kwargs)
 
-    def copy_image_to_volume(self, image_service, image_id):
+    def copy_image_to_volume(self, context, image_service, image_id):
         volume_info = self.info
         extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
         volume_blocksize = self.driver.configuration.volume_dd_blocksize
         if volume_info.file_format not in extendable_formats:
             volume_format = VOLUME_FORMAT_RAW
-        image_utils.fetch_to_volume_format(self.context, image_service,
+        image_utils.fetch_to_volume_format(context, image_service,
                                            image_id, self.volume_file,
                                            volume_format, volume_blocksize,
                                            run_as_root=self.root)
         image_utils.resize_image(self.volume_file, self.volume_size,
                                  run_as_root=self.root)
+        if volume_info.file_format not in extendable_formats:
+            self.convert(volume_info.file_format)
 
     def convert(self, new_format):
         backup_file = '%(path)s.%(format)s' % {
@@ -612,32 +614,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         volume_dataset = VolumeDataset(self, volume)
         volume_dataset.create()
+        # TODO
         volume_file = VolumeFile(self, volume)
         volume_file.create()
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
-        extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
-        nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        volume_info = self._get_image_info(volume_file)
-        volume_format = volume_info.file_format
-        volume_blocksize = self.configuration.volume_dd_blocksize
-        LOG.debug('Copy image %(image)s to %(format)s volume %(volume)s',
-                  {'image': image_id,
-                   'format': volume_format,
-                   'volume': volume['name']})
-        if volume_info.file_format not in extendable_formats:
-            volume_format = VOLUME_FORMAT_RAW
-        image_utils.fetch_to_volume_format(ctxt, image_service, image_id,
-                                           volume_file, volume_format,
-                                           volume_blocksize,
-                                           run_as_root=self._execute_as_root)
-        image_utils.resize_image(volume_file, volume['size'],
-                                 run_as_root=self._execute_as_root)
-        if volume_info.file_format not in extendable_formats:
-            self._change_volume_format(volume, volume_file, volume_format,
-                                       volume_info.file_format)
-        self._unmount_volume(volume, nfs_share, mount_point)
+        volume_file = VolumeFile(self, volume)
+        volume_file.copy_image(volume, image_service, image_id)
 
 
     @coordination.synchronized('{self.nef.lock}-{cache[name]}')
