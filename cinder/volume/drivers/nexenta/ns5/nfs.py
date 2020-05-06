@@ -122,19 +122,19 @@ class VolumeFile(object):
         self.driver._execute(*cmd, **kwargs)
 
     def copy_image(self, context, image_service, image_id):
-        volume_info = self.info
+        info = self.info
         extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
         volume_blocksize = self.driver.configuration.volume_dd_blocksize
-        if volume_info.file_format not in extendable_formats:
-            volume_format = VOLUME_FORMAT_RAW
+        if info.file_format not in extendable_formats:
+            file_format = VOLUME_FORMAT_RAW
         image_utils.fetch_to_volume_format(context, image_service,
-                                           image_id, self.volume_file,
-                                           volume_format, volume_blocksize,
+                                           image_id, self.file_path,
+                                           file_format, volume_blocksize,
                                            run_as_root=self.root)
-        image_utils.resize_image(self.volume_file, self.volume_size,
+        image_utils.resize_image(self.file_path, self.volume_size,
                                  run_as_root=self.root)
-        if volume_info.file_format not in extendable_formats:
-            self.convert(volume_info.file_format)
+        if info.file_format not in extendable_formats:
+            self.convert(info.file_format)
 
     def convert(self, new_format):
         backup_file = '%(path)s.%(format)s' % {
