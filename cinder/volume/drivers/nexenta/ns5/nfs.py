@@ -119,7 +119,7 @@ class VolumeFile(object):
                                            image_id, self.file_path,
                                            file_format, file_blocksize,
                                            run_as_root=self.root)
-        image_utils.resize_image(self.file_path, self.volume_size,
+        image_utils.resize_image(self.file_path, self.file_size,
                                  run_as_root=self.root)
         if self.file_format not in extendable_formats:
             self.convert(self.file_format)
