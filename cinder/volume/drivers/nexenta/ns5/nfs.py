@@ -649,13 +649,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         cache_file = VolumeFile(self, volume, spec)
         cache_file.copy_image(ctxt, image_service, image_id)
             
-            self.copy_image_to_volume(ctxt, cache, image_service, image_id)
-            payload = {'readOnly': True}
-            self.nef.filesystems.set(cache_path, payload)
-        else:
-            nfs_share, mount_point, cache_file = self._mount_volume(cache)
-            image_info = self._get_image_info(cache_file)
-            self._unmount_volume(cache, nfs_share, mount_point)
+        #    self.copy_image_to_volume(ctxt, cache, image_service, image_id)
+        #    payload = {'readOnly': True}
+        #    self.nef.filesystems.set(cache_path, payload)
+        #else:
+        #    nfs_share, mount_point, cache_file = self._mount_volume(cache)
+        #    image_info = self._get_image_info(cache_file)
+        #    self._unmount_volume(cache, nfs_share, mount_point)
+
         image_size = nexenta_utils.roundup(image_info.virtual_size, units.Gi)
         cache['size'] = image_size // units.Gi
         if cache['size'] > volume['size']:
