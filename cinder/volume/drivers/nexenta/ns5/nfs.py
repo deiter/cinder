@@ -76,7 +76,6 @@ class VolumeFile(object):
         self.volume = volume
         self.nef = driver.nef
         self.root = driver._execute_as_root
-        self.context = driver._context
         self.volume_size = volume['size']
         self.volume_name = volume['name']
         self.volume_path = driver._get_volume_path(volume)
@@ -138,9 +137,11 @@ class VolumeFile(object):
             self.convert(info.file_format)
 
     def convert(self, new_format):
+        # TODO
+        info = self.info
         backup_file = '%(path)s.%(format)s' % {
-            'path': self.volume_file,
-            'format': self.volume_format
+            'path': self.file_path,
+            'format': info.file_format
         }
         try:
             self.execute('mv', self.volume_file, backup_file)
@@ -613,8 +614,24 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param volume: volume reference
         """
-        volume_dataset = VolumeDataset(self, volume)
-        volume_dataset.create()
+        volume_path = self._get_volume_path(volume)
+        volume_size = volume['size'] * units.Gi
+
+        properties = self.nef.filesystems.properties
+        payload = self._get_vendor_properties(properties, volume)
+        payload['path'] = volume_path
+        self.nef.filesystems.create(payload)
+        self._set_volume_acl(volume)
+
+        properties = self.nef.vsolutions.properties
+        payload = self._get_vendor_properties(properties, volume)
+        
+        payload = {'size': volume_size}
+        
+
+
+        #volume_dataset = VolumeDataset(self, volume)
+        #volume_dataset.create()
         # TODO
         volume_file = VolumeFile(self, volume)
         volume_file.create()
@@ -639,7 +656,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             if error.code != 'ENOENT':
                 raise
         if not cache_exist:
-            self._create_volume(cache)
+            cache_dataset = VolumeDataset(self, cache)
+            volume_dataset.create()
             
             self.copy_image_to_volume(ctxt, cache, image_service, image_id)
             payload = {'readOnly': True}
@@ -2394,48 +2412,42 @@ class NexentaNfsDriver(nfs.NfsDriver):
         : return dictionary of vendor unique properties
         : return vendor name
         """
-        properties = {}
-        vendor_properties = []
+        vendor_properties = {}
         namespace = self.nef.filesystems.namespace
-        vendor_properties += self.nef.filesystems.properties
-        vendor_properties += self.nef.vsolutions.properties
+        props = self.nef.filesystems.properties
         keys = ['enum', 'default', 'minimum', 'maximum']
-        for vendor_spec in vendor_properties:
-            property_spec = {}
+        for prop in props:
+            spec = {}
             for key in keys:
-                if key in vendor_spec:
-                    value = vendor_spec[key]
-                    property_spec[key] = value
-            api = vendor_spec['api']
-            if 'cfg' in vendor_spec:
-                key = vendor_spec['cfg']
+                if key in prop:
+                    spec[key] = prop[key]
+            if 'cfg' in prop:
+                key = prop['cfg']
                 value = self.configuration.safe_get(key)
                 if value not in [None, '']:
-                    property_spec['default'] = value
-            elif api in self.nas_stat:
-                value = self.nas_stat[api]
-                property_spec['default'] = value
-            property_name = vendor_spec['name']
-            property_title = vendor_spec['title']
-            property_description = vendor_spec['description']
-            property_type = vendor_spec['type']
-            LOG.debug('Set %(product_name)s %(storage_protocol)s backend '
-                      '%(property_type)s property %(property_name)s: '
-                      '%(property_spec)s',
-                      {'product_name': self.product_name,
-                       'storage_protocol': self.storage_protocol,
-                       'property_type': property_type,
-                       'property_name': property_name,
-                       'property_spec': property_spec})
+                    spec['default'] = value
+            elif 'api' in prop:
+                api = prop['api']
+                if api in self.nas_stat:
+                    value = self.nas_stat[api]
+                    spec['default'] = value
+            LOG.debug('Initialize vendor capabilities for '
+                      '%(product)s %(protocol)s backend: '
+                      '%(type)s %(name)s property %(spec)s',
+                      {'product': self.product_name,
+                       'protocol': self.storage_protocol,
+                       'type': prop['type'],
+                       'name': prop['name'],
+                       'spec': spec})
             self._set_property(
-                properties,
-                property_name,
-                property_title,
-                property_description,
-                property_type,
-                **property_spec
+                vendor_properties,
+                prop['name'],
+                prop['title'],
+                prop['description'],
+                prop['type'],
+                **spec
             )
-        return properties, namespace
+        return vendor_properties, namespace
 
     def _get_vendor_properties(self, vendor_specs, volume, volume_type=None):
         properties = {}
