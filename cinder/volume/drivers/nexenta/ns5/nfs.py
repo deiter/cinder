@@ -79,18 +79,20 @@ class VolumeFile(object):
             spec = driver._get_image_spec(volume)
         self.file_format = spec['format']
         self.file_size = volume['size'] * units.Gi
-        self.file_path = None
         self.file_name = VOLUME_FILE_NAME
+        self.nfs_share = None
+        self.mount_point = None
+        self.file_path = None
         self.mount()
 
     def __del__(self):
         self.unmount()
 
     def mount(self):
-        self.file_path = self.driver._mount_volume(self.volume)[2]
+        self.nfs_share, self.mount_point, self.file_path = self.driver._mount_volume(self.volume)
 
     def unmount(self):
-        self.driver._unmount_volume(self.volume)
+        self.driver._unmount_volume(self.volume, self.nfs_share, self.mount_point)
 
     def create(self):
         payload = {'size': self.file_size}
