@@ -391,41 +391,8 @@ class NefVsolutions(NefCollections):
     def __init__(self, proxy):
         super(NefVsolutions, self).__init__(proxy)
         self.root = '/vsolution/filesystems'
-        self.subj = 'volume'
+        self.subj = 'file'
         self.slot = 'files'
-        self.properties = [
-            {
-                'name': self.key('format'),
-                'api': 'volumeFormat',
-                'cfg': 'nexenta_volume_format',
-                'title': 'Volume format',
-                'description': _('Controls volume format.'),
-                'enum': ['raw', 'qcow', 'qcow2', 'parallels',
-                         'vdi', 'vhdx', 'vmdk', 'vpc', 'qed'],
-                'type': 'string',
-                'default': 'raw'
-            },
-            {
-                'name': self.key('thin_provisioning'),
-                'api': 'sparseVolume',
-                'cfg': 'nexenta_sparsed_volumes',
-                'title': 'Thin provisioning',
-                'inherit': _('Provisioning type cannot be inherit.'),
-                'description': _('Controls if a volume is created sparse '
-                                 '(with no space reservation).'),
-                'type': 'boolean',
-                'default': True
-            },
-            {
-                'name': self.key('vsolution'),
-                'api': 'vSolution',
-                'cfg': 'nexenta_vsolution',
-                'title': 'vSolution API',
-                'description': _('Enables NexentaStor vSolution API.'),
-                'type': 'boolean',
-                'default': False
-            }
-        ]
 
     def path(self, parent, name):
         quoted_parent = six.moves.urllib.parse.quote_plus(parent)
@@ -712,6 +679,37 @@ class NefFilesystems(NefVolumeGroups, NefDatasets, NefCollections):
                 'description': _('Controls whether the .zfs directory is '
                                  'hidden or visible in the root of the '
                                  'volume file system.'),
+                'type': 'boolean',
+                'default': False
+            },
+            {
+                'name': self.key('format'),
+                'file': 'format',
+                'cfg': 'nexenta_volume_format',
+                'title': 'Volume format',
+                'description': _('Controls volume format.'),
+                'enum': ['raw', 'qcow', 'qcow2', 'parallels',
+                         'vdi', 'vhdx', 'vmdk', 'vpc', 'qed'],
+                'type': 'string',
+                'default': 'raw'
+            },
+            {
+                'name': self.key('thin_provisioning'),
+                'file': 'sparsed',
+                'cfg': 'nexenta_sparsed_volumes',
+                'title': 'Thin provisioning',
+                'inherit': _('Provisioning type cannot be inherit.'),
+                'description': _('Controls if a volume is created sparse '
+                                 '(with no space reservation).'),
+                'type': 'boolean',
+                'default': True
+            },
+            {
+                'name': self.key('vsolution'),
+                'file': 'vsolution',
+                'cfg': 'nexenta_vsolution',
+                'title': 'vSolution API',
+                'description': _('Enables NexentaStor vSolution API.'),
                 'type': 'boolean',
                 'default': False
             }
