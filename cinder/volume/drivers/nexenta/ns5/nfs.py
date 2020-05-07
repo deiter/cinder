@@ -79,7 +79,7 @@ class VolumeFile(object):
             spec = driver._get_image_spec(volume)
         self.file_format = spec['format']
         self.file_size = volume['size'] * units.Gi
-        self.file_path = driver.local_path(volume)
+        self.file_path = None
         self.file_name = VOLUME_FILE_NAME
         self.mount()
 
@@ -87,7 +87,7 @@ class VolumeFile(object):
         self.unmount()
 
     def mount(self):
-        self.driver._mount_volume(self.volume)
+        self.file_path = self.driver._mount_volume(self.volume)[2]
 
     def unmount(self):
         self.driver._unmount_volume(self.volume)
