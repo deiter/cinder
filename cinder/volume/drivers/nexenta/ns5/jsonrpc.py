@@ -324,6 +324,7 @@ class NefCollections(object):
     def __init__(self, proxy):
         self.proxy = proxy
         self.namespace = 'nexenta'
+        self.prefix = 'instance'
         self.root = '/collections'
         self.subj = 'collection'
         self.properties = []
@@ -333,7 +334,7 @@ class NefCollections(object):
         return posixpath.join(self.root, quoted_name)
 
     def key(self, name):
-        return '%s:%s_%s' % (self.namespace, self.subj, name)
+        return '%s:%s_%s' % (self.namespace, self.prefix, name)
 
     def get(self, name, payload=None):
         LOG.debug('Get properties of %(subj)s %(name)s: %(payload)s',
@@ -451,8 +452,9 @@ class NefVolumeGroups(NefDatasets, NefCollections):
 
     def __init__(self, proxy):
         super(NefVolumeGroups, self).__init__(proxy)
+        self.prefix = 'volume'
         self.root = '/storage/volumeGroups'
-        self.subj = 'volumegroup'
+        self.subj = 'volume group'
         self.properties = [
             {
                 'name': self.key('checksum'),
@@ -745,7 +747,7 @@ class NefHpr(NefCollections):
     def __init__(self, proxy):
         super(NefHpr, self).__init__(proxy)
         self.root = '/hpr/services'
-        self.subj = 'hpr'
+        self.subj = 'HPR service'
 
     def activate(self, path):
         LOG.debug('Activate dataset: %(path)s',
@@ -766,7 +768,7 @@ class NefRsf(NefCollections):
     def __init__(self, proxy):
         super(NefRsf, self).__init__(proxy)
         self.root = '/rsf/clusters'
-        self.subj = 'cluster'
+        self.subj = 'HA cluster'
 
 
 class NefServices(NefCollections):
@@ -782,7 +784,7 @@ class NefNfs(NefCollections):
     def __init__(self, proxy):
         super(NefNfs, self).__init__(proxy)
         self.root = '/nas/nfs'
-        self.subj = 'nfs'
+        self.subj = 'NFS'
 
 
 class NefTargets(NefCollections):
@@ -790,7 +792,7 @@ class NefTargets(NefCollections):
     def __init__(self, proxy):
         super(NefTargets, self).__init__(proxy)
         self.root = '/san/iscsi/targets'
-        self.subj = 'target'
+        self.subj = 'iSCSI target'
 
 
 class NefHostGroups(NefCollections):
@@ -798,7 +800,7 @@ class NefHostGroups(NefCollections):
     def __init__(self, proxy):
         super(NefHostGroups, self).__init__(proxy)
         self.root = '/san/hostgroups'
-        self.subj = 'hostgroup'
+        self.subj = 'host group'
 
 
 class NefTargetsGroups(NefCollections):
@@ -806,7 +808,7 @@ class NefTargetsGroups(NefCollections):
     def __init__(self, proxy):
         super(NefTargetsGroups, self).__init__(proxy)
         self.root = '/san/targetgroups'
-        self.subj = 'targetgroup'
+        self.subj = 'target group'
 
 
 class NefLunMappings(NefCollections):
@@ -814,15 +816,16 @@ class NefLunMappings(NefCollections):
     def __init__(self, proxy):
         super(NefLunMappings, self).__init__(proxy)
         self.root = '/san/lunMappings'
-        self.subj = 'mapping'
+        self.subj = 'LUN mapping'
 
 
 class NefLogicalUnits(NefCollections):
 
     def __init__(self, proxy):
         super(NefLogicalUnits, self).__init__(proxy)
+        self.prefix = 'logical_unit'
         self.root = '/san/logicalUnits'
-        self.subj = 'logicalunit'
+        self.subj = 'logical unit'
         self.properties = [
             {
                 'name': self.key('writeback_cache_disabled'),
