@@ -70,18 +70,19 @@ class VolumeDataset(object):
 
 
 class VolumeFile(object):
-    def __init__(self, driver, volume):
+    def __init__(self, driver, volume, spec=None):
         self.driver = driver
         self.volume = volume
         self.nef = driver.nef
         self.root = driver._execute_as_root
+        self.volume_path = driver._get_volume_path(volume)
         self.volume_size = volume['size']
         self.volume_name = volume['name']
-        self.volume_path = driver._get_volume_path(volume)
-        payload = driver._get_image_spec(volume)
-        self.file_format = payload['format']
-        self.file_sparse = payload['sparse']
-        self.file_remote = payload['remote']
+        if not spec:
+            spec = driver._get_image_spec(volume)
+        self.file_format = spec['format']
+        self.file_sparse = spec['sparse']
+        self.file_remote = spec['remote']
         self.file_size = volume['size'] * units.Gi
         self.file_path = driver.local_path(volume)
         self.file_name = VOLUME_FILE_NAME
@@ -627,7 +628,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 payload['mode'] = '660'
             self.nef.vsolutions.create(volume_path, VOLUME_FILE_NAME, payload)
         else:
-            volume_file = VolumeFile(self, volume)
+            volume_file = VolumeFile(self, volume, spec)
             volume_file.create()
 
         #volume_dataset = VolumeDataset(self, volume)
