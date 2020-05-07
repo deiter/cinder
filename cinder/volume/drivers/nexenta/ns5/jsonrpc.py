@@ -73,6 +73,7 @@ class NefRequest(object):
         self.error = None
         self.path = None
         self.time = 0
+        self.wait = 0
         self.data = []
         self.stat = {}
         self.hooks = {
@@ -91,7 +92,7 @@ class NefRequest(object):
         for attempt in range(self.attempts):
             self.data = []
             if self.error:
-                self.proxy.delay(attempt)
+                self.delay(attempt)
                 if not self.find_host():
                     continue
                 LOG.debug('Retry NEF request: %(method)s %(path)s %(payload)s '
@@ -110,6 +111,7 @@ class NefRequest(object):
                 continue
             LOG.debug('Finish NEF request: %(method)s %(path)s %(payload)s, '
                       'total response time: %(time)s seconds, '
+                      'total wait time: %(wait)s seconds, '
                       'total requests count: %(count)s, '
                       'requests statistics: %(stat)s, '
                       'response content: %(content)s',
@@ -117,6 +119,7 @@ class NefRequest(object):
                        'path': self.path,
                        'payload': self.payload,
                        'time': self.time,
+                       'wait': self.wait,
                        'count': sum(self.stat.values()),
                        'stat': self.stat,
                        'content': response.content})
@@ -220,7 +223,7 @@ class NefRequest(object):
                              'monitor path not found')
                            % {'text': text})
                 raise NefException(code='ENODATA', message=message)
-            self.proxy.delay(attempt)
+            self.delay(attempt)
             return self.request(method, path, payload)
         elif response.status_code == requests.codes.ok:
             if 'data' not in content or not content['data']:
@@ -302,6 +305,9 @@ class NefRequest(object):
             if self.check_host():
                 return True
         return False
+
+    def delay(self, attempt):
+        self.wait += self.proxy.delay(attempt)
 
     @staticmethod
     def parse(content, name):
@@ -1010,3 +1016,4 @@ class NefProxy(object):
         LOG.debug('Waiting for %(interval)s seconds',
                   {'interval': interval})
         greenthread.sleep(interval)
+        return interval
