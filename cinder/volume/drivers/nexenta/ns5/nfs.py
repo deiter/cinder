@@ -110,11 +110,10 @@ class VolumeFile(object):
         self.driver._execute(*cmd, **kwargs)
 
     def copy_image(self, context, image_service, image_id):
-        info = self.info
-        file_format = info.file_format
+        file_format = self.file_format
         file_blocksize = self.driver.configuration.volume_dd_blocksize
         extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
-        if info.file_format not in extendable_formats:
+        if self.file_format not in extendable_formats:
             file_format = VOLUME_FORMAT_RAW
         image_utils.fetch_to_volume_format(context, image_service,
                                            image_id, self.file_path,
@@ -122,8 +121,8 @@ class VolumeFile(object):
                                            run_as_root=self.root)
         image_utils.resize_image(self.file_path, self.volume_size,
                                  run_as_root=self.root)
-        if info.file_format not in extendable_formats:
-            self.convert(info.file_format)
+        if self.file_format not in extendable_formats:
+            self.convert(self.file_format)
 
     def convert(self, new_format):
         # TODO
@@ -598,32 +597,32 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        'error': error})
             raise
 
+    def _create_volume(self, volume):
+        volume_path = self._get_volume_path(volume)
+        payload = self._get_volume_spec(volume)
+        payload['path'] = volume_path
+        self.nef.filesystems.create(payload)
+        self._set_volume_acl(volume)
+        return volume_path
+
     def create_volume(self, volume):
         """Creates a volume.
 
         :param volume: volume reference
         """
-        volume_path = self._get_volume_path(volume)
+        volume_path = self._create_volume(volume)
         volume_size = volume['size'] * units.Gi
-        payload = self._get_volume_spec(volume)
-        payload['path'] = volume_path
-        self.nef.filesystems.create(payload)
-        self._set_volume_acl(volume)
         spec = self._get_image_spec(volume)
         if not spec['sparse']:
             self._set_volume_reservation(volume, volume_size, spec['format'])
         payload = {'size': volume_size}
-        if spec['remote'] and spec['format'] == VOLUME_FORMAT_RAW:
+        if spec['vsolution'] and spec['format'] == VOLUME_FORMAT_RAW:
             if self.nas_secure_file_permissions:
                 payload['mode'] = '660'
             self.nef.vsolutions.create(volume_path, VOLUME_FILE_NAME, payload)
         else:
             volume_file = VolumeFile(self, volume, spec)
             volume_file.create()
-
-        #volume_dataset = VolumeDataset(self, volume)
-        #volume_dataset.create()
-        # TODO
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
@@ -636,8 +635,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         cache_path = self._get_volume_path(cache)
         payload = {'fields': 'readOnly'}
         try:
-            cache_specs = self.nef.filesystems.get(cache_path, payload)
-            if cache_specs['readOnly']:
+            props = self.nef.filesystems.get(cache_path, payload)
+            if props['readOnly']:
                 cache_exist = True
             else:
                 self.delete_volume(cache)
@@ -645,8 +644,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
             if error.code != 'ENOENT':
                 raise
         if not cache_exist:
-            cache_dataset = VolumeDataset(self, cache)
-            volume_dataset.create()
+            self._create_volume(cache)
+        spec = self._get_image_spec(volume)
+        cache_file = VolumeFile(self, volume, spec)
+        cache_file.copy_image(ctxt, image_service, image_id)
             
             self.copy_image_to_volume(ctxt, cache, image_service, image_id)
             payload = {'readOnly': True}

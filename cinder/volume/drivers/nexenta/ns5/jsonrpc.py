@@ -714,7 +714,7 @@ class NefFilesystems(NefVolumeGroups, NefDatasets, NefCollections):
             },
             {
                 'name': self.key('vsolution'),
-                'img': 'remote',
+                'img': 'vsolution',
                 'cfg': 'nexenta_vsolution',
                 'title': 'vSolution API',
                 'description': _('Enables NexentaStor vSolution API.'),
