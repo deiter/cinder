@@ -704,6 +704,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         boolean indicating whether cloning occurred.
         """
         LOG.debug(' ==> clone_image %s', image_location)
+        image_utils.fetch(ctxt, image_service, image_meta['id'], '/tmp/123', None, None)
+        t = 1/0
         if not self.image_cache:
             return None, False
         spec = self._get_image_spec(volume)
