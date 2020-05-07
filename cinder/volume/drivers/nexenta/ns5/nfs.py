@@ -69,7 +69,7 @@ class VolumeDataset(object):
         self.driver._set_volume_acl(self.volume)
 
 
-class VolumeFile(object):
+class VolumeImage(object):
     def __init__(self, driver, volume, spec=None):
         self.driver = driver
         self.volume = volume
@@ -77,58 +77,60 @@ class VolumeFile(object):
         self.root = driver._execute_as_root
         if not spec:
             spec = driver._get_image_spec(volume)
-        self.file_format = spec['format']
-        self.file_size = volume['size'] * units.Gi
-        self.file_name = VOLUME_FILE_NAME
+        self.image_format = spec['format']
+        self.image_size = volume['size'] * units.Gi
+        self.iamge_name = VOLUME_FILE_NAME
         self.nfs_share = None
         self.mount_point = None
-        self.file_path = None
+        self.image_path = None
         self.mount()
 
     def __del__(self):
         self.unmount()
 
     def mount(self):
-        self.nfs_share, self.mount_point, self.file_path = self.driver._mount_volume(self.volume)
+        self.nfs_share, self.mount_point, self.image_path = self.driver._mount_volume(self.volume)
 
     def unmount(self):
         self.driver._unmount_volume(self.volume, self.nfs_share, self.mount_point)
 
     def create(self):
-        payload = {'size': self.file_size}
-        if self.file_format == VOLUME_FORMAT_QCOW2:
+        payload = {'size': self.image_size}
+        if self.image_format == VOLUME_FORMAT_QCOW2:
             payload['preallocation'] = 'metadata'
         volume_options = ','.join(['%s=%s' % _ for _ in payload.items()])
         self.execute('qemu-img', 'create',
                      '-o', volume_options,
-                     '-f', self.file_format,
-                     self.file_path)
+                     '-f', self.image_format,
+                     self.image_path)
 
     def execute(self, *cmd, **kwargs):
         if 'run_as_root' not in kwargs:
             kwargs['run_as_root'] = self.root
         self.driver._execute(*cmd, **kwargs)
 
-    def copy_image(self, context, image_service, image_id):
-        file_format = self.file_format
-        file_blocksize = self.driver.configuration.volume_dd_blocksize
+    def copy(self, context, image_service, image_id):
+        image_format = self.image_format
+        image_blocksize = self.driver.configuration.volume_dd_blocksize
         extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
-        if self.file_format not in extendable_formats:
-            file_format = VOLUME_FORMAT_RAW
+        if self.image_format not in extendable_formats:
+            image_format = VOLUME_FORMAT_RAW
         image_utils.fetch_to_volume_format(context, image_service,
-                                           image_id, self.file_path,
-                                           file_format, file_blocksize,
+                                           image_id, self.image_path,
+                                           image_format, image_blocksize,
                                            run_as_root=self.root)
-        image_utils.resize_image(self.file_path, self.file_size,
-                                 run_as_root=self.root)
-        if self.file_format not in extendable_formats:
-            self.convert(self.file_format)
+        if self.image_size > self.info.virtual_size:
+            image_utils.resize_image(self.image_path,
+                                     self.image_size,
+                                     run_as_root=self.root)
+        if self.image_format not in extendable_formats:
+            self.convert(self.image_format)
 
     def convert(self, new_format):
         # TODO
         info = self.info
         backup_file = '%(path)s.%(format)s' % {
-            'path': self.file_path,
+            'path': self.image_path,
             'format': info.file_format
         }
         try:
@@ -183,7 +185,7 @@ class VolumeFile(object):
     @property
     def info(self):
         return image_utils.qemu_img_info(
-            self.file_path,
+            self.image_path,
             force_share=True,
             run_as_root=self.root)
 
@@ -621,13 +623,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 payload['mode'] = '660'
             self.nef.vsolutions.create(volume_path, VOLUME_FILE_NAME, payload)
         else:
-            volume_file = VolumeFile(self, volume, spec)
-            volume_file.create()
+            image = VolumeImage(self, volume, spec)
+            image.create()
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
-        volume_file = VolumeFile(self, volume)
-        volume_file.copy_image(ctxt, image_service, image_id)
+        image = VolumeImage(self, volume)
+        image.copy(ctxt, image_service, image_id)
 
     @coordination.synchronized('{self.nef.lock}-{cache[name]}')
     def _verify_cache(self, ctxt, cache, image_meta, image_service):
@@ -643,37 +645,21 @@ class NexentaNfsDriver(nfs.NfsDriver):
         except jsonrpc.NefException as error:
             if error.code != 'ENOENT':
                 raise
+
         if not cache_exist:
             self._create_volume(cache)
+
         spec = self._get_image_spec(volume)
-        cache_file = VolumeFile(self, volume, spec)
-        cache_file.copy_image(ctxt, image_service, image_id)
-            
-        #    self.copy_image_to_volume(ctxt, cache, image_service, image_id)
-        #    payload = {'readOnly': True}
-        #    self.nef.filesystems.set(cache_path, payload)
-        #else:
-        #    nfs_share, mount_point, cache_file = self._mount_volume(cache)
-        #    image_info = self._get_image_info(cache_file)
-        #    self._unmount_volume(cache, nfs_share, mount_point)
+        image = VolumeImage(self, volume, spec)
 
-        image_size = nexenta_utils.roundup(image_info.virtual_size, units.Gi)
-        cache['size'] = image_size // units.Gi
-        if cache['size'] > volume['size']:
-            code = 'ENOSPC'
-            message = (_('Unable to clone cache %(cache)s '
-                         'to volume %(volume)s: cache size '
-                         '%(cache_size)sGB is larger than '
-                         'volume size %(volume_size)sGB')
-                       % {'cache': cache['name'],
-                          'volume': volume['name'],
-                          'cache_size': cache['size'],
-                          'volume_size': volume['size']})
-            raise jsonrpc.NefException(code=code, message=message)
-        #if not cache_exist:
-        return cache
+        if not cache_exist:
+            image.copy(ctxt, image_service, image_id)
+            payload = {'readOnly': True}
+            self.nef.filesystems.set(cache_path, payload)
 
-    def _verify_cache_snapshot(self, cache):
+        image_size = nexenta_utils.roundup(image.info.virtual_size, units.Gi)
+        cache['size'] = image.info.virtual_size // units.Gi
+
         snapshot = {
             'id': cache['id'],
             'name': self.cache_snapshot_template % cache['id'],
@@ -681,7 +667,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'volume_name': cache['name'],
             'volume_size': cache['size']
         }
+
         snapshot_path = self._get_snapshot_path(snapshot)
+
         payload = {'fields': 'path'}
         try:
             self.nef.snapshots.get(snapshot_path, payload)
@@ -689,7 +677,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
             if error.code != 'ENOENT':
                 raise
             self.create_snapshot(snapshot)
+
         return snapshot
+
+
+        return cache
 
     def clone_image(self, ctxt, volume, image_location, image_meta,
                     image_service):
@@ -711,39 +703,48 @@ class NexentaNfsDriver(nfs.NfsDriver):
         Returns a dict of volume properties eg. provider_location,
         boolean indicating whether cloning occurred.
         """
+        LOG.debug(' ==> clone_image %s', image_location)
         if not self.image_cache:
             return None, False
-
-        volume_type_specs = self._get_volume_spec(volume)
-
-        image_id = image_meta['id']
-        image_checksum = image_meta['checksum']
-        volume_format = volume_type_specs['volumeFormat']
-        image_size = nexenta_utils.roundup(image_meta['size'], units.Gi)
-
+        spec = self._get_image_spec(volume)
+        #image_size = nexenta_utils.roundup(image_meta['size'], units.Gi)
         compound = '%(checksum)s:%(format)s' % {
-            'checksum': image_checksum,
-            'format': volume_format
+            'checksum': image_meta['checksum'],
+            'format': spec['format']
         }
 
+        image_id = image_meta['id']
         namespace = uuid.UUID(image_id, version=4)
         name = nexenta_utils.native_string(compound)
-
         cache_id = six.text_type(uuid.uuid5(namespace, name))
-        cache_name = self.cache_image_template % cache_id
-        cache_size = image_size // units.Gi
-        cache_type_id = volume['volume_type_id']
+        #cache_name = self.cache_image_template % cache_id
+        # cache_size = image_size // units.Gi
+        #cache_size = volume['size']
+        #cache_type_id = volume['volume_type_id']
 
         cache = {
             'id': cache_id,
-            'name': cache_name,
-            'size': cache_size,
-            'volume_type_id': cache_type_id
+            'name': self.cache_image_template % cache_id,
+            'size': volume['size'],
+            'volume_type_id': volume['volume_type_id']
         }
 
+        #if cache['size'] > volume['size']:
+        #    code = 'ENOSPC'
+        #    message = (_('Unable to clone cache %(cache)s '
+        #                 'to volume %(volume)s: cache size '
+        #                 '%(cache_size)sGB is larger than '
+        #                 'volume size %(volume_size)sGB')
+        #               % {'cache': cache['name'],
+        #                  'volume': volume['name'],
+        #                  'cache_size': cache['size'],
+        #                  'volume_size': volume['size']})
+        #    raise jsonrpc.NefException(code=code, message=message)
+
         try:
-            snapshot = self._find_cache(ctxt, cache, image_meta,
-                                        image_service)
+            snapshot = self._verify_cache(ctxt, cache,
+                                          image_meta,
+                                          image_service)
             self.create_volume_from_snapshot(volume, snapshot)
         except jsonrpc.NefException as error:
             LOG.error('Failed to clone image %(image)s '
