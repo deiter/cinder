@@ -60,8 +60,7 @@ class VolumeDataset(object):
         self.driver = driver
         self.volume = volume
         self.volume_path = driver._get_volume_path(volume)
-        properties = driver.nef.filesystems.properties
-        self.payload = driver._get_vendor_properties(properties, volume)
+        self.payload = driver._get_volume_spec(volume)
 
     def create(self):
         payload = self.payload
@@ -79,8 +78,7 @@ class VolumeFile(object):
         self.volume_size = volume['size']
         self.volume_name = volume['name']
         self.volume_path = driver._get_volume_path(volume)
-        properties = driver.nef.vsolutions.properties
-        payload = driver._get_vendor_properties(properties, volume)
+        payload = driver._get_volume_spec(volume)
         self.file_format = payload['volumeFormat']
         self.file_sparse = payload['sparseVolume']
         self.file_remote = payload['vSolution']
@@ -617,14 +615,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_path = self._get_volume_path(volume)
         volume_size = volume['size'] * units.Gi
 
-        properties = self.nef.filesystems.properties
-        payload = self._get_vendor_properties(properties, volume)
+        payload = self._get_volume_spec(volume)
         payload['path'] = volume_path
         self.nef.filesystems.create(payload)
         self._set_volume_acl(volume)
 
-        properties = self.nef.vsolutions.properties
-        payload = self._get_vendor_properties(properties, volume)
+        payload = self._get_volume_spec(volume)
         
         payload = {'size': volume_size}
         
@@ -723,8 +719,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if not self.image_cache:
             return None, False
 
-        properties = self.nef.filesystems.properties
-        volume_type_specs = self._get_vendor_properties(properties, volume)
+        volume_type_specs = self._get_volume_spec(volume)
 
         image_id = image_meta['id']
         image_checksum = image_meta['checksum']
@@ -1287,8 +1282,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         LOG.info('Extend volume %(volume)s, new size: %(size)sGB',
                  {'volume': volume['name'], 'size': new_size})
-        properties = self.nef.filesystems.properties
-        payload = self._get_vendor_properties(properties, volume)
+        payload = self._get_volume_spec(volume)
         sparse_volume = payload.pop('sparseVolume')
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
         if not sparse_volume:
@@ -2313,9 +2307,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         fields = ','.join(names)
         payload = {'fields': fields, 'source': True}
         volume_specs = self.nef.filesystems.get(volume_path, payload)
-        volume_type_specs = self._get_vendor_properties(vendor_specs,
-                                                        volume,
-                                                        new_type)
+        volume_type_specs = self._get_volume_spec(volume, new_type)
         sparse_volume = volume_type_specs['sparseVolume']
         volume_new_format = volume_type_specs['volumeFormat']
         payload = {}
@@ -2414,9 +2406,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         vendor_properties = {}
         namespace = self.nef.filesystems.namespace
-        props = self.nef.filesystems.properties
+        properties = self.nef.filesystems.properties
         keys = ['enum', 'default', 'minimum', 'maximum']
-        for prop in props:
+        for prop in properties:
             spec = {}
             for key in keys:
                 if key in prop:
@@ -2449,24 +2441,26 @@ class NexentaNfsDriver(nfs.NfsDriver):
             )
         return vendor_properties, namespace
 
-    def _get_vendor_properties(self, vendor_specs, volume, volume_type=None):
-        properties = {}
-        extra_specs = {}
+    def _get_volume_spec(self, volume, volume_type=None):
+        props = self.nef.filesystems.properties
+        payload = {}
+        specs = {}
         if volume_type:
-            volume_type_id = volume_type['id']
+            type_id = volume_type['id']
         else:
-            volume_type_id = volume['volume_type_id']
-        if volume_type_id:
-            extra_specs = volume_types.get_volume_type_extra_specs(
-                volume_type_id)
-        for vendor_spec in vendor_specs:
-            api = vendor_spec['api']
-            name = vendor_spec['name']
-            if name in extra_specs:
-                extra_spec = extra_specs[name]
-                value = self._get_vendor_value(extra_spec, vendor_spec)
-            elif 'cfg' in vendor_spec:
-                key = vendor_spec['cfg']
+            type_id = volume['volume_type_id']
+        if type_id:
+            specs = volume_types.get_volume_type_extra_specs(type_id)
+        for prop in props:
+            if 'api' not in prop:
+                continue
+            api = prop['api']
+            name = prop['name']
+            if name in specs:
+                spec = specs[name]
+                value = self._check_volume_spec(spec, prop)
+            elif 'cfg' in prop:
+                key = prop['cfg']
                 value = self.configuration.safe_get(key)
                 if value in [None, '']:
                     continue
@@ -2474,21 +2468,21 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 value = self.nas_stat[api]
             else:
                 continue
-            properties[api] = value
-            LOG.debug('Get vendor property name %(name)s with '
-                      'API name %(api)s and %(type)s value '
+            payload[api] = value
+            LOG.debug('Get volume property name %(name)s with '
+                      'NEF API name %(api)s and %(type)s value '
                       '%(value)s for volume %(volume)s',
                       {'name': name,
                        'api': api,
                        'type': type(value).__name__,
                        'value': value,
                        'volume': volume['name']})
-        return properties
+        return payload
 
-    def _get_vendor_value(self, value, vendor_spec):
-        name = vendor_spec['name']
+    def _check_volume_spec(self, value, prop):
+        name = prop['name']
         code = 'EINVAL'
-        if vendor_spec['type'] == 'integer':
+        if prop['type'] == 'integer':
             try:
                 value = int(value)
             except ValueError:
@@ -2496,8 +2490,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                              'vendor property name %(name)s')
                            % {'value': value, 'name': name})
                 raise jsonrpc.NefException(code=code, message=message)
-            if 'minimum' in vendor_spec:
-                minimum = vendor_spec['minimum']
+            if 'minimum' in prop:
+                minimum = prop['minimum']
                 if value < minimum:
                     message = (_('Integer value %(value)s is less than '
                                  'allowed minimum %(minimum)s for vendor '
@@ -2505,8 +2499,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                % {'value': value, 'minimum': minimum,
                                   'name': name})
                     raise jsonrpc.NefException(code=code, message=message)
-            if 'maximum' in vendor_spec:
-                maximum = vendor_spec['maximum']
+            if 'maximum' in prop:
+                maximum = prop['maximum']
                 if value > maximum:
                     message = (_('Integer value %(value)s is greater than '
                                  'allowed maximum %(maximum)s for vendor '
@@ -2514,7 +2508,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                % {'value': value, 'maximum': maximum,
                                   'name': name})
                     raise jsonrpc.NefException(code=code, message=message)
-        elif vendor_spec['type'] == 'string':
+        elif prop['type'] == 'string':
             try:
                 value = str(value)
             except UnicodeEncodeError:
@@ -2522,7 +2516,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                              'property name %(name)s')
                            % {'value': value, 'name': name})
                 raise jsonrpc.NefException(code=code, message=message)
-        elif vendor_spec['type'] == 'boolean':
+        elif prop['type'] == 'boolean':
             words = value.split()
             if len(words) == 2 and words[0] == '<is>':
                 value = words[1]
@@ -2533,8 +2527,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                              'property name %(name)s')
                            % {'value': value, 'name': name})
                 raise jsonrpc.NefException(code=code, message=message)
-        if 'enum' in vendor_spec:
-            enum = vendor_spec['enum']
+        if 'enum' in prop:
+            enum = prop['enum']
             if value not in enum:
                 message = (_('Value %(value)s is out of allowed enumeration '
                              '%(enum)s for vendor property name %(name)s')
