@@ -78,10 +78,10 @@ class VolumeFile(object):
         self.volume_size = volume['size']
         self.volume_name = volume['name']
         self.volume_path = driver._get_volume_path(volume)
-        payload = driver._get_volume_spec(volume)
-        self.file_format = payload['volumeFormat']
-        self.file_sparse = payload['sparseVolume']
-        self.file_remote = payload['vSolution']
+        payload = driver._get_image_spec(volume)
+        self.file_format = payload['format']
+        self.file_sparse = payload['sparse']
+        self.file_remote = payload['remote']
         self.file_size = volume['size'] * units.Gi
         self.file_path = driver.local_path(volume)
         self.file_name = VOLUME_FILE_NAME
@@ -614,23 +614,25 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         volume_path = self._get_volume_path(volume)
         volume_size = volume['size'] * units.Gi
-
         payload = self._get_volume_spec(volume)
         payload['path'] = volume_path
         self.nef.filesystems.create(payload)
         self._set_volume_acl(volume)
-
-        payload = self._get_volume_spec(volume)
-        
+        spec = self._get_image_spec(volume)
+        if not spec['sparse']:
+            self._set_volume_reservation(volume, volume_size, spec['format'])
         payload = {'size': volume_size}
-        
-
+        if spec['remote'] and spec['format'] == VOLUME_FORMAT_RAW:
+            if self.nas_secure_file_permissions:
+                payload['mode'] = '660'
+            self.nef.vsolutions.create(volume_path, VOLUME_FILE_NAME, payload)
+        else:
+            volume_file = VolumeFile(self, volume)
+            volume_file.create()
 
         #volume_dataset = VolumeDataset(self, volume)
         #volume_dataset.create()
         # TODO
-        volume_file = VolumeFile(self, volume)
-        volume_file.create()
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
@@ -2441,16 +2443,48 @@ class NexentaNfsDriver(nfs.NfsDriver):
             )
         return vendor_properties, namespace
 
-    def _get_volume_spec(self, volume, volume_type=None):
-        props = self.nef.filesystems.properties
-        payload = {}
-        specs = {}
+    def _get_volume_type_spec(self, volume, volume_type=None):
         if volume_type:
             type_id = volume_type['id']
         else:
             type_id = volume['volume_type_id']
         if type_id:
-            specs = volume_types.get_volume_type_extra_specs(type_id)
+            return volume_types.get_volume_type_extra_specs(type_id)
+        return {}
+
+    def _get_image_spec(self, volume, volume_type=None):
+        payload = {}
+        props = self.nef.filesystems.properties
+        specs = self._get_volume_type_spec(volume, volume_type)
+        for prop in props:
+            if 'img' not in prop:
+                continue
+            img = prop['img']
+            name = prop['name']
+            if name in specs:
+                spec = specs[name]
+                value = self._check_vendor_spec(spec, prop)
+            elif 'cfg' in prop:
+                key = prop['cfg']
+                value = self.configuration.safe_get(key)
+                if value in [None, '']:
+                    continue
+            else:
+                continue
+            payload[img] = value
+            LOG.debug('Get image property %(name)s with '
+                      'name %(img)s and %(type)s value '
+                      '%(value)s for volume %(volume)s',
+                      {'name': name, 'img': img,
+                       'type': type(value).__name__,
+                       'value': value,
+                       'volume': volume['name']})
+        return payload
+
+    def _get_volume_spec(self, volume, volume_type=None):
+        payload = {}
+        props = self.nef.filesystems.properties
+        specs = self._get_volume_type_spec(volume, volume_type)
         for prop in props:
             if 'api' not in prop:
                 continue
@@ -2458,7 +2492,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             name = prop['name']
             if name in specs:
                 spec = specs[name]
-                value = self._check_volume_spec(spec, prop)
+                value = self._check_vendor_spec(spec, prop)
             elif 'cfg' in prop:
                 key = prop['cfg']
                 value = self.configuration.safe_get(key)
@@ -2469,17 +2503,16 @@ class NexentaNfsDriver(nfs.NfsDriver):
             else:
                 continue
             payload[api] = value
-            LOG.debug('Get volume property name %(name)s with '
-                      'NEF API name %(api)s and %(type)s value '
+            LOG.debug('Get filesystem property %(name)s with '
+                      'API name %(api)s and %(type)s value '
                       '%(value)s for volume %(volume)s',
-                      {'name': name,
-                       'api': api,
+                      {'name': name, 'api': api,
                        'type': type(value).__name__,
                        'value': value,
                        'volume': volume['name']})
         return payload
 
-    def _check_volume_spec(self, value, prop):
+    def _check_vendor_spec(self, value, prop):
         name = prop['name']
         code = 'EINVAL'
         if prop['type'] == 'integer':

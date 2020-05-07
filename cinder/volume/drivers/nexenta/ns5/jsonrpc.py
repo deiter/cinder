@@ -686,7 +686,7 @@ class NefFilesystems(NefVolumeGroups, NefDatasets, NefCollections):
             },
             {
                 'name': self.key('format'),
-                'file': 'format',
+                'img': 'format',
                 'cfg': 'nexenta_volume_format',
                 'title': 'Volume format',
                 'description': _('Controls volume format.'),
@@ -697,7 +697,7 @@ class NefFilesystems(NefVolumeGroups, NefDatasets, NefCollections):
             },
             {
                 'name': self.key('thin_provisioning'),
-                'file': 'sparsed',
+                'img': 'sparse',
                 'cfg': 'nexenta_sparsed_volumes',
                 'title': 'Thin provisioning',
                 'inherit': _('Provisioning type cannot be inherit.'),
@@ -708,7 +708,7 @@ class NefFilesystems(NefVolumeGroups, NefDatasets, NefCollections):
             },
             {
                 'name': self.key('vsolution'),
-                'file': 'vsolution',
+                'img': 'remote',
                 'cfg': 'nexenta_vsolution',
                 'title': 'vSolution API',
                 'description': _('Enables NexentaStor vSolution API.'),
