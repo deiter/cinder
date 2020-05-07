@@ -75,14 +75,9 @@ class VolumeFile(object):
         self.volume = volume
         self.nef = driver.nef
         self.root = driver._execute_as_root
-        self.volume_path = driver._get_volume_path(volume)
-        self.volume_size = volume['size']
-        self.volume_name = volume['name']
         if not spec:
             spec = driver._get_image_spec(volume)
         self.file_format = spec['format']
-        self.file_sparse = spec['sparse']
-        self.file_remote = spec['remote']
         self.file_size = volume['size'] * units.Gi
         self.file_path = driver.local_path(volume)
         self.file_name = VOLUME_FILE_NAME
@@ -99,20 +94,13 @@ class VolumeFile(object):
 
     def create(self):
         payload = {'size': self.file_size}
-        if self.file_remote and self.file_format == VOLUME_FORMAT_RAW:
-            if self.driver.nas_secure_file_permissions:
-                payload['mode'] = '660'
-            self.nef.vsolutions.create(self.volume_path,
-                                       self.file_name,
-                                       payload)
-        else:
-            if self.file_format == VOLUME_FORMAT_QCOW2:
-                payload['preallocation'] = 'metadata'
-            volume_options = ','.join(['%s=%s' % _ for _ in payload.items()])
-            self.execute('qemu-img', 'create',
-                         '-o', volume_options,
-                         '-f', self.file_format,
-                         self.file_path)
+        if self.file_format == VOLUME_FORMAT_QCOW2:
+            payload['preallocation'] = 'metadata'
+        volume_options = ','.join(['%s=%s' % _ for _ in payload.items()])
+        self.execute('qemu-img', 'create',
+                     '-o', volume_options,
+                     '-f', self.file_format,
+                     self.file_path)
 
     def execute(self, *cmd, **kwargs):
         if 'run_as_root' not in kwargs:
