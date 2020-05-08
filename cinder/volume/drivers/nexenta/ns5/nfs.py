@@ -1650,11 +1650,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def _get_volume_share(self, volume):
         """Return NFS share path for the volume."""
+        specs = self._get_volume_specs(volume)
+        if 'nonBlockingMandatoryMode' in specs:
+            nbmand = specs['nonBlockingMandatoryMode']
+        else:
+            nbmand = self.nbmand
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'isMounted,mountPoint,nonBlockingMandatoryMode'}
         props = self.nef.filesystems.get(volume_path, payload)
-        specs = self._get_volume_specs(volume)
-        nbmand = specs['nonBlockingMandatoryMode']
         if props['nonBlockingMandatoryMode'] != nbmand:
             payload = {'nonBlockingMandatoryMode': nbmand}
             self.nef.filesystems.set(volume_path, payload)
