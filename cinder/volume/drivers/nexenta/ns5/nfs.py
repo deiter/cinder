@@ -109,7 +109,13 @@ class VolumeImage(object):
             kwargs['run_as_root'] = self.root
         self.driver._execute(*cmd, **kwargs)
 
-    def copy(self, context, image_service, image_id):
+    def load(self, image_file):
+        image_utils.convert_image(image_file,
+                                  self.image_path,
+                                  self.image_format,
+                                  run_as_root=self.root)
+
+    def xcopy(self, context, image_service, image_id):
         image_format = self.image_format
         image_blocksize = self.driver.configuration.volume_dd_blocksize
         extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
@@ -631,57 +637,52 @@ class NexentaNfsDriver(nfs.NfsDriver):
         image = VolumeImage(self, volume)
         image.copy(ctxt, image_service, image_id)
 
-    @coordination.synchronized('{self.nef.lock}-{cache[name]}')
-    def _verify_cache(self, ctxt, cache, image_meta, image_service):
-        cache_exist = False
-        cache_path = self._get_volume_path(cache)
-        payload = {'fields': 'readOnly'}
-        try:
-            props = self.nef.filesystems.get(cache_path, payload)
-            if props['readOnly']:
-                cache_exist = True
-            else:
-                self.delete_volume(cache)
-        except jsonrpc.NefException as error:
-            if error.code != 'ENOENT':
-                raise
-
-        if not cache_exist:
-            self._create_volume(cache)
-
-        spec = self._get_image_spec(volume)
-        image = VolumeImage(self, volume, spec)
-
-        if not cache_exist:
-            image.copy(ctxt, image_service, image_id)
-            payload = {'readOnly': True}
-            self.nef.filesystems.set(cache_path, payload)
-
-        image_size = nexenta_utils.roundup(image.info.virtual_size, units.Gi)
-        cache['size'] = image.info.virtual_size // units.Gi
-
-        snapshot = {
-            'id': cache['id'],
-            'name': self.cache_snapshot_template % cache['id'],
-            'volume_id': cache['id'],
-            'volume_name': cache['name'],
-            'volume_size': cache['size']
-        }
-
+    def _verify_cache_snapshot(self, snapshot):
         snapshot_path = self._get_snapshot_path(snapshot)
-
         payload = {'fields': 'path'}
         try:
             self.nef.snapshots.get(snapshot_path, payload)
         except jsonrpc.NefException as error:
-            if error.code != 'ENOENT':
-                raise
-            self.create_snapshot(snapshot)
+            if error.code == 'ENOENT':
+                return False
+            raise
+        return True
 
+    def _verify_cache_volume(self, volume):
+        volume_path = self._get_volume_path(volume)
+        payload = {'fields': 'path'}
+        try:
+            self.nef.filesystems.get(volume_path, payload)
+        except jsonrpc.NefException as error:
+            if error.code == 'ENOENT':
+                return False
+            raise
+        return True
+
+    @coordination.synchronized('{self.nef.lock}-{cache[name]}')
+    def _create_cache(self, ctxt, cache, image_id, image_service):
+        snapshot = {
+            'id': cache['id'],
+            'name': self.cache_snapshot_template % cache['id'],
+            'volume_id': cache['id'],
+            'volume_name': cache['name']
+        }
+        if self._verify_cache_snapshot(snapshot):
+            return snapshot
+        if self._verify_cache_volume(cache):
+            self.delete_volume(cache)
+        self._create_volume(cache)
+        with image_utils.TemporaryImages.fetch(image_service, ctxt,
+                                               image_id) as image_file:
+            info = image_utils.qemu_img_info(image_file)
+            image_size = nexenta_utils.roundup(info.virtual_size, units.Gi)
+            cache['size'] = image_size // units.Gi
+            spec = self._get_image_spec(cache)
+            image = VolumeImage(self, cache, spec)
+            image.load(image_file)
+        snapshot['volume_size'] = cache['size']
+        self.create_snapshot(snapshot)
         return snapshot
-
-
-        return cache
 
     def clone_image(self, ctxt, volume, image_location, image_meta,
                     image_service):
@@ -703,59 +704,70 @@ class NexentaNfsDriver(nfs.NfsDriver):
         Returns a dict of volume properties eg. provider_location,
         boolean indicating whether cloning occurred.
         """
-        LOG.debug(' ==> clone_image %s', image_location)
-        image_utils.fetch(ctxt, image_service, image_meta['id'], '/tmp/123', None, None)
-        t = 1/0
         if not self.image_cache:
             return None, False
-        spec = self._get_image_spec(volume)
-        #image_size = nexenta_utils.roundup(image_meta['size'], units.Gi)
-        compound = '%(checksum)s:%(format)s' % {
-            'checksum': image_meta['checksum'],
-            'format': spec['format']
-        }
 
         image_id = image_meta['id']
+        image_checksum = image_meta['checksum']
+
+        spec = self._get_image_spec(volume)
+        volume_format = spec['format']
+
+        compound = '%(checksum)s:%(format)s' % {
+            'checksum': image_checksum,
+            'format': volume_format
+        }
+
         namespace = uuid.UUID(image_id, version=4)
         name = nexenta_utils.native_string(compound)
+
         cache_id = six.text_type(uuid.uuid5(namespace, name))
-        #cache_name = self.cache_image_template % cache_id
-        # cache_size = image_size // units.Gi
-        #cache_size = volume['size']
-        #cache_type_id = volume['volume_type_id']
+        cache_name = self.cache_image_template % cache_id
+        cache_type_id = volume['volume_type_id']
 
         cache = {
             'id': cache_id,
-            'name': self.cache_image_template % cache_id,
-            'size': volume['size'],
-            'volume_type_id': volume['volume_type_id']
+            'name': cache_name,
+            'volume_type_id': cache_type_id
         }
 
-        #if cache['size'] > volume['size']:
-        #    code = 'ENOSPC'
-        #    message = (_('Unable to clone cache %(cache)s '
-        #                 'to volume %(volume)s: cache size '
-        #                 '%(cache_size)sGB is larger than '
-        #                 'volume size %(volume_size)sGB')
-        #               % {'cache': cache['name'],
-        #                  'volume': volume['name'],
-        #                  'cache_size': cache['size'],
-        #                  'volume_size': volume['size']})
-        #    raise jsonrpc.NefException(code=code, message=message)
-
         try:
-            snapshot = self._verify_cache(ctxt, cache,
-                                          image_meta,
+            snapshot = self._create_cache(ctxt, cache,
+                                          image_id,
                                           image_service)
-            self.create_volume_from_snapshot(volume, snapshot)
-        except jsonrpc.NefException as error:
-            LOG.error('Failed to clone image %(image)s '
-                      'to volume %(volume)s: %(error)s',
-                      {'image': image_meta['id'],
-                       'volume': volume['name'],
+        except Exception as error:
+            LOG.error('Failed to create cache %(cache)s '
+                      'for image %(image)s: %(error)s',
+                      {'cache': cache_name,
+                       'image': image_id,
                        'error': error})
             return None, False
-        return None, True
+
+        if snapshot['volume_size'] > volume['size']:
+            code = 'ENOSPC'
+            message = (_('Unable to clone cache %(cache)s for '
+                         'image %(image)s to volume %(volume)s: '
+                         'cache size %(cache_size)sGB is larger '
+                         'than volume size %(volume_size)sGB')
+                       % {'cache': cache_name, 'image': image_id,
+                          'volume': volume['name'],
+                          'cache_size': snapshot['volume_size'],
+                          'volume_size': volume['size']})
+            raise jsonrpc.NefException(code=code, message=message)
+
+        try:
+            self.create_volume_from_snapshot(volume, snapshot)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to clone cache %(cache)s for image '
+                      '%(image)s to volume %(volume)s: %(error)s',
+                      {'cache': cache['name'], 'image': image_id,
+                       'volume': volume['name'], 'error': error})
+            return None, False
+
+        volume_metadata = {'format': volume_format}
+        model_update = {'metadata': volume_metadata}
+
+        return model_update, True
 
     @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
     def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
