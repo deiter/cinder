@@ -2421,7 +2421,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         specs = self._get_image_specs(volume, new_type)
         image = VolumeImage(self, volume, specs)
         volume_size = image.file_size
-        volume_format = ??? TODO from metadata
+        # TODO: get format from metadata or info if empty
+        volume_format = 1
         if volume_format != image.file_format:
             # TODO: check for volume arg
             self._change_volume_format(volume, image.file_path, volume_format,
