@@ -71,12 +71,10 @@ class VolumeDataset(object):
 
 
 class VolumeImage(object):
-    def __init__(self, driver, volume, specs=None):
+    def __init__(self, driver, volume, specs):
         self.driver = driver
         self.volume = volume
         self.root = driver._execute_as_root
-        if not specs:
-            specs = driver._get_image_specs(volume)
         self.file_format = specs['format']
         self.file_sparse = specs['sparse']
         self.file_size = volume['size'] * units.Gi
@@ -194,10 +192,9 @@ class VolumeImage(object):
 
     @property
     def info(self):
-        return image_utils.qemu_img_info(
-            self.file_path,
-            force_share=True,
-            run_as_root=self.root)
+        return image_utils.qemu_img_info(self.file_path,
+                                         force_share=True,
+                                         run_as_root=self.root)
 
 
 @interface.volumedriver
@@ -516,10 +513,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'recordSize,dataCopies'}
-        # TODO -> props
-        filesystem = self.nef.filesystems.get(volume_path, payload)
-        block_size = filesystem['recordSize']
-        data_copies = filesystem['dataCopies']
+        props = self.nef.filesystems.get(volume_path, payload)
+        block_size = props['recordSize']
+        data_copies = props['dataCopies']
         reservation = volume_size
         numdb = 7
         dn_max_indblkshift = 17
@@ -641,7 +637,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
-        image = VolumeImage(self, volume)
+        specs = self._get_image_specs(volume)
+        image = VolumeImage(self, volume, specs)
         # TODO
         image.copy(ctxt, image_service, image_id)
 
