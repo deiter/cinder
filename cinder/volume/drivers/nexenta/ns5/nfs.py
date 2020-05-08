@@ -1653,7 +1653,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'isMounted,mountPoint,nonBlockingMandatoryMode'}
         props = self.nef.filesystems.get(volume_path, payload)
-        specs = self._get_volume_specs(self, volume)
+        specs = self._get_volume_specs(volume)
         if props['nonBlockingMandatoryMode'] != specs['nbmand']:
             payload = {'nonBlockingMandatoryMode': specs['nbmand']}
             self.nef.filesystems.set(volume_path, payload)
