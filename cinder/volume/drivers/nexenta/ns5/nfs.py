@@ -324,9 +324,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.origin_snapshot_template = (
             self.configuration.nexenta_origin_snapshot_template)
         self.image_cache_template = (
-            self.configuration.nexenta_image_cache_template)
+            self.configuration.nexenta_cache_image_template)
         self.image_snapshot_template = (
-            self.configuration.nexenta_image_snapshot_template)
+            self.configuration.nexenta_cache_snapshot_template)
         self.migration_service_prefix = (
             self.configuration.nexenta_migration_service_prefix)
         self.migration_throttle = (
