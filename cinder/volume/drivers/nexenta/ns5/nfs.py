@@ -637,27 +637,27 @@ class NexentaNfsDriver(nfs.NfsDriver):
         image = VolumeImage(self, volume)
         image.copy(ctxt, image_service, image_id)
 
-    def _verify_cache_snapshot(self, snapshot):
+    def _verify_cache(self, cache, snapshot):
+        cache_path = self._get_volume_path(cache)
+        payload = {'fields': 'referencedReservationSize'}
+        try:
+            props = self.nef.filesystems.get(cache_path, payload)
+        except jsonrpc.NefException as error:
+            if error.code == 'ENOENT':
+                return None, None
+            raise
+        cache_size = props['referencedReservationSize']
+        cache['size'] = cache_size // units.Gi
         snapshot_path = self._get_snapshot_path(snapshot)
         payload = {'fields': 'path'}
         try:
             self.nef.snapshots.get(snapshot_path, payload)
         except jsonrpc.NefException as error:
             if error.code == 'ENOENT':
-                return False
+                return cache, None
             raise
-        return True
-
-    def _verify_cache_volume(self, volume):
-        volume_path = self._get_volume_path(volume)
-        payload = {'fields': 'path'}
-        try:
-            self.nef.filesystems.get(volume_path, payload)
-        except jsonrpc.NefException as error:
-            if error.code == 'ENOENT':
-                return False
-            raise
-        return True
+        snapshot['volume_size'] = cache['size']
+        return cache, snapshot
 
     @coordination.synchronized('{self.nef.lock}-{cache[name]}')
     def _create_cache(self, ctxt, cache, image_id, image_service):
@@ -667,11 +667,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'volume_id': cache['id'],
             'volume_name': cache['name']
         }
-        if self._verify_cache_snapshot(snapshot):
+        cache, snapshot = self._verify_cache(cache, snapshot)
+        if snapshot and snapshot.get('volume_size', 0) > 0:
             return snapshot
-        if self._verify_cache_volume(cache):
+        if cache:
             self.delete_volume(cache)
-        self._create_volume(cache)
+        cache_path = self._create_volume(cache)
         with image_utils.TemporaryImages.fetch(image_service, ctxt,
                                                image_id) as image_file:
             info = image_utils.qemu_img_info(image_file)
@@ -680,6 +681,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             spec = self._get_image_spec(cache)
             image = VolumeImage(self, cache, spec)
             image.load(image_file)
+        payload = {'referencedReservationSize': image_size}
+        self.nef.filesystems.set(cache_path, payload)
         snapshot['volume_size'] = cache['size']
         self.create_snapshot(snapshot)
         return snapshot
