@@ -1356,7 +1356,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._set_volume_acl(volume)
         if volume['size'] > snapshot['volume_size']:
             self.extend_volume(volume, volume['size'])
-        self._update_volume_properties(volume)
+        # TODO
+        ##self._update_volume_properties(volume)
 
     def create_cloned_volume(self, volume, src_vref):
         """Creates a clone of the specified volume.
