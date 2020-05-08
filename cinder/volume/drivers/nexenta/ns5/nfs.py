@@ -1295,10 +1295,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         LOG.info('Extend volume %(volume)s, new size: %(size)sGB',
                  {'volume': volume['name'], 'size': new_size})
-        payload = self._get_volume_spec(volume)
-        sparse_volume = payload.pop('sparseVolume')
+        spec = self._get_image_spec(volume)
         nfs_share, mount_point, volume_file = self._mount_volume(volume)
-        if not sparse_volume:
+        if not spec['sparse']:
             volume_info = self._get_image_info(volume_file)
             volume_size = new_size * units.Gi
             volume_format = volume_info.file_format
