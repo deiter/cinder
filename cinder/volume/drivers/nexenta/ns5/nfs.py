@@ -74,7 +74,6 @@ class VolumeImage(object):
     def __init__(self, driver, volume, specs=None):
         self.driver = driver
         self.volume = volume
-        self.nef = driver.nef
         self.root = driver._execute_as_root
         if not specs:
             specs = driver._get_image_specs(volume)
@@ -1332,15 +1331,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param volume: volume reference
         :param new_size: volume new size in GB
         """
-        specs = driver._get_image_specs(volume)
-        image = VolumeImage(self, volume, specs)
-        if not image.file_sparse:
+        specs = self._get_image_specs(volume)
+        if not specs['sparse']:
             # TODO: file_size -> new_size in GB
             file_size = new_size * units.Gi
             self._set_volume_reservation(volume, file_size, image.file_format)
         LOG.info('Extend %(format)s volume %(volume)s, new size: %(size)sGB',
-                 {'format': image.file_format, 'volume': volume['name'],
+                 {'format': specs['format'], 'volume': volume['name'],
                   'size': new_size})
+
+        image = VolumeImage(self, volume, specs)
+
         # TODO: move to VolumeImage ??
         image_utils.resize_image(image.file_path, new_size,
                                  run_as_root=self._execute_as_root)
