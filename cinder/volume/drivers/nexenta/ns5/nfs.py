@@ -390,7 +390,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             LOG.error('Failed to get stat of NAS pool %(nas_pool)s: %(error)s',
                       {'nas_pool': self.nas_pool, 'error': error})
             return False
-        names = ([item['api'] for item in self.nef.filesystems.properties])
+        items = self.nef.filesystems.properties
+        names = [item['api'] for item in items if 'api' in item]
         names += ['mountPoint', 'isMounted']
         fields = ','.join(names)
         payload = {'fields': fields}
@@ -2358,7 +2359,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         volume_path = self._get_volume_path(volume)
         items = self.nef.filesystems.properties
-        names = ([item['api'] for item in items])
+        names = [item['api'] for item in items if 'api' in item]
         # TODO: NEX-21595
         names += ['source']
         fields = ','.join(names)
