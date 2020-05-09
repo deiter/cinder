@@ -1632,7 +1632,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         for volume in volumes:
             provisioned_capacity_gb += volume['size']
             total_volumes += 1
-        snapshots = objects.SnapshotList.get_by_host(ctxt, self.host)
+        snapshots = objects.SnapshotList.get_by_host(self.ctxt, self.host)
         for snapshot in snapshots:
             provisioned_capacity_gb += snapshot['volume_size']
             total_snapshots += 1
