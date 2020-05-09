@@ -437,7 +437,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if not volume['volume_type_id']:
             return
         volume_type_id = volume['volume_type_id']
-        volume_type = volume_types.get_volume_type(ctxt, volume_type_id)
+        volume_type = volume_types.get_volume_type(self.ctxt, volume_type_id)
         diff = {}
         host = volume['host']
         self.retype(self.ctxt, volume, volume_type, diff, host)
