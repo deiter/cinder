@@ -84,17 +84,14 @@ class VolumeImage(object):
     def unmount(self):
         self.driver._unmount_volume(self.volume, self.nfs_share, self.mount_point)
 
-    # TODO: polish!
-    # calls by create_volume
     def create(self):
-        payload = {'size': self.file_size}
+        props = {'size': self.file_size}
         if self.file_format == VOLUME_FORMAT_QCOW2:
-            payload['preallocation'] = 'metadata'
-        volume_options = ','.join(['%s=%s' % _ for _ in payload.items()])
+            props['preallocation'] = 'metadata'
+        opts = ','.join(['%s=%s' % _ for _ in props.items()])
         self.execute('qemu-img', 'create',
-                     '-o', volume_options,
                      '-f', self.file_format,
-                     self.file_path)
+                     '-o', opts, self.file_path)
 
     def resize(self, size):
         formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
