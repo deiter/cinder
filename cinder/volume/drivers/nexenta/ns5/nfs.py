@@ -151,7 +151,6 @@ class VolumeImage(object):
             src_format=self.file_format,
             run_as_root=self.root)
         self.execute('mv', file_path, self.file_path)
-        # TODO: update self.* ???
 
     @property
     def info(self):
@@ -1176,27 +1175,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'fields': 'nonBlockingMandatoryMode,source',
             'source': True
         }
-        # TODO - move it to get_share ?
-        volume_specs = self.nef.filesystems.get(volume_path, payload)
-        if volume_specs['nonBlockingMandatoryMode'] != self.nbmand:
-            payload = {'nonBlockingMandatoryMode': self.nbmand}
-            if 'source' in volume_specs:
-                source = volume_specs['source']
-                value = source['nonBlockingMandatoryMode']
-                if value == 'inherited':
-                    self.nef.filesystems.set(self.nas_path, payload)
-                elif value in ['local', 'received']:
-                    self.nef.filesystems.set(volume_path, payload)
-            else:
-                self.nef.filesystems.set(volume_path, payload)
-            self._remount_volume(volume)
-        # ^^^ xxxxxx
+        # TODO - format get from meta or specs
         specs = driver._get_image_specs(volume)
-        image = VolumeImage(self, volume, specs)
-
+        file_format = specs['format']
+        nfs_share = self._get_volume_share(volume)
         data = {
             'export': nfs_share,
-            'format': volume_info.file_format,
+            'format': file_format,
             'name': VOLUME_FILE_NAME
         }
         if self.mount_options:
@@ -1255,15 +1240,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'originalSnapshot'}
         try:
-            # TODO rename props
-            volume_spec = self.nef.filesystems.get(volume_path, payload)
+            props = self.nef.filesystems.get(volume_path, payload)
         except jsonrpc.NefException as error:
             if error.code == 'ENOENT':
                 return
             raise
         volume_exist = True
         self._unmount_volume(volume)
-        origin = volume_spec['originalSnapshot']
+        origin = props['originalSnapshot']
         payload = {'snapshots': True, 'force': True}
         while volume_exist:
             try:
@@ -1360,8 +1344,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.snapshots.clone(snapshot_path, payload)
         # TODO < 5xx ?
         self._remount_volume(volume)
-        # TODO - remove ?
-        self._set_volume_acl(volume)
         if volume['size'] > snapshot['volume_size']:
             self.extend_volume(volume, volume['size'])
         # TODO
@@ -1876,7 +1858,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    % {'reference': existing_ref, 'reason': reason})
         raise jsonrpc.NefException(code=code, message=message)
 
-    @coordination.synchronized('{self.nef.lock}')
     def manage_existing(self, volume, existing_ref):
         """Brings an existing backend storage object under Cinder management.
 
@@ -2043,7 +2024,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         pass
 
-    @coordination.synchronized('{self.nef.lock}')
     def manage_existing_snapshot(self, snapshot, existing_ref):
         """Brings an existing backend storage object under Cinder management.
 
