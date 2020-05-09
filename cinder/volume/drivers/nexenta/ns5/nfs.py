@@ -570,7 +570,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         specs = self._get_image_specs(volume)
         if not specs['sparse']:
             self._set_volume_reservation(volume, file_size, specs['format'])
-        payload = {'size': volume_size}
+        payload = {'size': file_size}
         if specs['vsolution'] and specs['format'] == VOLUME_FORMAT_RAW:
             if self.nas_secure_file_permissions:
                 payload['mode'] = '660'
