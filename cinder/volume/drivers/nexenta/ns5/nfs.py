@@ -283,8 +283,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def get_driver_options():
         return options.NEXENTASTOR5_NFS_OPTS
 
-    def do_setup(self, ctxt):
-        self._context = ctxt
+    def do_setup(context, ctxt):
+        self._context = context
         retries = 0
         while not self._do_setup():
             retries += 1
@@ -536,6 +536,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    'volume_meta': volume_meta, 'meta_size': meta_size})
         return reservation
 
+    #TODO: volume_size -> file_size
     def _set_volume_reservation(self, volume, volume_size, volume_format):
         reservation = 0
         if volume_size:
@@ -569,10 +570,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param volume: volume reference
         """
         volume_path = self._create_volume(volume)
-        volume_size = volume['size'] * units.Gi
+        file_size = volume['size'] * units.Gi
         specs = self._get_image_specs(volume)
         if not specs['sparse']:
-            self._set_volume_reservation(volume, volume_size, specs['format'])
+            self._set_volume_reservation(volume, file_size, specs['format'])
         payload = {'size': volume_size}
         if specs['vsolution'] and specs['format'] == VOLUME_FORMAT_RAW:
             if self.nas_secure_file_permissions:
@@ -2292,7 +2293,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_path = self._get_volume_path(volume)
         items = self.nef.filesystems.properties
         names = [item['api'] for item in items if 'api' in item]
-        # TODO: NEX-21595
         names += ['source']
         fields = ','.join(names)
         payload = {'fields': fields, 'source': True}
@@ -2353,7 +2353,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         specs = self._get_image_specs(volume, new_type)
         image = VolumeImage(self, volume, specs)
-        volume_size = image.file_size
+        file_size = image.file_size
+        file_format = image.file_format
         # TODO: get format from metadata or info if empty
         volume_format = 1
         if volume_format != image.file_format:
@@ -2361,10 +2362,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self._change_volume_format(volume, image.file_path, volume_format,
                                        image.file_format)
 
-        if imge.file_sparse:
-            volume_size = 0
+        if image.file_sparse:
+            file_size = 0
 
-        self._set_volume_reservation(volume, volume_size, image.file_format)
+        self._set_volume_reservation(volume, file_size, file_format)
 
         # TODO meta
         return True, None
