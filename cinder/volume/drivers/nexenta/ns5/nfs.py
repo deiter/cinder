@@ -283,9 +283,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.configuration.nexenta_group_snapshot_template)
         self.origin_snapshot_template = (
             self.configuration.nexenta_origin_snapshot_template)
-        self.image_cache_template = (
+        self.cache_image_template = (
             self.configuration.nexenta_cache_image_template)
-        self.image_snapshot_template = (
+        self.cache_snapshot_template = (
             self.configuration.nexenta_cache_snapshot_template)
         self.migration_service_prefix = (
             self.configuration.nexenta_migration_service_prefix)
@@ -675,7 +675,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def _create_cache(self, ctxt, cache, image_id, image_service):
         snapshot = {
             'id': cache['id'],
-            'name': self.image_snapshot_template % cache['id'],
+            'name': self.cache_snapshot_template % cache['id'],
             'volume_id': cache['id'],
             'volume_name': cache['name']
         }
@@ -745,7 +745,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         name = nexenta_utils.native_string(compound)
 
         cache_id = six.text_type(uuid.uuid5(namespace, name))
-        cache_name = self.image_cache_template % cache_id
+        cache_name = self.cache_image_template % cache_id
         cache_type_id = volume['volume_type_id']
 
         cache = {
@@ -1277,11 +1277,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if not origin:
             return
         origin_path, snapshot_name = origin.split('@')
-        if not nexenta_utils.match_template(self.image_snapshot_template,
+        if not nexenta_utils.match_template(self.cache_snapshot_template,
                                             snapshot_name):
             return
         origin_name = posixpath.basename(origin_path)
-        if not nexenta_utils.match_template(self.image_cache_template,
+        if not nexenta_utils.match_template(self.cache_image_template,
                                             origin_name):
             return
         self._delete_cache(origin_name, origin_path, origin)
@@ -2005,7 +2005,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 continue
             if parent != self.nas_path:
                 continue
-            if nexenta_utils.match_template(self.image_cache_template, name):
+            if nexenta_utils.match_template(self.cache_image_template, name):
                 LOG.debug('Skip image cache %(path)s',
                           {'path': path})
                 continue
@@ -2162,7 +2162,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'volume %(parent)s is unmanaged',
                           {'path': path, 'parent': parent})
                 continue
-            if nexenta_utils.match_template(self.image_snapshot_template,
+            if nexenta_utils.match_template(self.cache_snapshot_template,
                                             name):
                 LOG.debug('Skip image cache snapshot %(path)s',
                           {'path': path})
