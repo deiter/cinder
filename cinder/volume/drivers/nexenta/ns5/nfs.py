@@ -642,9 +642,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
                       {'name': cache_name, 'count': count,
                        'clones': clones})
             return
-        payload = {'force': True, 'snapshots': True}
+        payload = {'snapshots': True, 'force': True}
         try:
-            self.nef.volumes.delete(cache_path, payload)
+            self.nef.filesystems.delete(cache_path, payload)
         except jsonrpc.NefException as error:
             LOG.error('Failed to delete image cache %(name)s: %(error)s',
                       {'name': cache_name, 'error': error})
@@ -1264,7 +1264,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_exist = True
         self._unmount_volume(volume)
         origin = volume_spec['originalSnapshot']
-        payload = {'force': True, 'snapshots': True}
+        payload = {'snapshots': True, 'force': True}
         while volume_exist:
             try:
                 self.nef.filesystems.delete(volume_path, payload)
