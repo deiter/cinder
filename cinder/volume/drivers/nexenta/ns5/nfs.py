@@ -55,21 +55,6 @@ VOLUME_FORMAT_VPC = 'vpc'
 VOLUME_FORMAT_QED = 'qed'
 
 
-class VolumeDataset(object):
-    def __init__(self, driver, volume):
-        self.driver = driver
-        self.volume = volume
-        self.volume_path = driver._get_volume_path(volume)
-        self.payload = driver._get_volume_specs(volume)
-
-    # TODO - remove!
-    def create(self):
-        payload = self.payload
-        payload['path'] = self.volume_path
-        self.driver.nef.filesystems.create(payload)
-        self.driver._set_volume_acl(self.volume)
-
-
 class VolumeImage(object):
     def __init__(self, driver, volume, specs):
         self.driver = driver
