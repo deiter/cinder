@@ -656,7 +656,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             props = self.nef.filesystems.get(cache_path, payload)
         except jsonrpc.NefException as error:
             if error.code == 'ENOENT':
-                return None, None
+                return cache, snapshot
             raise
         cache_size = props['referencedReservationSize']
         cache['size'] = cache_size // units.Gi
@@ -666,7 +666,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.nef.snapshots.get(snapshot_path, payload)
         except jsonrpc.NefException as error:
             if error.code == 'ENOENT':
-                return cache, None
+                return cache, snapshot
             raise
         snapshot['volume_size'] = cache['size']
         return cache, snapshot
@@ -677,13 +677,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'id': cache['id'],
             'name': self.image_snapshot_template % cache['id'],
             'volume_id': cache['id'],
-            'volume_name': cache['name'],
-            'volume_size': cache['size']
+            'volume_name': cache['name']
         }
         cache, snapshot = self._verify_cache(cache, snapshot)
-        if snapshot and snapshot.get('volume_size', 0) > 0:
+        if snapshot.get('volume_size', 0) > 0:
             return snapshot
-        if cache:
+        if 'size' in cache:
             self.delete_volume(cache)
         cache_path = self._create_volume(cache)
         specs = self._get_image_specs(cache)
@@ -751,7 +750,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         cache = {
             'id': cache_id,
             'name': cache_name,
-            'size': 0,
             'volume_type_id': cache_type_id
         }
 
