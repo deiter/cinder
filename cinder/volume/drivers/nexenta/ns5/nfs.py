@@ -533,7 +533,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    'volume_meta': volume_meta, 'meta_size': meta_size})
         return reservation
 
-    #TODO: volume_size -> file_size
     def _set_volume_reservation(self, volume, volume_size, volume_format):
         reservation = 0
         if volume_size:
