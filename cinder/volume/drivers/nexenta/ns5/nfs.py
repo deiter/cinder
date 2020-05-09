@@ -603,7 +603,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def copy_image_to_volume(self, context, volume, image_service, image_id):
         specs = self._get_image_specs(volume)
         LOG.debug('Copy image %(image)s to %(format)s volume %(volume)s',
-                  {'image': image_meta['id'], 'format': specs['format'],
+                  {'image': image_id, 'format': specs['format'],
                    'volume': volume['name']})
         image = VolumeImage(self, volume, specs)
         image.download(context, image_service, image_id)
