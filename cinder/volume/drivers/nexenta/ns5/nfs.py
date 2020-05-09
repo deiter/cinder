@@ -684,6 +684,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             return snapshot
         if 'size' in cache:
             self.delete_volume(cache)
+        cache['size'] = 0
         cache_path = self._create_volume(cache)
         specs = self._get_image_specs(cache)
         image = VolumeImage(self, cache, specs)
