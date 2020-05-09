@@ -441,7 +441,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         diff = {}
         host = volume['host']
         self.retype(self.ctxt, volume, volume_type, diff, host)
-        # TODO: self._context 
 
     def _get_volume_reservation(self, volume, volume_size, volume_format):
         """Calculates the correct reservation size for given volume size.
