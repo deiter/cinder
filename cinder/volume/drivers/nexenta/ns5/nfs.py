@@ -26,7 +26,6 @@ from oslo_utils import strutils
 from oslo_utils import units
 import six
 
-from cinder import context
 from cinder import coordination
 from cinder.i18n import _
 from cinder.image import image_utils
@@ -104,17 +103,17 @@ class VolumeImage(object):
         if file_format not in formats:
             self.convert(file_format)
 
-    def upload(self, context, image_service, image_meta):
+    def upload(self, ctxt, image_service, image_meta):
         image_utils.upload_volume(
-            context, image_service,
+            ctxt, image_service,
             image_meta, self.file_path,
             volume_format=self.file_format,
             run_as_root=self.root)
 
-    def download(self, context, image_service, image_id):
+    def download(self, ctxt, image_service, image_id):
         size = self.file_size
         image_utils.fetch_to_volume_format(
-            context, image_service,
+            ctxt, image_service,
             image_id, self.file_path,
             self.file_format,
             self.block_size,
@@ -219,7 +218,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
     driver_volume_type = 'nfs'
 
     def __init__(self, execute=processutils.execute, *args, **kwargs):
-        self._context = None
         self._remotefsclient = None
         super(NexentaNfsDriver, self).__init__(*args, **kwargs)
         if not self.configuration:
@@ -252,6 +250,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             nfs_mount_point_base=self.mount_point_base,
             nfs_mount_options=self.mount_options)
         self.nef = None
+        self.ctxt = None
         self.nas_stat = None
         self.backend_name = self._get_backend_name()
         self.nas_driver = self.__class__.__name__
@@ -283,8 +282,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def get_driver_options():
         return options.NEXENTASTOR5_NFS_OPTS
 
-    def do_setup(context, ctxt):
-        self._context = context
+    def do_setup(self, ctxt):
+        self.ctxt = ctxt
         retries = 0
         while not self._do_setup():
             retries += 1
@@ -437,12 +436,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         if not volume['volume_type_id']:
             return
-        ctxt = context.get_admin_context()
         volume_type_id = volume['volume_type_id']
         volume_type = volume_types.get_volume_type(ctxt, volume_type_id)
         diff = {}
         host = volume['host']
-        self.retype(ctxt, volume, volume_type, diff, host)
+        self.retype(self.ctxt, volume, volume_type, diff, host)
         # TODO: self._context 
 
     def _get_volume_reservation(self, volume, volume_size, volume_format):
@@ -584,13 +582,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
             image.create()
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
         specs = self._get_image_specs(volume)
         LOG.debug('Copy image %(image)s to %(format)s volume %(volume)s',
                   {'image': image_id, 'format': specs['format'],
                    'volume': volume['name']})
         image = VolumeImage(self, volume, specs)
-        image.download(context, image_service, image_id)
+        image.download(ctxt, image_service, image_id)
 
     @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
     def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
@@ -1634,8 +1632,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor Appliance."""
         provisioned_capacity_gb = total_volumes = total_snapshots = 0
-        ctxt = context.get_admin_context()
-        volumes = objects.VolumeList.get_all_by_host(ctxt, self.host)
+        volumes = objects.VolumeList.get_all_by_host(self.ctxt, self.host)
         for volume in volumes:
             provisioned_capacity_gb += volume['size']
             total_volumes += 1
@@ -1784,8 +1781,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             uuid.UUID(snapshot_id, version=4)
         except ValueError:
             return False
-        ctxt = context.get_admin_context()
-        return objects.Snapshot.exists(ctxt, snapshot_id)
+        return objects.Snapshot.exists(self.ctxt, snapshot_id)
 
     def _get_existing_snapshot(self, snapshot, existing_ref):
         types = {
@@ -2086,8 +2082,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         manageable_snapshots = []
         cinder_volume_names = {}
         cinder_snapshot_names = {}
-        ctxt = context.get_admin_context()
-        cinder_volumes = objects.VolumeList.get_all_by_host(ctxt, self.host)
+        cinder_volumes = objects.VolumeList.get_all_by_host(self.ctxt, self.host)
         for cinder_volume in cinder_volumes:
             key = self._get_volume_path(cinder_volume)
             value = {
