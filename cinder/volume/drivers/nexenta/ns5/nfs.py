@@ -755,10 +755,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'volume_type_id': cache_type_id
         }
 
-        #try:
-            snapshot = self._create_cache(ctxt, cache,
-                                          image_id,
-                                          image_service)
+        #try: xxx
+        snapshot = self._create_cache(ctxt, cache,
+                                      image_id,
+                                      image_service)
         try:
             sss=3
         except Exception as error:
