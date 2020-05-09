@@ -111,18 +111,16 @@ class VolumeImage(object):
                      '-f', self.file_format,
                      self.file_path)
 
-    def resize(self, size=None):
+    def resize(self, size):
         formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
         file_format = self.file_format
-        if self.file_format not in formats:
+        if file_format not in formats:
             self.convert(VOLUME_FORMAT_RAW)
-        if not size:
-            size = self.file_size
         image_utils.resize_image(
             self.file_path, size,
             run_as_root=self.root)
-        if self.file_format not in formats:
-            self.convert(self.file_format)
+        if file_format not in formats:
+            self.convert(file_format)
 
     def upload(self, context, image_service, image_meta):
         image_utils.upload_volume(
@@ -132,12 +130,15 @@ class VolumeImage(object):
             run_as_root=self.root)
 
     def download(self, context, image_service, image_id):
+        size = self.file_size
         image_utils.fetch_to_volume_format(
             context, image_service,
             image_id, self.file_path,
             self.file_format,
             self.block_size,
             run_as_root=self.root)
+        if size:
+            image.resize(size)
 
     def convert(self, file_format):
         file_path = '%(path)s.%(format)s' % {
@@ -151,6 +152,7 @@ class VolumeImage(object):
             src_format=self.file_format,
             run_as_root=self.root)
         self.execute('mv', file_path, self.file_path)
+        self.file_format = file_format
 
     @property
     def info(self):
@@ -459,7 +461,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         diff = {}
         host = volume['host']
         self.retype(ctxt, volume, volume_type, diff, host)
-        # TODO: self._context & volume_type_id == None ?
+        # TODO: self._context 
 
     def _get_volume_reservation(self, volume, volume_size, volume_format):
         """Calculates the correct reservation size for given volume size.
@@ -606,7 +608,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    'volume': volume['name']})
         image = VolumeImage(self, volume, specs)
         image.download(context, image_service, image_id)
-        image.resize()
 
     @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
     def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
@@ -753,12 +754,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'volume_type_id': cache_type_id
         }
 
-        #try: xxx
-        snapshot = self._create_cache(ctxt, cache,
-                                      image_id,
-                                      image_service)
         try:
-            sss=3
+            snapshot = self._create_cache(ctxt, cache,
+                                          image_id,
+                                          image_service)
         except Exception as error:
             LOG.error('Failed to create cache %(cache)s '
                       'for image %(image)s: %(error)s',
