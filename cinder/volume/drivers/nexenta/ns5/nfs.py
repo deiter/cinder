@@ -642,7 +642,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                       {'name': cache_name, 'count': count,
                        'clones': clones})
             return
-        payload = {'snapshots': True, 'force': True}
+        payload = {'force': True, 'snapshots': True}
         try:
             self.nef.volumes.delete(cache_path, payload)
         except jsonrpc.NefException as error:
@@ -1264,7 +1264,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_exist = True
         self._unmount_volume(volume)
         origin = volume_spec['originalSnapshot']
-        payload = {'snapshots': True, 'force': True}
+        payload = {'force': True, 'snapshots': True}
         while volume_exist:
             try:
                 self.nef.filesystems.delete(volume_path, payload)
