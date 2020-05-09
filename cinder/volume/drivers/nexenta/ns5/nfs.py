@@ -1137,7 +1137,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         nfs_share = self._get_volume_share(volume)
         data = {
             'export': nfs_share,
-            'format': metadata['format']
+            'format': metadata['format'],
             'name': VOLUME_FILE_NAME
         }
         if self.mount_options:
