@@ -755,10 +755,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'volume_type_id': cache_type_id
         }
 
-        try:
+        #try:
             snapshot = self._create_cache(ctxt, cache,
                                           image_id,
                                           image_service)
+        try:
+            sss=3
         except Exception as error:
             LOG.error('Failed to create cache %(cache)s '
                       'for image %(image)s: %(error)s',
