@@ -578,6 +578,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         else:
             image = VolumeImage(self, volume, specs)
             image.create()
+        metadata = {'format': specs['format']}
+        model_update = {'metadata': metadata}
+        return model_update
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
@@ -587,6 +590,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    'volume': volume['name']})
         image = VolumeImage(self, volume, specs)
         image.download(ctxt, image_service, image_id)
+        # TODO: check volume meta
 
     @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
     def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
@@ -596,6 +600,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    'image': image_meta['id']})
         image = VolumeImage(self, volume, specs)
         image.upload(ctxt, image_service, image_meta)
+        # TODO: check image meta
 
     @coordination.synchronized('{self.nef.lock}-{cache_name}')
     def _delete_cache(self, cache_name, cache_path, snapshot_path):
@@ -670,16 +675,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         image.download(ctxt, image_service, image_id)
         image_size = nexenta_utils.roundup(image.info.virtual_size, units.Gi)
         cache['size'] = image_size // units.Gi
-
-        #with image_utils.TemporaryImages.fetch(image_service, ctxt,
-        #                                       image_id) as image_file:
-        #    info = image_utils.qemu_img_info(image_file)
-        #    image_size = nexenta_utils.roundup(info.virtual_size, units.Gi)
-        #    cache['size'] = image_size // units.Gi
-        #    specs = self._get_image_specs(cache)
-        #    image = VolumeImage(self, cache, specs)
-        #    image.load(image_file)
-
         payload = {'referencedReservationSize': image_size}
         self.nef.filesystems.set(cache_path, payload)
         snapshot['volume_size'] = cache['size']
@@ -708,31 +703,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         if not self.image_cache:
             return None, False
-
         image_id = image_meta['id']
-        image_checksum = image_meta['checksum']
-
         specs = self._get_image_specs(volume)
-        volume_format = specs['format']
-
         compound = '%(checksum)s:%(format)s' % {
-            'checksum': image_checksum,
-            'format': volume_format
+            'checksum': image_meta['checksum'],
+            'format': specs['format']
         }
-
         namespace = uuid.UUID(image_id, version=4)
         name = nexenta_utils.native_string(compound)
-
         cache_id = six.text_type(uuid.uuid5(namespace, name))
         cache_name = self.cache_image_template % cache_id
         cache_type_id = volume['volume_type_id']
-
         cache = {
             'id': cache_id,
             'name': cache_name,
             'volume_type_id': cache_type_id
         }
-
         try:
             snapshot = self._create_cache(ctxt, cache,
                                           image_id,
@@ -744,7 +730,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        'image': image_id,
                        'error': error})
             return None, False
-
         if snapshot['volume_size'] > volume['size']:
             code = 'ENOSPC'
             message = (_('Unable to clone cache %(cache)s for '
@@ -756,7 +741,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'cache_size': snapshot['volume_size'],
                           'volume_size': volume['size']})
             raise jsonrpc.NefException(code=code, message=message)
-
         try:
             self.create_volume_from_snapshot(volume, snapshot)
         except jsonrpc.NefException as error:
@@ -765,10 +749,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                       {'cache': cache['name'], 'image': image_id,
                        'volume': volume['name'], 'error': error})
             return None, False
-
-        volume_metadata = {'format': volume_format}
-        model_update = {'metadata': volume_metadata}
-
+        metadata = {'format': specs['format']}
+        model_update = {'metadata': metadata}
         return model_update, True
 
     def _mount_volume(self, volume):
@@ -1112,6 +1094,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if self._migrate_volume(volume, nef_scheme, nef_hosts, nef_port,
                                 nas_path):
             return (True, None)
+            # TODO: check model update
         return false_ret
 
     def create_export(self, ctxt, volume, connector):
@@ -1148,18 +1131,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   'and connector %(connector)s',
                   {'volume': volume['name'],
                    'connector': connector})
-        volume_path = self._get_volume_path(volume)
-        payload = {
-            'fields': 'nonBlockingMandatoryMode,source',
-            'source': True
-        }
-        # TODO - format get from meta or specs
-        specs = driver._get_image_specs(volume)
-        file_format = specs['format']
+        metadata = self._get_volume_metadata(volume)
+        if 'format' not in metadata:
+            metadata = self._get_image_specs(volume)
         nfs_share = self._get_volume_share(volume)
         data = {
             'export': nfs_share,
-            'format': file_format,
+            'format': metadata['format']
             'name': VOLUME_FILE_NAME
         }
         if self.mount_options:
@@ -1279,9 +1257,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param snapshot: snapshot reference
         """
+        #volume = self.db.volume_get(self.ctxt, snapshot['volume_id'])
+        metadata = self.db.volume_metadata_get(self.ctxt, snapshot['volume_id'])
         snapshot_path = self._get_snapshot_path(snapshot)
         payload = {'path': snapshot_path}
         self.nef.snapshots.create(payload)
+        model_update = {'metadata': metadata}
+        return model_update
 
     def delete_snapshot(self, snapshot):
         """Deletes a snapshot.
@@ -1600,6 +1582,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'mount_point': props['mountPoint']
         }
         return nfs_share
+
+    def _get_volume_metadata(self, volume):
+        if 'volume_metadata' in volume:
+            meta = volume['volume_metadata']
+            return {_['key']: _['value'] for _ in meta}
+        if 'metadata' in volume:
+            return volume['metadata']
+        return {}
+
+    def _get_snapshot_metadata(self, snapshot):
+        if 'snapshot_metadata' in snapshot:
+            meta = snapshot['snapshot_metadata']
+            return {_['key']: _['value'] for _ in meta}
+        if 'metadata' in snapshot:
+            return snapshot['metadata']
+        return {}
 
     def _get_volume_path(self, volume):
         """Return ZFS dataset path for the volume."""
