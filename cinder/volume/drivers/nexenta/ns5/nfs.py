@@ -1270,9 +1270,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         file_size = size * units.Gi
         specs = self._get_image_specs(volume)
         if not specs['sparse']:
-            # TODO: file_size -> new_size in GB ?? or pass VolumeImage ?
             self._set_volume_reservation(volume, file_size, image.file_format)
-        LOG.info('Extend %(format)s volume %(volume)s, new size: %(size)sGB',
+        LOG.info('Extend %(format)s volume %(volume)s to %(size)sGB',
                  {'format': specs['format'], 'volume': volume['name'],
                   'size': size})
         image = VolumeImage(self, volume, specs)
