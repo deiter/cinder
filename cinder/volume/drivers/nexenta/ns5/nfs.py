@@ -75,6 +75,7 @@ class VolumeImage(object):
         self.driver = driver
         self.volume = volume
         self.root = driver._execute_as_root
+        self.block_size = driver.configuration.volume_dd_blocksize
         self.file_format = specs['format']
         self.file_sparse = specs['sparse']
         self.file_size = volume['size'] * units.Gi
@@ -87,12 +88,18 @@ class VolumeImage(object):
     def __del__(self):
         self.unmount()
 
+    def execute(self, *cmd, **kwargs):
+        if 'run_as_root' not in kwargs:
+            kwargs['run_as_root'] = self.root
+        self.driver._execute(*cmd, **kwargs)
+
     def mount(self):
         self.nfs_share, self.mount_point, self.file_path = self.driver._mount_volume(self.volume)
 
     def unmount(self):
         self.driver._unmount_volume(self.volume, self.nfs_share, self.mount_point)
 
+    # TODO: polish!
     # calls by create_volume
     def create(self):
         payload = {'size': self.file_size}
@@ -104,97 +111,54 @@ class VolumeImage(object):
                      '-f', self.file_format,
                      self.file_path)
 
-    def execute(self, *cmd, **kwargs):
-        if 'run_as_root' not in kwargs:
-            kwargs['run_as_root'] = self.root
-        self.driver._execute(*cmd, **kwargs)
-
-    # calls by _create_cache
-    def load(self, image_file):
-        image_utils.convert_image(image_file,
-                                  self.file_path,
-                                  self.file_format,
-                                  run_as_root=self.root)
-
-    # calls by copy_image_to_volume
-    def copy(self, context, image_service, image_id):
+    def resize(self, size=None):
+        formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
         file_format = self.file_format
-        image_blocksize = self.driver.configuration.volume_dd_blocksize
-        extendable_formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
-        if self.file_format not in extendable_formats:
-            file_format = VOLUME_FORMAT_RAW
-        image_utils.fetch_to_volume_format(context, image_service,
-                                           image_id, self.file_path,
-                                           file_format, image_blocksize,
-                                           run_as_root=self.root)
-        if self.file_size > self.info.virtual_size:
-            image_utils.resize_image(self.file_path,
-                                     self.file_size,
-                                     run_as_root=self.root)
-        if self.file_format not in extendable_formats:
+        if self.file_format not in formats:
+            self.convert(VOLUME_FORMAT_RAW)
+        if not size:
+            size = self.file_size
+        image_utils.resize_image(
+            self.file_path, size,
+            run_as_root=self.root)
+        if self.file_format not in formats:
             self.convert(self.file_format)
 
-    def convert(self, new_format):
-        # TODO
-        info = self.info
-        backup_file = '%(path)s.%(format)s' % {
+    def upload(self, context, image_service, image_meta):
+        image_utils.upload_volume(
+            context, image_service,
+            image_meta, self.file_path,
+            volume_format=self.file_format,
+            run_as_root=self.root)
+
+    def download(self, context, image_service, image_id):
+        image_utils.fetch_to_volume_format(
+            context, image_service,
+            image_id, self.file_path,
+            self.file_format,
+            self.block_size,
+            run_as_root=self.root)
+
+    def convert(self, file_format):
+        file_path = '%(path)s.%(format)s' % {
             'path': self.file_path,
-            'format': info.file_format
+            'format': file_format
         }
-        try:
-            self.execute('mv', self.volume_file, backup_file)
-        except OSError as error:
-            code = errno.errorcode[error.errno]
-            message = (_('Failed to rename backend file %(volume_file)s '
-                         'to %(backup_file)s before converting volume '
-                         '%(volume)s: %(error)s')
-                       % {'volume_file': self.volume_file,
-                          'backup_file': backup_file,
-                          'volume': self.volume_name,
-                          'error': error.strerror})
-            raise jsonrpc.NefException(code=code, message=message)
-        try:
-            self.execute('qemu-img', 'convert', '-f', self.volume_format,
-                         '-O', new_format, backup_file, self.volume_file)
-        except OSError as error:
-            code = errno.errorcode[error.errno]
-            message = (_('Failed to convert %(src_format)s volume file '
-                         '%(backup_file)s to %(dst_format)s volume file '
-                         '%(volume_file)s for volume %(volume)s: %(error)s')
-                       % {'src_format': self.volume_format,
-                          'backup_file': backup_file,
-                          'dst_format': new_format,
-                          'volume_file': self.volume_file,
-                          'volume': self.volume_name,
-                          'error': error.strerror})
-            raise jsonrpc.NefException(code=code, message=message)
-        try:
-            self.execute('rm', '-f', backup_file)
-        except OSError as error:
-            code = errno.errorcode[error.errno]
-            message = (_('Failed to delete %(src_format)s backup '
-                         'file %(backup_file)s after converting '
-                         'volume %(volume)s: %(error)s')
-                       % {'src_format': src_format,
-                          'backup_file': backup_file,
-                          'volume': volume['name'],
-                          'error': error.strerror})
-            raise jsonrpc.NefException(code=code, message=message)
-        LOG.debug('Successfully converted volume %(volume)s from '
-                  '%(src_format)s to %(dst_format)s format',
-                  {'volume': volume['name'],
-                   'src_format': src_format,
-                   'dst_format': dst_format})
-        backup_volume = '%(path)s.%(format)s' % {
-            'path': self.volume_path,
-            'format': self.volume_format
-        }
+        image_utils.convert_image(
+            self.file_path,
+            file_path,
+            file_format,
+            src_format=self.file_format,
+            run_as_root=self.root)
+        self.execute('mv', file_path, self.file_path)
+        # TODO: update self.* ???
 
     @property
     def info(self):
-        return image_utils.qemu_img_info(self.file_path,
-                                         force_share=True,
-                                         run_as_root=self.root)
+        return image_utils.qemu_img_info(
+            self.file_path,
+            force_share=True,
+            run_as_root=self.root)
 
 
 @interface.volumedriver
@@ -636,11 +600,23 @@ class NexentaNfsDriver(nfs.NfsDriver):
             image.create()
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
-    def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
+    def copy_image_to_volume(self, context, volume, image_service, image_id):
         specs = self._get_image_specs(volume)
+        LOG.debug('Copy image %(image)s to %(format)s volume %(volume)s',
+                  {'image': image_meta['id'], 'format': specs['format'],
+                   'volume': volume['name']})
         image = VolumeImage(self, volume, specs)
-        # TODO
-        image.copy(ctxt, image_service, image_id)
+        image.download(context, image_service, image_id)
+        image.resize()
+
+    @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
+    def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
+        specs = self._get_image_specs(volume)
+        LOG.debug('Copy %(format)s volume %(volume)s to image %(image)s',
+                  {'format': specs['format'], 'volume': volume['name'],
+                   'image': image_meta['id']})
+        image = VolumeImage(self, volume, specs)
+        image.upload(ctxt, image_service, image_meta)
 
     @coordination.synchronized('{self.nef.lock}-{cache_name}')
     def _delete_cache(self, cache_name, cache_path, snapshot_path):
@@ -701,7 +677,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'id': cache['id'],
             'name': self.image_snapshot_template % cache['id'],
             'volume_id': cache['id'],
-            'volume_name': cache['name']
+            'volume_name': cache['name'],
+            'volume_size': cache['size']
         }
         cache, snapshot = self._verify_cache(cache, snapshot)
         if snapshot and snapshot.get('volume_size', 0) > 0:
@@ -709,15 +686,21 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if cache:
             self.delete_volume(cache)
         cache_path = self._create_volume(cache)
-        with image_utils.TemporaryImages.fetch(image_service, ctxt,
-                                               image_id) as image_file:
-            info = image_utils.qemu_img_info(image_file)
-            image_size = nexenta_utils.roundup(info.virtual_size, units.Gi)
-            cache['size'] = image_size // units.Gi
-            specs = self._get_image_specs(cache)
-            image = VolumeImage(self, cache, specs)
-            image.load(image_file)
-            # TODO: move func from VolumeImage
+        specs = self._get_image_specs(cache)
+        image = VolumeImage(self, cache, specs)
+        image.download(ctxt, image_service, image_id)
+        image_size = nexenta_utils.roundup(image.info.virtual_size, units.Gi)
+        cache['size'] = image_size // units.Gi
+
+        #with image_utils.TemporaryImages.fetch(image_service, ctxt,
+        #                                       image_id) as image_file:
+        #    info = image_utils.qemu_img_info(image_file)
+        #    image_size = nexenta_utils.roundup(info.virtual_size, units.Gi)
+        #    cache['size'] = image_size // units.Gi
+        #    specs = self._get_image_specs(cache)
+        #    image = VolumeImage(self, cache, specs)
+        #    image.load(image_file)
+
         payload = {'referencedReservationSize': image_size}
         self.nef.filesystems.set(cache_path, payload)
         snapshot['volume_size'] = cache['size']
@@ -768,6 +751,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         cache = {
             'id': cache_id,
             'name': cache_name,
+            'size': 0,
             'volume_type_id': cache_type_id
         }
 
@@ -808,17 +792,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         model_update = {'metadata': volume_metadata}
 
         return model_update, True
-
-    @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
-    def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
-        specs = self._get_image_specs(volume)
-        image = VolumeImage(self, volume, specs)
-        LOG.debug('Copy %(format)s volume %(volume)s to image %(image)s',
-                  {'format': specs['format'],
-                   'volume': volume['name'],
-                   'image': image_meta['id']})
-        # TODO check file format ? use VolumeImage method ?
-        image_utils.upload_volume(ctxt, image_service, image_meta, image.file_path, volume_format=image.file_format, run_as_root=self._execute_as_root)
 
     def _mount_volume(self, volume):
         """Ensure that volume is mounted on the host.
@@ -1322,26 +1295,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
             LOG.error('Failed to remove mountpoint %(path)s: %(error)s',
                       {'path': path, 'error': error.strerror})
 
-    def extend_volume(self, volume, new_size):
+    def extend_volume(self, volume, size):
         """Extend an existing volume.
 
         :param volume: volume reference
-        :param new_size: volume new size in GB
+        :param size: volume new size in GB
         """
+        file_size = size * units.Gi
         specs = self._get_image_specs(volume)
         if not specs['sparse']:
-            # TODO: file_size -> new_size in GB
-            file_size = new_size * units.Gi
+            # TODO: file_size -> new_size in GB ?? or pass VolumeImage ?
             self._set_volume_reservation(volume, file_size, image.file_format)
         LOG.info('Extend %(format)s volume %(volume)s, new size: %(size)sGB',
                  {'format': specs['format'], 'volume': volume['name'],
-                  'size': new_size})
-
+                  'size': size})
         image = VolumeImage(self, volume, specs)
-
-        # TODO: move to VolumeImage ??
-        image_utils.resize_image(image.file_path, new_size,
-                                 run_as_root=self._execute_as_root)
+        image.resize(file_size)
 
     def create_snapshot(self, snapshot):
         """Creates a snapshot.
