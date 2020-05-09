@@ -678,7 +678,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = {'referencedReservationSize': image_size}
         self.nef.filesystems.set(cache_path, payload)
         snapshot['volume_size'] = cache['size']
-        self.create_snapshot(snapshot)
+        # TODO: direct cll NEF API ?
+        self._create_snapshot(snapshot)
         return snapshot
 
     def clone_image(self, ctxt, volume, image_location, image_meta,
@@ -742,7 +743,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'volume_size': volume['size']})
             raise jsonrpc.NefException(code=code, message=message)
         try:
-            self.create_volume_from_snapshot(volume, snapshot)
+            self._clone_snapshot(snapshot, volume)
         except jsonrpc.NefException as error:
             LOG.error('Failed to clone cache %(cache)s for image '
                       '%(image)s to volume %(volume)s: %(error)s',
@@ -1131,13 +1132,17 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   'and connector %(connector)s',
                   {'volume': volume['name'],
                    'connector': connector})
-        metadata = self._get_volume_metadata(volume)
-        if 'format' not in metadata:
-            metadata = self._get_image_specs(volume)
         nfs_share = self._get_volume_share(volume)
+        metadata = self._get_volume_metadata(volume)
+        if 'format' in metadata:
+            file_format = metadata['format']
+        else:
+            specs = self._get_image_specs(volume)
+            image = VolumeImage(self, cache, specs)
+            file_format = image.info.file_format
         data = {
             'export': nfs_share,
-            'format': metadata['format'],
+            'format': file_format,
             'name': VOLUME_FILE_NAME
         }
         if self.mount_options:
@@ -1252,17 +1257,20 @@ class NexentaNfsDriver(nfs.NfsDriver):
         image = VolumeImage(self, volume, specs)
         image.resize(file_size)
 
+    def _create_snapshot(self, snapshot):
+        snapshot_path = self._get_snapshot_path(snapshot)
+        payload = {'path': snapshot_path}
+        self.nef.snapshots.create(payload)
+
     def create_snapshot(self, snapshot):
         """Creates a snapshot.
 
         :param snapshot: snapshot reference
         """
-        #volume = self.db.volume_get(self.ctxt, snapshot['volume_id'])
+        # TODO : -> _get_volume_metadata ?
         metadata = self.db.volume_metadata_get(self.ctxt, snapshot['volume_id'])
-        snapshot_path = self._get_snapshot_path(snapshot)
-        payload = {'path': snapshot_path}
-        self.nef.snapshots.create(payload)
         model_update = {'metadata': metadata}
+        self._create_snapshot(snapshot)
         return model_update
 
     def delete_snapshot(self, snapshot):
@@ -1289,25 +1297,33 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.filesystems.rollback(volume_path, payload)
         # TODO: resize and retype ?
 
-    def create_volume_from_snapshot(self, volume, snapshot):
-        """Create new volume from other's snapshot on appliance.
-
-        :param volume: reference of volume to be created
-        :param snapshot: reference of source snapshot
-        """
-        LOG.debug('Create volume %(volume)s from snapshot %(snapshot)s',
-                  {'volume': volume['name'], 'snapshot': snapshot['name']})
-        volume_path = self._get_volume_path(volume)
+    def _clone_snapshot(self, snapshot, volume):
         snapshot_path = self._get_snapshot_path(snapshot)
+        volume_path = self._get_volume_path(volume)
         payload = {'targetPath': volume_path}
         self.nef.snapshots.clone(snapshot_path, payload)
         # TODO < 5xx ?
         self._remount_volume(volume)
         if volume['size'] > snapshot['volume_size']:
             self.extend_volume(volume, volume['size'])
-        # TODO
-        ##self._update_volume_properties(volume)
-        # update meta
+        self._update_volume_properties(volume)
+
+    def create_volume_from_snapshot(self, volume, snapshot):
+        """Create new volume from other's snapshot on appliance.
+
+        :param volume: reference of volume to be created
+        :param snapshot: reference of source snapshot
+        """
+        # TODO: remove debug ?
+        LOG.debug('Create volume %(volume)s from snapshot %(snapshot)s',
+                  {'volume': volume['name'], 'snapshot': snapshot['name']})
+        #metadata = self.db.snapshot_metadata_get(self.ctxt, snapshot['id'])
+        # TODO: get meta as a result from _update_volume ?
+        specs = self._get_image_specs(volume)
+        metadata = {'format': specs['format']}
+        model_update = {'metadata': metadata}
+        self._clone_snapshot(snapshot, volume)
+        return model_update
 
     def create_cloned_volume(self, volume, src_vref):
         """Creates a clone of the specified volume.
@@ -1321,9 +1337,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'volume_name': src_vref['name'],
             'volume_size': src_vref['size']
         }
-        self.create_snapshot(snapshot)
+        # TODO: direct call NEF API ?
+        self._create_snapshot(snapshot)
         try:
-            self.create_volume_from_snapshot(volume, snapshot)
+            self._clone_snapshot(snapshot, volume)
         except jsonrpc.NefException as error:
             LOG.error('Failed to create clone %(clone)s '
                       'from volume %(volume)s: %(error)s',
@@ -1341,7 +1358,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           {'volume': src_vref['name'],
                            'snapshot': snapshot['name'],
                            'error': error})
-        # TODO meta
+        # TODO meta get meta from _update_volume ???
+        specs = self._get_image_specs(volume)
+        metadata = {'format': specs['format']}
+        model_update = {'metadata': metadata}
+        self._clone_snapshot(snapshot, volume)
+        return model_update
 
     def create_consistencygroup(self, ctxt, group):
         """Creates a consistency group.
@@ -1491,7 +1513,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volumes_model_update = []
         if cgsnapshot and snapshots:
             for volume, snapshot in zip(volumes, snapshots):
-                self.create_volume_from_snapshot(volume, snapshot)
+                self._clone_snapshot(snapshot, volume)
         elif source_cg and source_vols:
             snapshot_name = self.origin_snapshot_template % group['id']
             snapshot_path = '%s@%s' % (self.nas_path, snapshot_name)
@@ -1504,9 +1526,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
                     'volume_name': source_vol['name'],
                     'volume_size': source_vol['size']
                 }
-                self.create_volume_from_snapshot(volume, snapshot)
+                self._clone_snapshot(snapshot, volume)
             delete_payload = {'defer': True, 'recursive': True}
             self.nef.snapshots.delete(snapshot_path, delete_payload)
+        # TODO: check meta !
         return group_model_update, volumes_model_update
 
     def create_group_from_src(self, ctxt, group, volumes,
