@@ -102,6 +102,7 @@ class VolumeImage(object):
         cmd.append(self.file_path)
         cmd.append(file_size)
         self.execute(*cmd)
+        self.file_size = file_size
 
     def change(self, file_size=None, file_format=None):
         if not file_size:
@@ -118,8 +119,6 @@ class VolumeImage(object):
                 self.convert(file_format)
             else:
                 self.convert(VOLUME_FORMAT_RAW)
-        self.file_size = file_size
-        self.file_format = file_format
 
     def upload(self, ctxt, image_service, image_meta):
         image_utils.upload_volume(
