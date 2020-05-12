@@ -92,7 +92,7 @@ class VolumeImage(object):
             cmd.append('-o preallocation=metadata')
         cmd.append(self.file_path)
         cmd.append(file_size)
-        self.execute(cmd)
+        self.execute(*cmd)
 
     def resize(self, file_size):
         cmd = ['qemu-img', 'resize', '-f']
@@ -101,7 +101,7 @@ class VolumeImage(object):
             cmd.append('--preallocation=metadata')
         cmd.append(self.file_path)
         cmd.append(file_size)
-        self.execute(cmd)
+        self.execute(*cmd)
 
     def change(self, file_size=None, file_format=None):
         if not file_size:
