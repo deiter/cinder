@@ -52,6 +52,7 @@ VOLUME_FORMAT_VHDX = 'vhdx'
 VOLUME_FORMAT_VMDK = 'vmdk'
 VOLUME_FORMAT_VPC = 'vpc'
 VOLUME_FORMAT_QED = 'qed'
+VOLUME_RESIZABLE_FORMATS = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
 
 
 class VolumeImage(object):
@@ -60,6 +61,7 @@ class VolumeImage(object):
         self.volume = volume
         self.root = driver._execute_as_root
         self.block_size = driver.configuration.volume_dd_blocksize
+        self.resizable_formats = VOLUME_RESIZABLE_FORMATS
         self.file_format = specs['format']
         self.file_sparse = specs['sparse']
         self.file_size = volume['size'] * units.Gi
@@ -84,24 +86,40 @@ class VolumeImage(object):
         self.driver._unmount_volume(self.volume, self.nfs_share, self.mount_point)
 
     def create(self):
-        props = {'size': self.file_size}
+        cmd = ['qemu-img', 'create', '-f']
+        cmd.append(self.file_format)
         if self.file_format == VOLUME_FORMAT_QCOW2:
-            props['preallocation'] = 'metadata'
-        opts = ','.join(['%s=%s' % _ for _ in props.items()])
-        self.execute('qemu-img', 'create',
-                     '-f', self.file_format,
-                     '-o', opts, self.file_path)
+            cmd.append('-o preallocation=metadata')
+        cmd.append(self.file_path)
+        cmd.append(file_size)
+        self.execute(cmd)
 
-    def resize(self, size):
-        formats = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
-        file_format = self.file_format
-        if file_format not in formats:
-            self.convert(VOLUME_FORMAT_RAW)
-        image_utils.resize_image(
-            self.file_path, size,
-            run_as_root=self.root)
-        if file_format not in formats:
-            self.convert(file_format)
+    def resize(self, file_size):
+        cmd = ['qemu-img', 'resize', '-f']
+        cmd.append(self.file_format)
+        if self.file_format == VOLUME_FORMAT_QCOW2:
+            cmd.append('--preallocation=metadata')
+        cmd.append(self.file_path)
+        cmd.append(file_size)
+        self.execute(cmd)
+
+    def change(self, file_size=None, file_format=None):
+        if not file_size:
+            file_size = self.file_size
+        if not file_format:
+            file_format = self.file_format
+        while (self.file_format != file_format
+               or self.file_size != file_size):
+            if self.file_size == file_size:
+                self.convert(file_format)
+            elif self.file_format in self.resizable_formats:
+                self.resize(file_size)
+            elif file_format in self.resizable_formats:
+                self.convert(file_format)
+            else:
+                self.convert(VOLUME_FORMAT_RAW)
+        self.file_size = file_size
+        self.file_format = file_format
 
     def upload(self, ctxt, image_service, image_meta):
         image_utils.upload_volume(
@@ -110,16 +128,21 @@ class VolumeImage(object):
             volume_format=self.file_format,
             run_as_root=self.root)
 
-    def download(self, ctxt, image_service, image_id):
-        size = self.file_size
+    def fetch(self, ctxt, image_service, image_id):
         image_utils.fetch_to_volume_format(
             ctxt, image_service,
             image_id, self.file_path,
             self.file_format,
             self.block_size,
             run_as_root=self.root)
-        if size:
-            image.resize(size)
+        self.update_file_size()
+
+    def download(self, ctxt, image_service, image_id):
+        file_format = self.file_format
+        if self.file_format not in self.resizable_formats:
+            self.file_format = VOLUME_FORMAT_RAW
+        self.fetch(ctxt, image_service, image_id)
+        self.change(file_format=file_format)
 
     def convert(self, file_format):
         file_path = '%(path)s.%(format)s' % {
@@ -135,12 +158,19 @@ class VolumeImage(object):
         self.execute('mv', file_path, self.file_path)
         self.file_format = file_format
 
-    @property
     def info(self):
         return image_utils.qemu_img_info(
             self.file_path,
             force_share=True,
             run_as_root=self.root)
+
+    def update_file_size(self):
+        info = self.info()
+        self.file_size = info.virtual_size
+
+    def update_file_format(self):
+        info = self.info()
+        self.file_format = info.file_format
 
 
 @interface.volumedriver
@@ -429,18 +459,81 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         return self.nas_secure_file_operations
 
-    def _update_volume_properties(self, volume):
+    def _change_volume_props(self, volume, volume_type=None, volume_format=None):
         """Updates the existing volume properties.
 
         :param volume: volume reference
         """
-        if not volume['volume_type_id']:
-            return
-        volume_type_id = volume['volume_type_id']
-        volume_type = volume_types.get_volume_type(self.ctxt, volume_type_id)
-        diff = {}
-        host = volume['host']
-        self.retype(self.ctxt, volume, volume_type, diff, host)
+        # TODO ret refreservation ?
+        # self._retype
+
+        volume_path = self._get_volume_path(volume)
+        items = self.nef.filesystems.properties
+        names = [item['api'] for item in items if 'api' in item]
+        names += ['source']
+        fields = ','.join(names)
+        payload = {'fields': fields, 'source': True}
+        props = self.nef.filesystems.get(volume_path, payload)
+        src = props['source']
+        specs = self._get_volume_specs(volume, volume_type)
+        payload = {}
+        for item in items:
+            if 'api' not in item:
+                continue
+            api = item['api']
+            if api in specs:
+                value = specs[api]
+                if props[api] == value:
+                    continue
+                if 'retype' in item:
+                    code = 'EINVAL'
+                    message = (_('Failed to change volume %(volume)s '
+                                 'to volume type %(type)s. %(reason)s')
+                               % {'volume': volume['name'],
+                                  'type': volume_type['name'],
+                                  'reason': item['retype']})
+                    raise jsonrpc.NefException(code=code, message=message)
+                payload[api] = value
+            elif src[api] in ['local', 'received']:
+                if props[api] == item['default']:
+                    continue
+                if 'inherit' in item:
+                    LOG.debug('Unable to inherit property %(name)s '
+                              'from volume type %(type)s for volume '
+                              '%(volume)s. %(reason)s',
+                              {'name': api,
+                               'type': new_type['name'],
+                               'volume': volume['name'],
+                               'reason': item['inherit']})
+                    continue
+                payload[api] = None
+        try:
+            self.nef.filesystems.set(volume_path, payload)
+        except jsonrpc.NefException as error:
+            LOG.error('Failed to retype volume %(volume)s on '
+                      'host %(host)s to volume type %(type)s '
+                      'with payload %(payload)s: %(error)s',
+                      {'volume': volume['name'],
+                       'host': host,
+                       'type': new_type['name'],
+                       'payload': payload,
+                       'error': error})
+            raise
+
+        
+        specs = self._get_image_specs(volume, volume_type)
+        file_format = specs['format']
+        if volume_format:
+            specs['format'] = volume_format
+        image = VolumeImage(self, volume, specs)
+        # TODO ? auto-update in class
+        if not volume_format:
+            image.update_file_format()
+        image.update_file_size()
+        image.change(file_format=file_format)
+        if image.file_sparse:
+            file_size = 0
+        self._set_volume_reservation(volume, file_size, file_format)
 
     def _get_volume_reservation(self, volume, volume_size, volume_format):
         """Calculates the correct reservation size for given volume size.
@@ -672,11 +765,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         cache_path = self._create_volume(cache)
         specs = self._get_image_specs(cache)
         image = VolumeImage(self, cache, specs)
-        image.download(ctxt, image_service, image_id)
-        image_size = nexenta_utils.roundup(image.info.virtual_size, units.Gi)
-        cache['size'] = image_size // units.Gi
-        payload = {'referencedReservationSize': image_size}
+        image.fetch(ctxt, image_service, image_id)
+        payload = {'referencedReservationSize': image.file_size}
         self.nef.filesystems.set(cache_path, payload)
+        cache['size'] = image.file_size // units.Gi
         snapshot['volume_size'] = cache['size']
         # TODO: direct cll NEF API ?
         self._create_snapshot(snapshot)
@@ -1134,12 +1226,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    'connector': connector})
         nfs_share = self._get_volume_share(volume)
         metadata = self._get_volume_metadata(volume)
+        # TODO ?
         if 'format' in metadata:
             file_format = metadata['format']
         else:
             specs = self._get_image_specs(volume)
             image = VolumeImage(self, cache, specs)
-            file_format = image.info.file_format
+            image.update()
+            file_format = image.file_format
         data = {
             'export': nfs_share,
             'format': file_format,
@@ -1241,21 +1335,22 @@ class NexentaNfsDriver(nfs.NfsDriver):
             LOG.error('Failed to remove mountpoint %(path)s: %(error)s',
                       {'path': path, 'error': error.strerror})
 
-    def extend_volume(self, volume, size):
+    def extend_volume(self, volume, new_size):
         """Extend an existing volume.
 
         :param volume: volume reference
-        :param size: volume new size in GB
+        :param new_size: volume new size in GB
         """
-        file_size = size * units.Gi
+        file_size = new_size * units.Gi
         specs = self._get_image_specs(volume)
         if not specs['sparse']:
             self._set_volume_reservation(volume, file_size, image.file_format)
-        LOG.info('Extend %(format)s volume %(volume)s to %(size)sGB',
+        LOG.info('Extend %(format)s volume %(volume)s to %(new_size)sGB',
                  {'format': specs['format'], 'volume': volume['name'],
-                  'size': size})
+                  'new_size': new_size})
+        # TODO: meta ? spec can be changed :-(
         image = VolumeImage(self, volume, specs)
-        image.resize(file_size)
+        image.change(file_size=file_size)
 
     def _create_snapshot(self, snapshot):
         snapshot_path = self._get_snapshot_path(snapshot)
@@ -1304,9 +1399,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.snapshots.clone(snapshot_path, payload)
         # TODO < 5xx ?
         self._remount_volume(volume)
-        if volume['size'] > snapshot['volume_size']:
-            self.extend_volume(volume, volume['size'])
-        self._update_volume_properties(volume)
+
+        # TODO move extend/update to separate func ?
+
+        # TODO Image clone (vars)
+        #if volume['size'] > snapshot['volume_size']:
+        #    self.extend_volume(volume, volume['size'])
+        # TODO - meta ? file_size ?
+        self._change_volume_props(volume)
 
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create new volume from other's snapshot on appliance.
@@ -1892,7 +1992,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
             volume_path = self._get_volume_path(volume)
             payload = {'newPath': volume_path}
             self.nef.filesystems.rename(existing_volume_path, payload)
-        self._update_volume_properties(volume)
+        # TODO ? resize ?
+        self._change_volume_props(volume)
 
     def manage_existing_get_size(self, volume, existing_ref):
         """Return size of volume to be managed by manage_existing.
@@ -1906,6 +2007,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         existing_volume = self._get_existing_volume(existing_ref)
         self._set_volume_acl(existing_volume)
+        # TODO
         nfs_share, mount_point, existing_volume_file = (
             self._mount_volume(existing_volume))
         try:
@@ -2304,85 +2406,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'volume': volume['name'], 'host': host,
                    'type': new_type['name'], 'diff': diff})
 
-        volume_path = self._get_volume_path(volume)
-        items = self.nef.filesystems.properties
-        names = [item['api'] for item in items if 'api' in item]
-        names += ['source']
-        fields = ','.join(names)
-        payload = {'fields': fields, 'source': True}
-        props = self.nef.filesystems.get(volume_path, payload)
-        src = props['source']
-        specs = self._get_volume_specs(volume, new_type)
-        payload = {}
-        for item in items:
-            api = item['api']
-            if api in specs:
-                value = specs[api]
-                if props[api] == value:
-                    continue
-                if 'retype' in item:
-                    code = 'EINVAL'
-                    message = (_('Failed to retype volume %(volume)s '
-                                 'on host %(host)s to volume type '
-                                 '%(type)s. %(reason)s')
-                               % {'volume': volume['name'],
-                                  'host': host,
-                                  'type': new_type['name'],
-                                  'reason': item['retype']})
-                    raise jsonrpc.NefException(code=code, message=message)
-                payload[api] = value
-            elif src[api] in ['local', 'received']:
-                if props[api] == item['default']:
-                    continue
-                if 'inherit' in item:
-                    LOG.debug('Unable to inherit property %(name)s '
-                              'from volume type %(type)s for volume '
-                              '%(volume)s. %(reason)s',
-                              {'name': api,
-                               'type': new_type['name'],
-                               'volume': volume['name'],
-                               'reason': item['inherit']})
-                    continue
-                payload[api] = None
+        # TODO file type from meta
+        self._change_volume_props(volume, new_type)
 
-        #if 'sparseVolume' in payload:
-        #    sparse_volume = payload.pop('sparseVolume')
-        #if 'volumeFormat' in payload:
-        #    volume_new_format = payload.pop('volumeFormat')
-        #if 'vSolution' in payload:
-        #    del payload['vSolution']
 
-        try:
-            self.nef.filesystems.set(volume_path, payload)
-        except jsonrpc.NefException as error:
-            LOG.error('Failed to retype volume %(volume)s on '
-                      'host %(host)s to volume type %(type)s '
-                      'with payload %(payload)s: %(error)s',
-                      {'volume': volume['name'],
-                       'host': host,
-                       'type': new_type['name'],
-                       'payload': payload,
-                       'error': error})
-            raise
-
-        specs = self._get_image_specs(volume, new_type)
-        image = VolumeImage(self, volume, specs)
-        file_size = image.file_size
-        file_format = image.file_format
-        # TODO: get format from metadata or info if empty
-        volume_format = 1
-        if volume_format != image.file_format:
-            # TODO: check for volume arg
-            self._change_volume_format(volume, image.file_path, volume_format,
-                                       image.file_format)
-
-        if image.file_sparse:
-            file_size = 0
-
-        self._set_volume_reservation(volume, file_size, file_format)
-
+        metadata = {'format': specs['format']}
+        model_update = {'metadata': metadata}
         # TODO meta
-        return True, None
+        return True, model_update
 
     def _init_vendor_properties(self):
         """Create a dictionary of vendor unique properties.
