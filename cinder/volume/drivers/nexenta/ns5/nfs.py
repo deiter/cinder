@@ -526,11 +526,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if volume_format:
             specs['format'] = volume_format
         image = VolumeImage(self, volume, specs)
+        file_size = image.file_size
         # TODO ? auto-update in class
         if not volume_format:
             image.update_file_format()
         image.update_file_size()
-        image.change(file_format=file_format)
+        image.change(file_size=file_size, file_format=file_format)
         if image.file_sparse:
             file_size = 0
         self._set_volume_reservation(volume, file_size, file_format)
@@ -1398,7 +1399,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = {'targetPath': volume_path}
         self.nef.snapshots.clone(snapshot_path, payload)
         # TODO < 5xx ?
-        self._remount_volume(volume)
+        #self._remount_volume(volume)
 
         # TODO move extend/update to separate func ?
 
