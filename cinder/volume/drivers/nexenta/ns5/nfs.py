@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import copy
 import errno
 import ipaddress
 import os
@@ -134,7 +135,7 @@ class VolumeImage(object):
             self.file_format,
             self.block_size,
             run_as_root=self.root)
-        self.update_file_size()
+        self.reload_size()
 
     def download(self, ctxt, image_service, image_id):
         file_format = self.file_format
@@ -163,13 +164,12 @@ class VolumeImage(object):
             force_share=True,
             run_as_root=self.root)
 
-    def update_file_size(self):
+    def reload(self, file_size=False, file_format=False):
         info = self.info()
-        self.file_size = info.virtual_size
-
-    def update_file_format(self):
-        info = self.info()
-        self.file_format = info.file_format
+        if file_size:
+            self.file_size = info.virtual_size
+        if file_format:
+            self.file_format = info.file_format
 
 
 @interface.volumedriver
@@ -458,7 +458,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         return self.nas_secure_file_operations
 
-    def _change_volume_props(self, volume, volume_type=None, volume_format=None):
+    def _change_volume_props(self, volume, volume_type=None, source_size=None,
+                             source_format=None):
         """Updates the existing volume properties.
 
         :param volume: volume reference
@@ -469,7 +470,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_path = self._get_volume_path(volume)
         items = self.nef.filesystems.properties
         names = [item['api'] for item in items if 'api' in item]
-        names += ['source']
+        names += ['referencedReservationSize', 'source']
         fields = ','.join(names)
         payload = {'fields': fields, 'source': True}
         props = self.nef.filesystems.get(volume_path, payload)
@@ -519,21 +520,36 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        'error': error})
             raise
 
-        
+
+        kwargs = {}
+
+        source = copy.copy(volume)
+        if source_size:
+            source['size'] = source_size
+        else:
+            kwargs['file_size'] = True
+
+        source_specs = self._get_image_specs(source)
+        if source_format:
+            source_specs['format'] = source_format
+        else:
+            kwargs['file_format'] = True
+
+        image = VolumeImage(self, source, source_specs)
+        if kwargs:
+            image.reload(**kwargs)
+
         specs = self._get_image_specs(volume, volume_type)
         file_format = specs['format']
-        if volume_format:
-            specs['format'] = volume_format
-        image = VolumeImage(self, volume, specs)
-        file_size = image.file_size
-        # TODO ? auto-update in class
-        if not volume_format:
-            image.update_file_format()
-        image.update_file_size()
+        file_size = volume['size'] * units.Gi
         image.change(file_size=file_size, file_format=file_format)
+
+        # TODO - double check
+        reservation = props['referencedReservationSize']
         if image.file_sparse:
             file_size = 0
-        self._set_volume_reservation(volume, file_size, file_format)
+        if file_size > reservation:
+            self._set_volume_reservation(volume, file_size, file_format)
 
     def _get_volume_reservation(self, volume, volume_size, volume_format):
         """Calculates the correct reservation size for given volume size.
@@ -1232,7 +1248,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         else:
             specs = self._get_image_specs(volume)
             image = VolumeImage(self, cache, specs)
-            image.update()
+            image.reload(file_format=True)
             file_format = image.file_format
         data = {
             'export': nfs_share,
