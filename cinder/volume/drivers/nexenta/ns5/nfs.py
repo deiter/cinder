@@ -135,7 +135,7 @@ class VolumeImage(object):
             self.file_format,
             self.block_size,
             run_as_root=self.root)
-        self.reload_size()
+        self.reload(file_size=True)
 
     def download(self, ctxt, image_service, image_id):
         file_format = self.file_format
@@ -464,9 +464,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param volume: volume reference
         """
-        # TODO ret refreservation ?
-        # self._retype
-
         volume_path = self._get_volume_path(volume)
         items = self.nef.filesystems.properties
         names = [item['api'] for item in items if 'api' in item]
@@ -475,6 +472,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         payload = {'fields': fields, 'source': True}
         props = self.nef.filesystems.get(volume_path, payload)
         src = props['source']
+        reservation = props['referencedReservationSize']
         specs = self._get_volume_specs(volume, volume_type)
         payload = {}
         for item in items:
@@ -545,7 +543,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         image.change(file_size=file_size, file_format=file_format)
 
         # TODO - double check
-        reservation = props['referencedReservationSize']
         if image.file_sparse:
             file_size = 0
         if file_size > reservation:
