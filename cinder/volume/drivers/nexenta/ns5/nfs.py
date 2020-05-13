@@ -1292,10 +1292,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 if error.code == 'ENOENT':
                     continue
                 raise
-            clones = snapshot['clones']
-            snapshot_txg = int(snapshot['creationTxg'])
-            if clones and snapshot_txg > origin_txg:
-                clone_path = clones[0]
+            snapshot_clones = props['clones']
+            snapshot_txg = int(props['creationTxg'])
+            if snapshot_clones and snapshot_txg > origin_txg:
+                clone_path = snapshot_clones[0]
                 origin_txg = snapshot_txg
                 origin_path = snapshot_path
         if clone_path:
