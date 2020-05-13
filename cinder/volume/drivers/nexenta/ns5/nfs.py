@@ -1266,45 +1266,47 @@ class NexentaNfsDriver(nfs.NfsDriver):
         }
         return connection_info
 
-    def _demote_volume(self, volume, origin_path):
+    def _demote_volume(self, volume, volume_origin):
         """Demote a volume.
 
         :param volume: volume reference
-        :param origin_path: origin path
+        :param volume_origin: volume origin path
         """
         volume_path = self._get_volume_path(volume)
         payload = {'parent': volume_path, 'fields': 'path'}
         try:
-            items = self.nef.snapshots.list(payload)
+            snapshots = self.nef.snapshots.list(payload)
         except jsonrpc.NefException as error:
             if error.code == 'ENOENT':
-                return origin_path
+                return volume_origin
             raise
-        snapshot_txg = 0
-        snapshot_path = None
+        origin_txg = 0
+        origin_path = None
         clone_path = None
-        for item in items:
+        for snapshot in snapshots:
+            snapshot_path = snapshot['path']
             payload = {'fields': 'clones,creationTxg'}
             try:
-                snapshot = self.nef.snapshots.get(item['path'], payload)
+                props = self.nef.snapshots.get(snapshot_path, payload)
             except jsonrpc.NefException as error:
                 if error.code == 'ENOENT':
                     continue
                 raise
-            LOG.debug(' ===> TXG is %s', type(snapshot['creationTxg']))
-            if snapshot['clones'] and snapshot['creationTxg'] > snapshot_txg:
-                clone_path = snapshot['clones'][0]
-                snapshot_txg = snapshot['creationTxg']
-                snapshot_path = snapshot['path']
+            clones = snapshot['clones']
+            snapshot_txg = int(snapshot['creationTxg'])
+            if clones and snapshot_txg > origin_txg:
+                clone_path = clones[0]
+                origin_txg = snapshot_txg
+                origin_path = snapshot_path
         if clone_path:
             try:
                 self.nef.filesystems.promote(clone_path)
             except jsonrpc.NefException as error:
                 if error.code in ['ENOENT', 'EBADARG']:
-                    return origin_path
+                    return volume_origin
                 raise
-            return snapshot_path
-        return origin_path
+            return origin_path
+        return volume_origin
 
     def delete_volume(self, volume):
         """Deletes a volume.
