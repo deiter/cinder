@@ -551,6 +551,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if file_size > reservation:
             self._set_volume_reservation(volume, file_size, file_format)
 
+        metadata = {'format': specs['format']}
+        model_update = {'metadata': metadata}
+        return model_update
+
     def _get_volume_reservation(self, volume, volume_size, volume_format):
         """Calculates the correct reservation size for given volume size.
 
