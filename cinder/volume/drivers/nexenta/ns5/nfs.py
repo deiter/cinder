@@ -700,7 +700,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    'volume': volume['name']})
         image = VolumeImage(self, volume, specs)
         image.download(ctxt, image_service, image_id)
-        # TODO: check volume meta
 
     @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
     def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
@@ -710,7 +709,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                    'image': image_meta['id']})
         image = VolumeImage(self, volume, specs)
         image.upload(ctxt, image_service, image_meta)
-        # TODO: check image meta
 
     @coordination.synchronized('{self.nef.lock}-{cache_name}')
     def _delete_cache(self, cache_name, cache_path, snapshot_path):
@@ -787,7 +785,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.filesystems.set(cache_path, payload)
         cache['size'] = image.file_size // units.Gi
         snapshot['volume_size'] = cache['size']
-        # TODO: direct cll NEF API ?
         self._create_snapshot(snapshot)
         return snapshot
 
@@ -1362,11 +1359,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         file_size = new_size * units.Gi
         specs = self._get_image_specs(volume)
         if not specs['sparse']:
-            self._set_volume_reservation(volume, file_size, image.file_format)
+            self._set_volume_reservation(volume, file_size, specs['format'])
         LOG.info('Extend %(format)s volume %(volume)s to %(new_size)sGB',
                  {'format': specs['format'], 'volume': volume['name'],
                   'new_size': new_size})
-        # TODO: meta ? spec can be changed :-(
         image = VolumeImage(self, volume, specs)
         image.change(file_size=file_size)
 
@@ -1403,12 +1399,24 @@ class NexentaNfsDriver(nfs.NfsDriver):
         return False
 
     def revert_to_snapshot(self, ctxt, volume, snapshot):
-        """Revert volume to snapshot."""
+        """Revert a volume to a snapshot.
+
+        Note: the revert process should not change the volume's
+        current size, that means if the driver shrank
+        the volume during the process, it should extend the
+        volume internally.
+        """
         volume_path = self._get_volume_path(volume)
         snapshot_name = snapshot['name']
         payload = {'snapshot': snapshot_name}
         self.nef.filesystems.rollback(volume_path, payload)
-        # TODO: resize and retype ?
+        metadata = self._get_snapshot_metadata(snapshot)
+        source_format = metadata.get('format')
+        source_size = snapshot['volume_size']
+        self._change_volume_props(
+            volume,
+            source_size=source_size,
+            source_format=source_format)
 
     def _clone_snapshot(self, snapshot, volume):
         snapshot_path = self._get_snapshot_path(snapshot)
