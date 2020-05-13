@@ -1291,6 +1291,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 if error.code == 'ENOENT':
                     continue
                 raise
+            LOG.debug(' ===> TXG is %s', type(snapshot['creationTxg']))
             if snapshot['clones'] and snapshot['creationTxg'] > snapshot_txg:
                 clone_path = snapshot['clones'][0]
                 snapshot_txg = snapshot['creationTxg']
