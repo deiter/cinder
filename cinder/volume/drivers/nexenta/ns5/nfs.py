@@ -851,15 +851,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'volume_size': volume['size']})
             raise jsonrpc.NefException(code=code, message=message)
         try:
-            self._clone_snapshot(snapshot, volume)
+            model_update = self._clone_snapshot(snapshot, volume)
         except jsonrpc.NefException as error:
             LOG.error('Failed to clone cache %(cache)s for image '
                       '%(image)s to volume %(volume)s: %(error)s',
                       {'cache': cache['name'], 'image': image_id,
                        'volume': volume['name'], 'error': error})
             return None, False
-        metadata = {'format': specs['format']}
-        model_update = {'metadata': metadata}
         return model_update, True
 
     def _mount_volume(self, volume):
@@ -1415,14 +1413,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.snapshots.clone(snapshot_path, payload)
         # TODO < 5xx ?
         #self._remount_volume(volume)
-
-        # TODO move extend/update to separate func ?
-
-        # TODO Image clone (vars)
-        #if volume['size'] > snapshot['volume_size']:
-        #    self.extend_volume(volume, volume['size'])
-        # TODO - meta ? file_size ?
-        self._change_volume_props(volume)
+        metadata = self._get_snapshot_metadata(snapshot)
+        source_format = metadata.get('format')
+        source_size = snapshot['volume_size']
+        model_update = self._change_volume_props(
+            volume,
+            source_size=source_size,
+            source_format=source_format)
+        return model_update
 
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create new volume from other's snapshot on appliance.
@@ -1433,13 +1431,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         # TODO: remove debug ?
         LOG.debug('Create volume %(volume)s from snapshot %(snapshot)s',
                   {'volume': volume['name'], 'snapshot': snapshot['name']})
-        #metadata = self.db.snapshot_metadata_get(self.ctxt, snapshot['id'])
-        # TODO: get meta as a result from _update_volume ?
-        specs = self._get_image_specs(volume)
-        metadata = {'format': specs['format']}
-        model_update = {'metadata': metadata}
-        self._clone_snapshot(snapshot, volume)
-        return model_update
+        return self._clone_snapshot(snapshot, volume)
 
     def create_cloned_volume(self, volume, src_vref):
         """Creates a clone of the specified volume.
@@ -1456,7 +1448,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         # TODO: direct call NEF API ?
         self._create_snapshot(snapshot)
         try:
-            self._clone_snapshot(snapshot, volume)
+            model_update = self._clone_snapshot(snapshot, volume)
         except jsonrpc.NefException as error:
             LOG.error('Failed to create clone %(clone)s '
                       'from volume %(volume)s: %(error)s',
@@ -1474,11 +1466,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           {'volume': src_vref['name'],
                            'snapshot': snapshot['name'],
                            'error': error})
-        # TODO meta get meta from _update_volume ???
-        specs = self._get_image_specs(volume)
-        metadata = {'format': specs['format']}
-        model_update = {'metadata': metadata}
-        self._clone_snapshot(snapshot, volume)
         return model_update
 
     def create_consistencygroup(self, ctxt, group):
@@ -2010,6 +1997,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.nef.filesystems.rename(existing_volume_path, payload)
         # TODO ? resize ?
         self._change_volume_props(volume)
+        # TODO ? meta
 
     def manage_existing_get_size(self, volume, existing_ref):
         """Return size of volume to be managed by manage_existing.
@@ -2414,6 +2402,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                                        src_volume_info.file_format,
                                        dst_volume_info.file_format)
         self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
+        # TODO ?
 
     def retype(self, ctxt, volume, new_type, diff, host):
         """Retype from one volume type to another."""
@@ -2422,13 +2411,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'volume': volume['name'], 'host': host,
                    'type': new_type['name'], 'diff': diff})
 
-        # TODO file type from meta
-        self._change_volume_props(volume, new_type)
-
-
-        metadata = {'format': specs['format']}
-        model_update = {'metadata': metadata}
-        # TODO meta
+        metadata = self._get_volume_metadata(volume)
+        source_format = metadata.get('format')
+        source_size = volume['size']
+        model_update = self._change_volume_props(
+            volume,
+            source_size=source_size,
+            source_format=source_format)
         return True, model_update
 
     def _init_vendor_properties(self):
