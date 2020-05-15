@@ -138,11 +138,12 @@ class VolumeImage(object):
         self.reload(file_size=True)
 
     def download(self, ctxt, image_service, image_id):
+        file_size = self.file_size
         file_format = self.file_format
         if self.file_format not in self.resizable_formats:
             self.file_format = VOLUME_FORMAT_RAW
         self.fetch(ctxt, image_service, image_id)
-        self.change(file_format=file_format)
+        self.change(file_size=file_size, file_format=file_format)
 
     def convert(self, file_format):
         file_path = '%(path)s.%(format)s' % {
