@@ -18,6 +18,7 @@ import posixpath
 
 from eventlet import greenthread
 from oslo_log import log as logging
+from pkg_resources import parse_version
 import requests
 import six
 
@@ -391,6 +392,30 @@ class NefSettings(NefCollections):
 
     def delete(self, name, payload=None):
         return NotImplemented
+
+
+class NefSoftware(NefSettings, NefCollections):
+
+    def __init__(self, proxy):
+        super(NefSoftware, self).__init__(proxy)
+        self.root = '/software'
+        self.subj = 'software'
+
+    def get(self, name, payload=None):
+        return NotImplemented
+
+    def set(self, name, payload=None):
+        return NotImplemented
+
+    def list(self, payload=None):
+        return NotImplemented
+
+    def version(self):
+        name = 'current'
+        LOG.debug('Get %(name)s %(subj)s version',
+                  {'name': name, 'subj': self.subj})
+        path = self.path(name)
+        return self.proxy.get(path)
 
 
 class NefVsolutions(NefCollections):
@@ -872,6 +897,7 @@ class NefNetAddresses(NefCollections):
 class NefProxy(object):
     def __init__(self, proto, pool, path, conf):
         self.settings = NefSettings(self)
+        self.software = NefSoftware(self)
         self.vsolutions = NefVsolutions(self)
         self.filesystems = NefFilesystems(self)
         self.volumegroups = NefVolumeGroups(self)
@@ -887,6 +913,7 @@ class NefProxy(object):
         self.mappings = NefLunMappings(self)
         self.logicalunits = NefLogicalUnits(self)
         self.netaddrs = NefNetAddresses(self)
+        self.version = 0
         self.lock = None
         self.auto = False
         self.tokens = {}
@@ -966,8 +993,16 @@ class NefProxy(object):
             self.update_bearer(token)
 
     def update_lock(self):
+        software = {}
         settings = {}
         guid = None
+        try:
+            software = self.software.version()
+        except NefException as error:
+            LOG.error('Unable to get software version: %(error)s',
+                      {'error': error})
+        if software and 'version' in software and 'build' in software:
+            self.version = '%s.%s' % (software['version'], software['build'])
         try:
             settings = self.settings.get('system.guid')
         except NefException as error:
@@ -980,6 +1015,7 @@ class NefProxy(object):
             LOG.error('Unable to get host guid: %(settings)s',
                       {'settings': settings})
         guids = []
+        versions = []
         clusters = []
         payload = {'fields': 'nodes'}
         try:
@@ -994,6 +1030,8 @@ class NefProxy(object):
             for node in nodes:
                 if 'machineId' in node:
                     guids.append(node['machineId'])
+                if 'releaseVersion' in node:
+                    versions.append(node['releaseVersion'])
         if guid in guids:
             guid = ':'.join(sorted(guids))
             LOG.debug('HA cluster guid: %(guid)s',
@@ -1006,6 +1044,11 @@ class NefProxy(object):
         self.lock = hashlib.md5(lock).hexdigest()
         LOG.debug('NEF coordination lock: %(lock)s',
                   {'lock': self.lock})
+        for version in versions:
+            if parse_version(version) < parse_version(self.version):
+                self.version = version
+        LOG.debug('NEF release version: %(version)s',
+                  {'version': self.version})
 
     def url(self, path=''):
         netloc = '%s:%d' % (self.host, self.port)

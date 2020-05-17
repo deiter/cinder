@@ -1380,8 +1380,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param volume: reference of volume to be created
         :param snapshot: reference of source snapshot
         """
-        LOG.debug('Create volume %(volume)s from snapshot %(snapshot)s',
-                  {'volume': volume['name'], 'snapshot': snapshot['name']})
         snapshot_path = self._get_snapshot_path(snapshot)
         volume_path = self._get_volume_path(volume)
         payload = {'targetPath': volume_path}
@@ -1402,11 +1400,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'volume_name': src_vref['name'],
             'volume_size': src_vref['size']
         }
-        # TODO: clean snapshot on ERROR - try/except
         self.create_snapshot(snapshot)
-        self.create_volume_from_snapshot(volume, snapshot)
-        # TODO _delete_snap
-        self.delete_snapshot(snapshot)
+        try:
+            self.create_volume_from_snapshot(volume, snapshot)
+        finally:
+            self.delete_snapshot(snapshot)
 
     def create_consistencygroup(self, ctxt, group):
         """Creates a consistency group.
@@ -1918,9 +1916,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             volume_path = self._get_volume_path(volume)
             payload = {'newPath': volume_path}
             self.nef.filesystems.rename(existing_volume_path, payload)
-        # TODO ? resize ?
         self._update_volume_props(volume)
-        # TODO ? meta
 
     def manage_existing_get_size(self, volume, existing_ref):
         """Return size of volume to be managed by manage_existing.
