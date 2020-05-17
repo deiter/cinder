@@ -459,8 +459,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         return self.nas_secure_file_operations
 
-    def _update_volume_props(self, volume, volume_type=None, source_size=None,
-                             source_format=None):
+    def _update_volume_props(self, volume, volume_type=None):
+        #, source_size=None,
+        #source_format=None):
         """Updates the existing volume properties.
 
         :param volume: volume reference
@@ -485,14 +486,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 value = specs[api]
                 if props[api] == value:
                     continue
-                if 'retype' in item:
-                    code = 'EINVAL'
-                    message = (_('Failed to change volume %(volume)s '
-                                 'to volume type %(type)s. %(reason)s')
-                               % {'volume': volume['name'],
-                                  'type': volume_type['name'],
-                                  'reason': item['retype']})
-                    raise jsonrpc.NefException(code=code, message=message)
                 payload[api] = value
             elif src[api] in ['local', 'received']:
                 if props[api] == item['default']:
@@ -510,6 +503,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         try:
             self.nef.filesystems.set(volume_path, payload)
         except jsonrpc.NefException as error:
+            # TODO update message
             LOG.error('Failed to retype volume %(volume)s on '
                       'host %(host)s to volume type %(type)s '
                       'with payload %(payload)s: %(error)s',
@@ -520,35 +514,47 @@ class NexentaNfsDriver(nfs.NfsDriver):
                        'error': error})
             raise
 
-        kwargs = {}
-        source = copy.copy(volume)
-        if source_size:
-            source['size'] = source_size
-        else:
-            kwargs['file_size'] = True
-        source_specs = self._get_image_specs(source)
-        if source_format:
-            source_specs['format'] = source_format
-        else:
-            kwargs['file_format'] = True
-        image = VolumeImage(self, source, source_specs)
-        if kwargs:
-            image.reload(**kwargs)
         specs = self._get_image_specs(volume, volume_type)
-        file_format = specs['format']
         file_size = volume['size'] * units.Gi
+        file_format = specs['format']
+        file_sparse = specs['sparse']
+        image = VolumeImage(self, volume, specs)
+        image.reload(file_size=True, file_format=True)
         image.change(file_size=file_size, file_format=file_format)
-
-        # TODO - double check
-        if image.file_sparse:
+        if file_sparse:
             file_size = 0
         if file_size > reservation:
             self._set_volume_reservation(volume, file_size, file_format)
 
-        metadata = self._get_volume_metadata(volume)
-        metadata['format'] = file_format
-        model_update = {'metadata': metadata}
-        return model_update
+        #kwargs = {}
+        #source = copy.copy(volume)
+        #if source_size:
+        #    source['size'] = source_size
+        #else:
+        #    kwargs['file_size'] = True
+        #specs = self._get_image_specs(source)
+        #if source_format:
+        #    specs['format'] = source_format
+        #else:
+        #    kwargs['file_format'] = True
+        #image = VolumeImage(self, source, specs)
+        #if kwargs:
+        #    image.reload(**kwargs)
+        #specs = self._get_image_specs(volume, volume_type)
+        #file_format = specs['format']
+        #file_size = volume['size'] * units.Gi
+        #image.change(file_size=file_size, file_format=file_format)
+
+        # TODO - double check
+        #if image.file_sparse:
+        #    file_size = 0
+        #if file_size > reservation:
+        #    self._set_volume_reservation(volume, file_size, file_format)
+
+        #metadata = self._get_volume_metadata(volume)
+        #metadata['format'] = file_format
+        #model_update = {'metadata': metadata}
+        #return model_update
 
     def _get_volume_reservation(self, volume, volume_size, volume_format):
         """Calculates the correct reservation size for given volume size.
@@ -689,10 +695,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         else:
             image = VolumeImage(self, volume, specs)
             image.create()
-        metadata = self._get_volume_metadata(volume)
-        metadata['format'] = file_format
-        model_update = {'metadata': metadata}
-        return model_update
+        #metadata = self._get_volume_metadata(volume)
+        #metadata['format'] = file_format
+        #model_update = {'metadata': metadata}
+        #return model_update
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
@@ -710,6 +716,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'format': specs['format'], 'volume': volume['name'],
                    'image': image_meta['id']})
         image = VolumeImage(self, volume, specs)
+        self.reload(volume_format=True)
         image.upload(ctxt, image_service, image_meta)
 
     @coordination.synchronized('{self.nef.lock}-{cache_name}')
@@ -854,23 +861,21 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'volume_size': volume['size']})
             raise jsonrpc.NefException(code=code, message=message)
 
-        source_size = snapshot['volume_size']
-        source_format = specs['format']
+        #source_size = snapshot['volume_size']
+        #source_format = specs['format']
 
         try:
             self._clone_snapshot(snapshot, volume)
-            model_update = self._update_volume_props(
-                volume,
-                source_size=source_size,
-                source_format=source_format)
+            self._update_volume_props(volume)
+            #    source_size=source_size,
+            #    source_format=source_format)
         except Exception as error:
             LOG.error('Failed to clone cache %(cache)s for image '
                       '%(image)s to volume %(volume)s: %(error)s',
                       {'cache': cache['name'], 'image': image_id,
                        'volume': volume['name'], 'error': error})
             return None, False
-
-        return model_update, True
+        return None, True
 
     def _mount_volume(self, volume):
         """Ensure that volume is mounted on the host.
@@ -1251,15 +1256,16 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'volume': volume['name'],
                    'connector': connector})
         nfs_share = self._get_volume_share(volume)
-        metadata = self._get_volume_metadata(volume)
+        #metadata = self._get_volume_metadata(volume)
         # TODO ?
-        if 'format' in metadata:
-            file_format = metadata['format']
-        else:
-            specs = self._get_image_specs(volume)
-            image = VolumeImage(self, cache, specs)
-            image.reload(file_format=True)
-            file_format = image.file_format
+        #if 'format' in metadata:
+        #    file_format = metadata['format']
+        #else:
+        # TODO more easy way
+        specs = self._get_image_specs(volume)
+        image = VolumeImage(self, cache, specs)
+        image.reload(file_format=True)
+        file_format = image.file_format
         data = {
             'export': nfs_share,
             'format': file_format,
@@ -1372,13 +1378,27 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         file_size = new_size * units.Gi
         specs = self._get_image_specs(volume)
-        if not specs['sparse']:
-            self._set_volume_reservation(volume, file_size, specs['format'])
-        LOG.info('Extend %(format)s volume %(volume)s to %(new_size)sGB',
-                 {'format': specs['format'], 'volume': volume['name'],
-                  'new_size': new_size})
+        file_sparse = specs['sparse']
+        #file_vsolution = specs['vsolution']
+        #metadata = self._get_volume_metadata(volume)
+        #if 'format' in metadata:
+        #    spec['format'] = metadata['format']
         image = VolumeImage(self, volume, specs)
+        #if 'format' not in metadata:
+        image.reload(file_size=True, file_format=True)
+        file_format = image.file_format
+        if not file_sparse:
+            self._set_volume_reservation(volume, file_size, file_format)
+        #if file_vsolution and file_format == VOLUME_FORMAT_RAW:
+        #    payload = {'size': file_size}
+        #    self.nef.vsolutions.resize(volume_path, VOLUME_FILE_NAME, payload)
+        #else:
         image.change(file_size=file_size)
+
+        LOG.info('Extend %(format)s volume %(volume)s to %(new_size)sGB',
+                 {'format': file_format, 'volume': volume['name'],
+                  'new_size': new_size})
+
 
     def _create_snapshot(self, snapshot):
         snapshot_path = self._get_snapshot_path(snapshot)
@@ -1392,14 +1412,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param snapshot: snapshot reference
         """
         self._create_snapshot(snapshot)
-        volume_id = snapshot['volume_id']
-        volume = self.db.volume_get(self.ctxt, volume_id)
-        volume_metadata = self._get_volume_metadata(volume)
-        snapshot_metadata = self._get_snapshot_metadata(snapshot)
-        if 'format' in volume_metadata:
-            snapshot_metadata['format'] = volume_metadata['format']
-        model_update = {'metadata': snapshot_metadata}
-        return model_update
+        #volume_id = snapshot['volume_id']
+        #volume = self.db.volume_get(self.ctxt, volume_id)
+        #volume_metadata = self._get_volume_metadata(volume)
+        #snapshot_metadata = self._get_snapshot_metadata(snapshot)
+        #if 'format' in volume_metadata:
+        #    snapshot_metadata['format'] = volume_metadata['format']
+        #model_update = {'metadata': snapshot_metadata}
+        #return model_update
 
     def delete_snapshot(self, snapshot):
         """Deletes a snapshot.
@@ -1429,13 +1449,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         snapshot_name = snapshot['name']
         payload = {'snapshot': snapshot_name}
         self.nef.filesystems.rollback(volume_path, payload)
-        metadata = self._get_snapshot_metadata(snapshot)
-        source_format = metadata.get('format')
-        source_size = snapshot['volume_size']
-        self._update_volume_props(
-            volume,
-            source_size=source_size,
-            source_format=source_format)
+        #metadata = self._get_snapshot_metadata(snapshot)
+        #source_format = metadata.get('format')
+        #source_size = snapshot['volume_size']
+        self._update_volume_props(volume)
+        #    source_size=source_size,
+        #    source_format=source_format)
 
     def _clone_snapshot(self, snapshot, volume):
         snapshot_path = self._get_snapshot_path(snapshot)
@@ -1455,14 +1474,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Create volume %(volume)s from snapshot %(snapshot)s',
                   {'volume': volume['name'], 'snapshot': snapshot['name']})
         self._clone_snapshot(snapshot, volume)
-        metadata = self._get_snapshot_metadata(snapshot)
-        source_size = snapshot['volume_size']
-        source_format = metadata.get('format')
-        model_update = self._update_volume_props(
-            volume,
-            source_size=source_size,
-            source_format=source_format)
-        return model_update
+        #metadata = self._get_snapshot_metadata(snapshot)
+        #source_size = snapshot['volume_size']
+        #source_format = metadata.get('format')
+        self._update_volume_props(volume)
+        #    source_size=source_size,
+        #    source_format=source_format)
+        #return model_update
 
     def create_cloned_volume(self, volume, src_vref):
         """Creates a clone of the specified volume.
@@ -1479,15 +1497,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
         # TODO: clean snapshot on ERROR - try/except
         self._create_snapshot(snapshot)
         self._clone_snapshot(snapshot, volume)
+        # TODO _delete_snap
         self.delete_snapshot(snapshot)
-        metadata = self._get_volume_metadata(src_vref)
-        source_size = src_vref['size']
-        source_format = metadata.get('format')
-        model_update = self._update_volume_props(
-            volume,
-            source_size=source_size,
-            source_format=source_format)
-        return model_update
+        #metadata = self._get_volume_metadata(src_vref)
+        #source_size = src_vref['size']
+        #source_format = metadata.get('format')
+        self._update_volume_props(volume)
+        #    source_size=source_size,
+        #    source_format=source_format)
+        #return model_update
 
     def create_consistencygroup(self, ctxt, group):
         """Creates a consistency group.
@@ -1730,21 +1748,21 @@ class NexentaNfsDriver(nfs.NfsDriver):
         }
         return nfs_share
 
-    def _get_volume_metadata(self, volume):
-        if 'volume_metadata' in volume:
-            meta = volume['volume_metadata']
-            return {_['key']: _['value'] for _ in meta}
-        if 'metadata' in volume:
-            return volume['metadata']
-        return {}
+    #def _get_volume_metadata(self, volume):
+    #    if 'volume_metadata' in volume:
+    #        meta = volume['volume_metadata']
+    #        return {_['key']: _['value'] for _ in meta}
+    #    if 'metadata' in volume:
+    #        return volume['metadata']
+    #    return {}
 
-    def _get_snapshot_metadata(self, snapshot):
-        if 'snapshot_metadata' in snapshot:
-            meta = snapshot['snapshot_metadata']
-            return {_['key']: _['value'] for _ in meta}
-        if 'metadata' in snapshot:
-            return snapshot['metadata']
-        return {}
+    #def _get_snapshot_metadata(self, snapshot):
+    #    if 'snapshot_metadata' in snapshot:
+    #        meta = snapshot['snapshot_metadata']
+    #        return {_['key']: _['value'] for _ in meta}
+    #    if 'metadata' in snapshot:
+    #        return snapshot['metadata']
+    #    return {}
 
     def _get_volume_path(self, volume):
         """Return ZFS dataset path for the volume."""
@@ -2432,14 +2450,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'volume': volume['name'], 'host': host,
                    'type': new_type['name'], 'diff': diff})
 
-        metadata = self._get_volume_metadata(volume)
-        source_format = metadata.get('format')
-        source_size = volume['size']
-        model_update = self._update_volume_props(
-            volume,
-            source_size=source_size,
-            source_format=source_format)
-        return True, model_update
+        #metadata = self._get_volume_metadata(volume)
+        #source_format = metadata.get('format')
+        #source_size = volume['size']
+        self._update_volume_props(volume, new_type)
+        #    source_size=source_size,
+        #    source_format=source_format)
+        return True, None
 
     def _init_vendor_properties(self):
         """Create a dictionary of vendor unique properties.
@@ -2536,13 +2553,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
             else:
                 continue
             payload[img] = value
-            LOG.debug('Get image property %(name)s with '
-                      'name %(img)s and %(type)s value '
-                      '%(value)s for volume %(volume)s',
-                      {'name': name, 'img': img,
-                       'type': type(value).__name__,
-                       'value': value,
-                       'volume': volume['name']})
+            #metadata = self._get_volume_metadata(volume)
+            #if 'format' in metadata:
+            #    payload['format'] = metadata['format']
+            LOG.debug('Image properties for %(volume)s: %(payload)s',
+                      {'volume': volume['name'], 'payload': payload})
         return payload
 
     def _get_volume_specs(self, volume, volume_type=None):

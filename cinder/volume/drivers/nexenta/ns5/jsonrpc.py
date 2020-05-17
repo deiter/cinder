@@ -425,6 +425,13 @@ class NefVsolutions(NefCollections):
     def delete(self, name, payload=None):
         return NotImplemented
 
+    def resize(self, parent, name, payload=None):
+        LOG.debug('Resize %(subj)s: %(parent)s/%(name)s %(payload)s',
+                  {'subj': self.subj, 'parent': parent, 'name': name,
+                   'payload': payload})
+        path = self.path(parent, name)
+        self.proxy.put(path, payload)
+
 
 class NefDatasets(NefCollections):
 
@@ -706,7 +713,6 @@ class NefFilesystems(NefVolumeGroups, NefDatasets, NefCollections):
                 'img': 'sparse',
                 'cfg': 'nexenta_sparsed_volumes',
                 'title': 'Thin provisioning',
-                'inherit': _('Provisioning type cannot be inherit.'),
                 'description': _('Controls if a volume is created sparse '
                                  '(with no space reservation).'),
                 'type': 'boolean',
