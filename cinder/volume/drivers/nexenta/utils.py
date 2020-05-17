@@ -77,6 +77,10 @@ def roundup(numerator, denominator):
     return divup(numerator, denominator) * denominator
 
 
+def roundgb(numerator):
+    return roundup(numerator, units.Gi) // units.Gi
+
+
 def match_template(template, name):
     if not (name and isinstance(name, six.string_types) and
             template and isinstance(template, six.string_types)):

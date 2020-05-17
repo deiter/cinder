@@ -72,6 +72,10 @@ class VolumeImage(object):
         self.mount_point = None
         self.mount()
 
+    @property
+    def volume_size(self):
+        return nexenta_utils.roundgb(self.file_size)
+
     def __del__(self):
         self.unmount()
 
@@ -81,9 +85,11 @@ class VolumeImage(object):
         self.driver._execute(*cmd, **kwargs)
 
     def mount(self):
+        # TODO
         self.nfs_share, self.mount_point, self.file_path = self.driver._mount_volume(self.volume)
 
     def unmount(self):
+        # TODO
         self.driver._unmount_volume(self.volume, self.nfs_share, self.mount_point)
 
     def create(self):
@@ -640,6 +646,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         volume_path = self._create_volume(volume)
         specs = self._get_image_specs(volume)
+        #  TODO size from image.file_size ?
         file_size = volume['size'] * units.Gi
         file_format = specs['format']
         file_sparse = specs['sparse']
@@ -715,6 +722,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 return cache, snapshot
             raise
         cache_size = props['referencedReservationSize']
+        # TODO: roundgb
         cache['size'] = cache_size // units.Gi
         snapshot_path = self._get_snapshot_path(snapshot)
         payload = {'fields': 'path'}
@@ -747,7 +755,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         image.fetch(ctxt, image_service, image_id)
         payload = {'referencedReservationSize': image.file_size}
         self.nef.filesystems.set(cache_path, payload)
-        cache['size'] = image.file_size // units.Gi
+        cache['size'] = image.volume_size
         snapshot['volume_size'] = cache['size']
         self.create_snapshot(snapshot)
         return snapshot
@@ -1384,8 +1392,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_path = self._get_volume_path(volume)
         payload = {'targetPath': volume_path}
         self.nef.snapshots.clone(snapshot_path, payload)
-        # TODO < 5xx ?
-        #self._remount_volume(volume)
+        if self.nef.version_less('5.2.0.17'):
+            self._remount_volume(volume)
         self._update_volume_props(volume)
 
     def create_cloned_volume(self, volume, src_vref):
@@ -1762,37 +1770,36 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def _get_existing_volume(self, existing_ref):
         types = {
-            'source-name': 'path',
+            'source-name': 'name',
             'source-guid': 'guid'
         }
         if not any(key in types for key in existing_ref):
+            code='EINVAL'
             keys = ', '.join(types.keys())
             message = (_('Manage existing volume failed '
                          'due to invalid backend reference. '
                          'Volume reference must contain '
                          'at least one valid key: %(keys)s')
                        % {'keys': keys})
-            raise jsonrpc.NefException(code='EINVAL', message=message)
+            raise jsonrpc.NefException(code=code, message=message)
         payload = {
             'parent': self.nas_path,
-            'fields': 'path',
+            'fields': 'path,bytesReferenced',
             'recursive': False
         }
         for key, value in types.items():
             if key in existing_ref:
-                if value == 'path':
-                    path = posixpath.join(self.nas_path,
-                                          existing_ref[key])
-                else:
-                    path = existing_ref[key]
-                payload[value] = path
+                payload[value] = existing_ref[key]
         existing_volumes = self.nef.filesystems.list(payload)
         if len(existing_volumes) == 1:
             volume_path = existing_volumes[0]['path']
             volume_name = posixpath.basename(volume_path)
+            volume_bytes = existing_volumes[0]['bytesReferenced']
+            volume_size = nexenta_utils.roundgb(volume_bytes)
             existing_volume = {
                 'name': volume_name,
-                'path': volume_path
+                'path': volume_path,
+                'size': volume_size
             }
             vid = volume_utils.extract_id_from_volume_name(volume_name)
             if volume_utils.check_already_managed_volume(vid):
@@ -1930,27 +1937,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         existing_volume = self._get_existing_volume(existing_ref)
         self._set_volume_acl(existing_volume)
-        # TODO
-        nfs_share, mount_point, existing_volume_file = (
-            self._mount_volume(existing_volume))
-        try:
-            existing_volume_info = self._get_image_info(existing_volume_file)
-        except OSError as error:
-            code = errno.errorcode[error.errno]
-            message = (_('Manage existing volume %(volume)s failed, '
-                         'unable to get size of volume backend file '
-                         '%(volume_file)s: %(error)s')
-                       % {'volume': existing_volume['name'],
-                          'volume_file': existing_volume_file,
-                          'error': error.strerror})
-            raise jsonrpc.NefException(code=code, message=message)
-        finally:
-            self._unmount_volume(existing_volume, nfs_share, mount_point)
-        existing_volume_size = existing_volume_info.virtual_size // units.Gi
-        LOG.debug('Manage existing volume: %(volume)s size is %(size)sG',
-                  {'volume': existing_volume['name'],
-                   'size': existing_volume_size})
-        return existing_volume_size
+        specs = self._get_image_specs(existing_volume)
+        image = VolumeImage(self, existing_volume, specs)
+        image.reload(file_size=True)
+        return image.volume_size
 
     def get_manageable_volumes(self, cinder_volumes, marker, limit, offset,
                                sort_keys, sort_dirs):
@@ -2001,6 +1991,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             path = volume['path']
             guid = volume['guid']
             parent = volume['parent']
+            # TODO: ref res etc
             size = volume['bytesUsed'] // units.Gi
             name = posixpath.basename(path)
             if path == self.nas_path:

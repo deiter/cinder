@@ -992,6 +992,9 @@ class NefProxy(object):
             token = self.tokens[host]
             self.update_bearer(token)
 
+    def version_less(self, version):
+        return parse_version(self.version) < parse_version(version)
+
     def update_lock(self):
         software = {}
         settings = {}
@@ -1045,7 +1048,7 @@ class NefProxy(object):
         LOG.debug('NEF coordination lock: %(lock)s',
                   {'lock': self.lock})
         for version in versions:
-            if parse_version(version) < parse_version(self.version):
+            if not self.version_less(version):
                 self.version = version
         LOG.debug('NEF release version: %(version)s',
                   {'version': self.version})
