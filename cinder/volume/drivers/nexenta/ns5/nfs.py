@@ -523,7 +523,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         image.change(file_size=file_size, file_format=file_format)
         if file_sparse:
             file_size = 0
-        if file_size > reservation:
+        if reservation != file_size:
             self._set_volume_reservation(volume, file_size, file_format)
 
         #kwargs = {}
@@ -556,7 +556,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         #model_update = {'metadata': metadata}
         #return model_update
 
-    def _get_volume_reservation(self, volume, volume_size, volume_format):
+    def _get_volume_reservation(self, volume, file_size, file_format):
         """Calculates the correct reservation size for given volume size.
 
         Its purpose is to reserve additional space for volume metadata
@@ -565,51 +565,51 @@ class NexentaNfsDriver(nfs.NfsDriver):
         and qcow2_calc_prealloc_size function in qcow2.c
 
         :param volume: volume reference
-        :param volume_size: volume size in bytes
-        :param volume_format: volume backend file format
+        :param file_size: volume file size in bytes
+        :param file_format: volume file format
         :returns: reservation size
         """
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'recordSize,dataCopies'}
         props = self.nef.filesystems.get(volume_path, payload)
-        block_size = props['recordSize']
-        data_copies = props['dataCopies']
-        reservation = volume_size
+        blocksize = props['recordSize']
+        ncopies = props['dataCopies']
         numdb = 7
         dn_max_indblkshift = 17
         spa_blkptrshift = 7
         spa_dvas_per_bp = 3
         dnodes_per_level_shift = dn_max_indblkshift - spa_blkptrshift
         dnodes_per_level = 1 << dnodes_per_level_shift
-        nblocks = reservation // block_size
+        nblocks = file_size // blocksize
         while nblocks > 1:
             nblocks += dnodes_per_level - 1
             nblocks //= dnodes_per_level
             numdb += nblocks
-        numdb *= min(spa_dvas_per_bp, data_copies + 1)
-        reservation *= data_copies
+        numdb *= min(spa_dvas_per_bp, ncopies + 1)
+        zfs_meta = file_size * ncopies
         numdb *= 1 << dn_max_indblkshift
-        reservation += numdb
-        if volume_format == VOLUME_FORMAT_RAW:
-            meta_size = 0
-        elif volume_format == VOLUME_FORMAT_QCOW:
-            meta_size = 48 + 4 * volume_size // units.Mi
-        elif volume_format == VOLUME_FORMAT_QCOW2:
+        zfs_meta += numdb
+
+        if file_format == VOLUME_FORMAT_RAW:
+            file_meta = 0
+        elif file_format == VOLUME_FORMAT_QCOW:
+            file_meta = 48 + 4 * file_size // units.Mi
+        elif file_format == VOLUME_FORMAT_QCOW2:
             cluster_size = 64 * units.Ki
             refcount_size = 4
             int_size = (sys.maxsize.bit_length() + 1) // 8
-            meta_size = 0
-            aligned_volume_size = nexenta_utils.roundup(volume_size,
-                                                        cluster_size)
-            meta_size += cluster_size
+            file_meta = 0
+            aligned_file_size = nexenta_utils.roundup(file_size,
+                                                      cluster_size)
+            file_meta += cluster_size
             blocks_per_table = cluster_size // int_size
-            clusters = aligned_volume_size // cluster_size
+            clusters = aligned_file_size // cluster_size
             nl2e = nexenta_utils.roundup(clusters, blocks_per_table)
-            meta_size += nl2e * int_size
+            file_meta += nl2e * int_size
             clusters = nl2e * int_size // cluster_size
             nl1e = nexenta_utils.roundup(clusters, blocks_per_table)
-            meta_size += nl1e * int_size
-            clusters = (aligned_volume_size + meta_size) // cluster_size
+            file_meta += nl1e * int_size
+            clusters = (aligned_file_size + file_meta) // cluster_size
             refcounts_per_block = 8 * cluster_size // (1 << refcount_size)
             table = blocks = first = 0
             last = 1
@@ -619,48 +619,47 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 blocks = nexenta_utils.divup(first, refcounts_per_block)
                 table = nexenta_utils.divup(blocks, blocks_per_table)
                 first = clusters + blocks + table
-            meta_size += (blocks + table) * cluster_size
-        elif volume_format == VOLUME_FORMAT_PARALLELS:
-            meta_size = (1 + volume_size // units.Gi // 256) * units.Mi
-        elif volume_format == VOLUME_FORMAT_VDI:
-            meta_size = 512 + 4 * volume_size // units.Mi
-        elif volume_format == VOLUME_FORMAT_VHDX:
-            meta_size = 8 * units.Mi
-        elif volume_format == VOLUME_FORMAT_VMDK:
-            meta_size = 192 * (units.Ki + volume_size // units.Mi)
-        elif volume_format == VOLUME_FORMAT_VPC:
-            meta_size = 512 + 2 * (units.Ki + volume_size // units.Mi)
-        elif volume_format == VOLUME_FORMAT_QED:
-            meta_size = 320 * units.Ki
+            file_meta += (blocks + table) * cluster_size
+        elif file_format == VOLUME_FORMAT_PARALLELS:
+            file_meta = (1 + file_size // units.Gi // 256) * units.Mi
+        elif file_format == VOLUME_FORMAT_VDI:
+            file_meta = 512 + 4 * file_size // units.Mi
+        elif file_format == VOLUME_FORMAT_VHDX:
+            file_meta = 8 * units.Mi
+        elif file_format == VOLUME_FORMAT_VMDK:
+            file_meta = 192 * (units.Ki + file_size // units.Mi)
+        elif file_format == VOLUME_FORMAT_VPC:
+            file_meta = 512 + 2 * (units.Ki + file_size // units.Mi)
+        elif file_format == VOLUME_FORMAT_QED:
+            file_meta = 320 * units.Ki
         else:
-            message = (_('Volume format %(volume_format)s is not supported')
-                       % {'volume_format': volume_format})
+            message = (_('Volume format %(format)s is not supported')
+                       % {'format': file_format})
             raise jsonrpc.NefException(code='EINVAL', message=message)
-        reservation += meta_size
-        volume_meta = reservation - volume_size
-        LOG.debug('Reservation size for %(format)s volume %(volume)s: '
-                  '%(reservation)s, volume data size: %(volume_size)s, '
-                  'volume metadata size: %(volume_meta)s and volume '
-                  'file metadata size: %(meta_size)s',
-                  {'format': volume_format, 'volume': volume['name'],
-                   'reservation': reservation, 'volume_size': volume_size,
-                   'volume_meta': volume_meta, 'meta_size': meta_size})
+        reservation = file_size + zfs_meta + file_meta
+        LOG.debug('Reservation for %(format)s volume %(volume)s: '
+                  '%(reservation)s, file size: %(file_size)s, '
+                  'ZFS metadata: %(zfs_meta)s and '
+                  'file metadata: %(file_meta)s',
+                  {'format': file_format, 'volume': volume['name'],
+                   'reservation': reservation, 'file_size': file_size,
+                   'zfs_meta': zfs_meta, 'file_meta': file_meta})
         return reservation
 
-    def _set_volume_reservation(self, volume, volume_size, volume_format):
+    def _set_volume_reservation(self, volume, file_size, file_format):
         reservation = 0
-        if volume_size:
+        if file_size:
             reservation = self._get_volume_reservation(volume,
-                                                       volume_size,
-                                                       volume_format)
+                                                       file_size,
+                                                       file_format)
         volume_path = self._get_volume_path(volume)
         payload = {'referencedReservationSize': reservation}
         try:
             self.nef.filesystems.set(volume_path, payload)
         except jsonrpc.NefException as error:
             LOG.error('Failed to set %(format)s volume %(volume)s '
-                      'reservation size to %(reservation)s: %(error)s',
-                      {'format': volume_format,
+                      'reservation to %(reservation)s: %(error)s',
+                      {'format': file_format,
                        'volume': volume['name'],
                        'reservation': reservation,
                        'error': error})
@@ -1389,11 +1388,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
         file_format = image.file_format
         if not file_sparse:
             self._set_volume_reservation(volume, file_size, file_format)
-        #if file_vsolution and file_format == VOLUME_FORMAT_RAW:
-        #    payload = {'size': file_size}
-        #    self.nef.vsolutions.resize(volume_path, VOLUME_FILE_NAME, payload)
-        #else:
-        image.change(file_size=file_size)
+        if file_vsolution and file_format == VOLUME_FORMAT_RAW:
+            payload = {'size': file_size}
+            self.nef.vsolutions.resize(volume_path, VOLUME_FILE_NAME, payload)
+        else:
+            image.change(file_size=file_size)
 
         LOG.info('Extend %(format)s volume %(volume)s to %(new_size)sGB',
                  {'format': file_format, 'volume': volume['name'],
