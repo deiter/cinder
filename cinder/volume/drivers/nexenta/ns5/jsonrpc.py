@@ -1016,6 +1016,8 @@ class NefProxy(object):
                 compound.append(build)
         if compound:
             self.version = '.'.join(map(str, compound))
+            LOG.debug('Software version for host %(host)s: %(version)s',
+                      {'host': self.host, 'version': self.version})
         try:
             settings = self.settings.get('system.guid')
         except NefException as error:
