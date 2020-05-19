@@ -2296,22 +2296,19 @@ class NexentaNfsDriver(nfs.NfsDriver):
         migration
         """
         connector_properties = cinder_utils.brick_get_connector_properties()
-        attach_info, dst_volume = self._attach_volume(ctxt, dst_volume,
-                                                      connector_properties,
-                                                      remote=True)
-        dst_volume_file = attach_info['device']['path']
-        dst_volume_info = self._get_image_info(dst_volume_file)
+        attach_info, dst_volume = self._attach_volume(
+            ctxt, dst_volume, connector_properties, remote=True)
+        dst_file_path = attach_info['device']['path']
+        dst_image = image_utils.qemu_img_info(
+            dst_file_path, force_share=True,
+            run_as_root=self._execute_as_root)
         self._detach_volume(ctxt, attach_info, dst_volume,
                             connector_properties, force=True)
-        src_nfs_share, src_mount_point, src_volume_file = (
-            self._mount_volume(src_volume))
-        src_volume_info = self._get_image_info(src_volume_file)
-        if src_volume_info.file_format != dst_volume_info.file_format:
-            self._change_volume_format(src_volume, src_volume_file,
-                                       src_volume_info.file_format,
-                                       dst_volume_info.file_format)
-        self._unmount_volume(src_volume, src_nfs_share, src_mount_point)
-        # TODO ?
+        src_specs = self._get_image_specs(src_volume)
+        src_image = VolumeImage(self, src_volume, src_specs)
+        src_image.reload(file_format=True)
+        if src_image.file_format != dst_image.file_format:
+            src_image.change(file_format=dst_image.file_format)
 
     def retype(self, ctxt, volume, new_type, diff, host):
         """Retype from one volume type to another."""
