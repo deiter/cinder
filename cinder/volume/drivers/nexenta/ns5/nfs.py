@@ -1771,7 +1771,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
     def _get_existing_volume(self, existing_ref):
         types = {
-            'source-name': 'name',
+            'source-name': 'path',
             'source-guid': 'guid'
         }
         if not any(key in types for key in existing_ref):
@@ -1791,6 +1791,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
         for key, value in types.items():
             if key in existing_ref:
                 payload[value] = existing_ref[key]
+        # Workaround for NEX-22773
+        if 'path' in payload:
+            name = payload['path']
+            path = posixpath.join(self.nas_path, name)
+            payload['path'] = path
         existing_volumes = self.nef.filesystems.list(payload)
         if len(existing_volumes) == 1:
             volume_path = existing_volumes[0]['path']
