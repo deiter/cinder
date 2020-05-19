@@ -328,7 +328,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
     def _do_setup(self):
         try:
             self.nef = jsonrpc.NefProxy(self.driver_volume_type,
-                                        self.nas_pool, self.nas_path,
+                                        self.nas_pool,
+                                        self.nas_path,
+                                        self.backend_name,
                                         self.configuration)
         except jsonrpc.NefException as error:
             LOG.error('Failed to initialize RESTful API for backend '

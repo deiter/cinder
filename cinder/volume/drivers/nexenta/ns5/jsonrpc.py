@@ -901,7 +901,7 @@ class NefNetAddresses(NefCollections):
 
 
 class NefProxy(object):
-    def __init__(self, proto, pool, path, conf):
+    def __init__(self, proto, pool, path, backend, conf):
         self.settings = NefSettings(self)
         self.software = NefSoftware(self)
         self.vsolutions = NefVsolutions(self)
@@ -946,6 +946,7 @@ class NefProxy(object):
                 self.port = HTTP_PORT
         self.username = conf.nexenta_user
         self.password = conf.nexenta_password
+        self.backend = backend
         self.hosts = []
         if conf.nexenta_rest_address:
             for host in conf.nexenta_rest_address.split(','):
@@ -1026,8 +1027,8 @@ class NefProxy(object):
                 compound.append(build)
         if compound:
             self.version = '.'.join(map(str, compound))
-            LOG.info('Software version for host %(host)s: %(version)s',
-                     {'host': self.host, 'version': self.version})
+            LOG.info('Software version for backend %(backend)s: %(version)s',
+                     {'backend': self.backend, 'version': self.version})
         try:
             settings = self.settings.get('system.guid')
         except Exception:
@@ -1056,8 +1057,8 @@ class NefProxy(object):
         if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
         self.lock = hashlib.md5(lock).hexdigest()
-        LOG.info('Coordination lock for host %(host)s: %(lock)s',
-                 {'host': self.host, 'lock': self.lock})
+        LOG.info('Coordination lock for backend %(backend)s: %(lock)s',
+                 {'backend': self.backend, 'lock': self.lock})
 
     def url(self, path=None):
         if not path:
