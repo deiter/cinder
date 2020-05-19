@@ -88,7 +88,7 @@ class NefRequest(object):
     def __call__(self, path, payload=None):
         info = '%(method)s %(url)s %(payload)s' % {
             'method': self.method,
-            'url': self.proxy.url(path)
+            'url': self.proxy.url(path),
             'payload': payload
         }
         LOG.debug('Start NEF request: %(info)s', {'info': info})
