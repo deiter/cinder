@@ -133,6 +133,10 @@ class NefRequest(object):
                 return None
             content = json.loads(response.content)
             if not response.ok:
+                LOG.error('Failed NEF request: %(method)s %(path)s '
+                          '%(payload)s, response content: %(content)s',
+                          {'method': self.method, 'path': path,
+                           'payload': payload, 'content': content})
                 raise NefException(content)
             if isinstance(content, dict) and 'data' in content:
                 return self.data
