@@ -721,8 +721,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 return cache, snapshot
             raise
         cache_size = props['referencedReservationSize']
-        # TODO: roundgb
-        cache['size'] = cache_size // units.Gi
+        cache['size'] = nexenta_utils.roundgb(cache_size)
         snapshot_path = self._get_snapshot_path(snapshot)
         payload = {'fields': 'path'}
         try:
