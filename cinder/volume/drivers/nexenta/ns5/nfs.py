@@ -98,7 +98,7 @@ class VolumeImage(object):
         if self.file_format == VOLUME_FORMAT_QCOW2:
             cmd.append('-o preallocation=metadata')
         cmd.append(self.file_path)
-        cmd.append(file_size)
+        cmd.append(self.file_size)
         self.execute(*cmd)
 
     def resize(self, file_size):
