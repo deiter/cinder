@@ -412,7 +412,7 @@ class NefSoftware(NefSettings, NefCollections):
         return NotImplemented
 
     def version(self):
-        name = 'current'
+        name = 'current1'
         LOG.debug('Get %(name)s %(subj)s version',
                   {'name': name, 'subj': self.subj})
         path = self.path(name)
@@ -1021,8 +1021,8 @@ class NefProxy(object):
                 compound.append(build)
         if compound:
             self.version = '.'.join(map(str, compound))
-            LOG.debug('Software version for host %(host)s: %(version)s',
-                      {'host': self.host, 'version': self.version})
+            LOG.info('Software version for host %(host)s: %(version)s',
+                     {'host': self.host, 'version': self.version})
         else:
             self.version = None
             LOG.error('Software version not found for host %(host)s: '
