@@ -298,13 +298,13 @@ class NefRequest(object):
         LOG.info('Found pool %(pool)s on host %(host)s',
                  {'pool': self.proxy.pool,
                   'host': self.proxy.host})
-        self.proxy.update_lock()
         return True
 
     def find_host(self):
         for host in self.proxy.hosts:
             self.proxy.update_host(host)
             if self.check_host():
+                self.proxy.update_lock()
                 return True
         return False
 
@@ -914,7 +914,7 @@ class NefProxy(object):
         self.mappings = NefLunMappings(self)
         self.logicalunits = NefLogicalUnits(self)
         self.netaddrs = NefNetAddresses(self)
-        self.version = 0
+        self.version = None
         self.lock = None
         self.auto = False
         self.tokens = {}
@@ -994,6 +994,8 @@ class NefProxy(object):
             self.update_bearer(token)
 
     def version_less(self, version):
+        if not self.version:
+            return True
         return parse_version(self.version) < parse_version(version)
 
     def update_lock(self):
@@ -1018,6 +1020,11 @@ class NefProxy(object):
             self.version = '.'.join(map(str, compound))
             LOG.debug('Software version for host %(host)s: %(version)s',
                       {'host': self.host, 'version': self.version})
+        else:
+            self.version = None
+            LOG.error('Software version not found for host %(host)s: '
+                      '%(software)s',
+                      {'host': self.host, 'software': software})
         try:
             settings = self.settings.get('system.guid')
         except NefException as error:
@@ -1028,10 +1035,9 @@ class NefProxy(object):
             LOG.debug('System guid for host %(host)s: %(guid)s',
                       {'host': self.host, 'guid': guid})
         else:
-            LOG.error('System guid for host %(host)s not found: %(settings)s',
-                      {'host': self.host, 'settings': settings})
-        if not guid:
             guid = self.host
+            LOG.error('System guid not found for host %(host)s: %(settings)s',
+                      {'host': self.host, 'settings': settings})
         lock = '%s:%s' % (guid, self.path)
         if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
