@@ -1027,7 +1027,7 @@ class NefProxy(object):
                 compound.append(build)
         if compound:
             self.version = '.'.join(map(str, compound))
-            LOG.info('Software version for backend %(backend)s: %(version)s',
+            LOG.info('Software version for %(backend)s backend: %(version)s',
                      {'backend': self.backend, 'version': self.version})
         try:
             settings = self.settings.get('system.guid')
@@ -1057,7 +1057,7 @@ class NefProxy(object):
         if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
         self.lock = hashlib.md5(lock).hexdigest()
-        LOG.info('Coordination lock for backend %(backend)s: %(lock)s',
+        LOG.info('Coordination lock for %(backend)s backend: %(lock)s',
                  {'backend': self.backend, 'lock': self.lock})
 
     def url(self, path=None):
