@@ -801,6 +801,14 @@ class NefHpr(NefCollections):
         return self.proxy.post(path, payload)
 
 
+class NefRsf(NefCollections):
+
+    def __init__(self, proxy):
+        super(NefRsf, self).__init__(proxy)
+        self.root = '/rsf/clusters'
+        self.subj = 'RSF Clusters'
+
+
 class NefServices(NefCollections):
 
     def __init__(self, proxy):
@@ -898,6 +906,7 @@ class NefProxy(object):
         self.snapshots = NefSnapshots(self)
         self.services = NefServices(self)
         self.hpr = NefHpr(self)
+        self.rsf = NefRsf(self)
         self.nfs = NefNfs(self)
         self.targets = NefTargets(self)
         self.hostgroups = NefHostGroups(self)
@@ -993,14 +1002,15 @@ class NefProxy(object):
         software = {}
         settings = {}
         compound = []
+        clusters = []
+        guids = []
         guid = None
         try:
             software = self.software.version()
         except NefException as error:
-            LOG.error('Failed to get software version '
-                      'for host %(host)s: %(error)s',
-                      {'host': self.host,
-                       'error': error})
+            LOG.error('Failed to get software version for '
+                      'host %(host)s: %(error)s',
+                      {'host': self.host, 'error': error})
         if software and 'version' in software:
             version = software['version']
             if version:
@@ -1011,33 +1021,49 @@ class NefProxy(object):
                 compound.append(build)
         if compound:
             self.version = '.'.join(map(str, compound))
-            LOG.debug('Software version for host '
-                      '%(host)s: %(version)s',
-                      {'host': self.host,
-                       'version': self.version})
+            LOG.debug('Software version for host %(host)s: %(version)s',
+                      {'host': self.host, 'version': self.version})
         else:
             self.version = None
-            LOG.error('Software version not found for '
-                      'host %(host)s: %(software)s',
-                      {'host': self.host,
-                       'software': software})
+            LOG.error('Software version not found for host %(host)s: '
+                      '%(software)s',
+                      {'host': self.host, 'software': software})
         try:
             settings = self.settings.get('system.guid')
         except NefException as error:
-            LOG.error('Failed to get system settings '
-                      'for host %(host)s: %(error)s',
-                      {'host': self.host,
-                       'error': error})
+            LOG.error('Failed to get system settings for host '
+                      '%(host)s: %(error)s',
+                      {'host': self.host, 'error': error})
         if settings and 'value' in settings:
             guid = settings['value']
             LOG.debug('System guid for host %(host)s: %(guid)s',
                       {'host': self.host, 'guid': guid})
         else:
-            guid = self.host
-            LOG.error('System guid not found for '
-                      'host %(host)s: %(settings)s',
-                      {'host': self.host,
-                       'settings': settings})
+            LOG.error('System guid not found for host %(host)s: '
+                      '%(settings)s',
+                      {'host': self.host, 'settings': settings})
+        payload = {'fields': 'nodes'}
+        try:
+            clusters = self.rsf.list(payload)
+        except NefException as error:
+            LOG.error('Failed to get HA cluster settings '
+                      'for host %(host)s: %(error)s',
+                      {'host': self.host, 'error': error})
+        for cluster in clusters:
+            if 'nodes' not in cluster:
+                continue
+            nodes = cluster['nodes']
+            for node in nodes:
+                if 'machineId' in node:
+                    hostid = node['machineId']
+                    if hostid and hostid != '-':
+                        guids.append(hostid)
+        if guid and guids and guid in guids:
+            guid = ':'.join(map(str, sorted(guids)))
+            LOG.debug('HA cluster guid for host %(host)s: %(guid)s',
+                      {'host': self.host, 'guid': guid})
+        if not guid:
+            guid = ':'.join(map(str, sorted(self.hosts)))
         lock = '%s:%s' % (guid, self.path)
         if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
