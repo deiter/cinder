@@ -1338,6 +1338,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                  {'format': file_format, 'volume': volume['name'],
                   'name': file_name, 'size': file_size})
         if file_vsolution and file_format == VOLUME_FORMAT_RAW:
+            volume_path = self._get_volume_path(volume)
             payload = {'size': file_size}
             self.nef.vsolutions.resize(volume_path, file_name, payload)
         else:
