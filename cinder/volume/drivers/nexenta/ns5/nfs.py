@@ -646,7 +646,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         volume_path = self._create_volume(volume)
         specs = self._get_image_specs(volume)
-        #  TODO size from image.file_size ?
         file_size = volume['size'] * units.Gi
         file_format = specs['format']
         file_sparse = specs['sparse']
@@ -1794,8 +1793,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if len(existing_volumes) == 1:
             volume_path = existing_volumes[0]['path']
             volume_name = posixpath.basename(volume_path)
-            volume_bytes = existing_volumes[0]['bytesReferenced']
-            volume_size = nexenta_utils.roundgb(volume_bytes)
+            refsize = existing_volumes[0]['bytesReferenced']
+            volume_size = nexenta_utils.roundgb(refsize)
             existing_volume = {
                 'name': volume_name,
                 'path': volume_path,
@@ -1979,7 +1978,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             cinder_volume_names[key] = value
         payload = {
             'parent': self.nas_path,
-            'fields': 'guid,parent,path,bytesUsed',
+            'fields': 'guid,parent,path,bytesReferenced',
             'recursive': False
         }
         volumes = self.nef.filesystems.list(payload)
@@ -1991,16 +1990,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
             path = volume['path']
             guid = volume['guid']
             parent = volume['parent']
-            # TODO: ref res etc
-            size = volume['bytesUsed'] // units.Gi
+            refsize = volume['bytesReferenced']
+            size = nexenta_utils.roundgb(refsize)
             name = posixpath.basename(path)
             if path == self.nas_path:
                 continue
             if parent != self.nas_path:
                 continue
             if nexenta_utils.match_template(self.cache_image_template, name):
-                LOG.debug('Skip image cache %(path)s',
-                          {'path': path})
                 continue
             if name in cinder_volume_names:
                 cinder_id = cinder_volume_names[name]
@@ -2114,6 +2111,15 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           sort_keys (valid directions are 'asc' and 'desc')
 
         """
+        temporary_snapshots = {
+            self.cache_snapshot_template: 'image cache',
+            self.origin_snapshot_template: 'temporary origin',
+            self.group_snapshot_template: 'temporary group'
+        }
+        service_snapshots = {
+            'hprService': 'replication',
+            'snaplistId': 'snapping'
+        }
         manageable_snapshots = []
         cinder_volume_names = {}
         cinder_snapshot_names = {}
@@ -2153,25 +2159,16 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           'volume %(parent)s is unmanaged',
                           {'path': path, 'parent': parent})
                 continue
-            if nexenta_utils.match_template(self.cache_snapshot_template,
-                                            name):
-                LOG.debug('Skip image cache snapshot %(path)s',
-                          {'path': path})
-                continue
-            if nexenta_utils.match_template(self.origin_snapshot_template,
-                                            name):
-                LOG.debug('Skip temporary origin snapshot %(path)s',
-                          {'path': path})
-                continue
-            if nexenta_utils.match_template(self.group_snapshot_template,
-                                            name):
-                LOG.debug('Skip temporary group snapshot %(path)s',
-                          {'path': path})
-                continue
-            if snapshot['hprService'] or snapshot['snaplistId']:
-                LOG.debug('Skip Replication/Snapping snapshot %(path)s',
-                          {'path': path})
-                continue
+            for item, desc in temporary_snapshots.items():
+                if nexenta_utils.match_template(item, name):
+                    LOG.debug('Skip %(desc)s snapshot %(path)s',
+                              {'desc': desc, 'path': path})
+                    continue
+            for item, desc in service_snapshots.items():
+                if snapshot[item]:
+                    LOG.debug('Skip %(desc)s snapshot %(path)s',
+                              {'desc': desc, 'path': path})
+                    continue
             if name in cinder_snapshot_names:
                 size = cinder_snapshot_names[name]['size']
                 cinder_id = cinder_snapshot_names[name]['id']

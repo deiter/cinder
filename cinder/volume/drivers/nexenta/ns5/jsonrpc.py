@@ -997,8 +997,10 @@ class NefProxy(object):
         try:
             software = self.software.version()
         except NefException as error:
-            LOG.error('Failed to get software version for host %(host)s: '
-                      '%(error)s', {'host': self.host, 'error': error})
+            LOG.error('Failed to get software version '
+                      'for host %(host)s: %(error)s',
+                      {'host': self.host,
+                       'error': error})
         if software and 'version' in software:
             version = software['version']
             if version:
@@ -1009,26 +1011,33 @@ class NefProxy(object):
                 compound.append(build)
         if compound:
             self.version = '.'.join(map(str, compound))
-            LOG.debug('Software version for host %(host)s: %(version)s',
-                      {'host': self.host, 'version': self.version})
+            LOG.debug('Software version for host '
+                      '%(host)s: %(version)s',
+                      {'host': self.host,
+                       'version': self.version})
         else:
             self.version = None
-            LOG.error('Software version not found for host %(host)s: '
-                      '%(software)s',
-                      {'host': self.host, 'software': software})
+            LOG.error('Software version not found for '
+                      'host %(host)s: %(software)s',
+                      {'host': self.host,
+                       'software': software})
         try:
             settings = self.settings.get('system.guid')
         except NefException as error:
-            LOG.error('Failed to get system settings for host %(host)s: '
-                      '%(error)s', {'host': self.host, 'error': error})
+            LOG.error('Failed to get system settings '
+                      'for host %(host)s: %(error)s',
+                      {'host': self.host,
+                       'error': error})
         if settings and 'value' in settings:
             guid = settings['value']
             LOG.debug('System guid for host %(host)s: %(guid)s',
                       {'host': self.host, 'guid': guid})
         else:
             guid = self.host
-            LOG.error('System guid not found for host %(host)s: %(settings)s',
-                      {'host': self.host, 'settings': settings})
+            LOG.error('System guid not found for '
+                      'host %(host)s: %(settings)s',
+                      {'host': self.host,
+                       'settings': settings})
         lock = '%s:%s' % (guid, self.path)
         if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
