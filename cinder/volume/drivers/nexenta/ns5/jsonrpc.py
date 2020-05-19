@@ -801,14 +801,6 @@ class NefHpr(NefCollections):
         return self.proxy.post(path, payload)
 
 
-class NefRsf(NefCollections):
-
-    def __init__(self, proxy):
-        super(NefRsf, self).__init__(proxy)
-        self.root = '/rsf/clusters'
-        self.subj = 'HA cluster'
-
-
 class NefServices(NefCollections):
 
     def __init__(self, proxy):
@@ -906,7 +898,6 @@ class NefProxy(object):
         self.snapshots = NefSnapshots(self)
         self.services = NefServices(self)
         self.hpr = NefHpr(self)
-        self.rsf = NefRsf(self)
         self.nfs = NefNfs(self)
         self.targets = NefTargets(self)
         self.hostgroups = NefHostGroups(self)
