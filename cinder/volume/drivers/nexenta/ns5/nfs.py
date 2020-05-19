@@ -679,7 +679,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'format': specs['format'], 'volume': volume['name'],
                    'image': image_meta['id']})
         image = VolumeImage(self, volume, specs)
-        image.reload(volume_format=True)
+        image.reload(file_format=True)
         image.upload(ctxt, image_service, image_meta)
 
     @coordination.synchronized('{self.nef.lock}-{cache_name}')
