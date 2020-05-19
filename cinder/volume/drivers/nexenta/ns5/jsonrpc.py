@@ -91,7 +91,7 @@ class NefRequest(object):
             'url': self.proxy.url(path),
             'payload': payload
         }
-        LOG.debug('Start NEF request: %(info)s', {'info': info})
+        LOG.debug('Start request: %(info)s', {'info': info})
         self.path = path
         self.payload = payload
         for attempt in range(self.attempts):
@@ -100,7 +100,7 @@ class NefRequest(object):
                 self.delay(attempt)
                 if not self.find_host():
                     continue
-                LOG.debug('Retry NEF request: %(info)s '
+                LOG.debug('Retry request: %(info)s '
                           '[%(attempt)s/%(attempts)s], '
                           'reason: %(error)s',
                           {'info': info, 'attempt': attempt,
@@ -116,7 +116,7 @@ class NefRequest(object):
                     self.error = NefException(message=message)
                 continue
             count = sum(self.stat.values())
-            LOG.debug('Finish NEF request: %(info)s, '
+            LOG.debug('Finish request: %(info)s, '
                       'total response time: %(time)s seconds, '
                       'total wait time: %(wait)s seconds, '
                       'total requests count: %(count)s, '
@@ -135,14 +135,14 @@ class NefRequest(object):
                 return None
             content = json.loads(response.content)
             if not response.ok:
-                LOG.error('Failed NEF request: %(info)s, '
+                LOG.error('Failed request: %(info)s, '
                           'response content: %(content)s',
                           {'info': info, 'content': content})
                 raise NefException(content)
             if isinstance(content, dict) and 'data' in content:
                 return self.data
             return content
-        LOG.error('Failed NEF request: %(info)s, '
+        LOG.error('Failed request: %(info)s, '
                   'reached maximum retry attempts: '
                   '%(attempts)s, reason: %(error)s',
                   {'info': self.info,
@@ -168,8 +168,6 @@ class NefRequest(object):
                 kwargs['params'] = payload
             elif method in ['put', 'post']:
                 kwargs['data'] = json.dumps(payload)
-        LOG.debug('Session request: %(method)s %(url)s %(data)s',
-                  {'method': method, 'url': url, 'data': kwargs})
         return self.proxy.session.request(method, url, **kwargs)
 
     def hook(self, response, **kwargs):
