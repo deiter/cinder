@@ -152,18 +152,21 @@ class NefRequest(object):
 
     def request(self, method, path, payload):
         if self.method not in ['get', 'delete', 'put', 'post']:
+            code = 'EINVAL'
             message = (_('Request method %(method)s not supported')
                        % {'method': self.method})
-            raise NefException(code='EINVAL', message=message)
+            raise NefException(code=code, message=message)
         if not path:
+            code = 'EINVAL'
             message = _('Request path is required')
-            raise NefException(code='EINVAL', message=message)
+            raise NefException(code=code, message=message)
         url = self.proxy.url(path)
         kwargs = dict(self.kwargs)
         if payload:
             if not isinstance(payload, dict):
+                code = 'EINVAL'
                 message = _('Request payload must be a dictionary')
-                raise NefException(code='EINVAL', message=message)
+                raise NefException(code=code, message=message)
             if method in ['get', 'delete']:
                 kwargs['params'] = payload
             elif method in ['put', 'post']:
@@ -190,17 +193,19 @@ class NefRequest(object):
         try:
             content = json.loads(response.content)
         except (TypeError, ValueError) as error:
+            code='EINVAL'
             message = (_('Failed request hook on %(info)s: '
                          'JSON parser error: %(error)s')
                        % {'info': info, 'error': error})
-            raise NefException(code='EINVAL', message=message)
+            raise NefException(code=code, message=message)
         if response.ok and content is None:
             return response
         if not isinstance(content, dict):
+            code='EINVAL'
             message = (_('Failed request hook on %(info)s: '
                          'no valid content found')
                        % {'info': info})
-            raise NefException(code='EINVAL', message=message)
+            raise NefException(code=code, message=message)
         if attempt > limit and not response.ok:
             return response
         method = 'get'
@@ -223,10 +228,11 @@ class NefRequest(object):
         elif response.status_code == requests.codes.accepted:
             path, payload = self.parse(content, 'monitor')
             if not path:
+                code='ENODATA'
                 message = (_('Failed request hook on %(info)s: '
                              'monitor path not found')
                            % {'info': info})
-                raise NefException(code='ENODATA', message=message)
+                raise NefException(code=code, message=message)
             self.delay(attempt)
             return self.request(method, path, payload)
         elif response.status_code == requests.codes.ok:
@@ -949,11 +955,12 @@ class NefProxy(object):
         elif proto == NFS and conf.nas_host:
             self.hosts.append(conf.nas_host)
         else:
+            code='EINVAL'
             message = (_('NexentaStor Rest API address is not defined, '
                          'please check the Cinder configuration file for '
                          'NexentaStor backend and nexenta_rest_address, '
                          'nexenta_host or nas_host configuration options'))
-            raise NefException(code='EINVAL', message=message)
+            raise NefException(code=code, message=message)
         self.host = self.hosts[0]
         self.pool = pool
         self.path = path
