@@ -289,12 +289,7 @@ class NefRequest(object):
                   'host': self.proxy.host})
         try:
             response = self.request(method, self.proxy.root, payload)
-        except Exception as error:
-            LOG.error('Failed to find pool %(pool)s '
-                      'on host %(host)s: %(error)s',
-                      {'pool': self.proxy.pool,
-                       'host': self.proxy.host,
-                       'error': error})
+        except Exception:
             return False
         content = json.loads(response.content)
         if 'data' not in content or not content['data']:
@@ -1006,6 +1001,7 @@ class NefProxy(object):
         return parse_version(self.version) < parse_version(version)
 
     def update_lock(self):
+        self.version = None
         software = {}
         settings = {}
         compound = []
@@ -1014,10 +1010,8 @@ class NefProxy(object):
         guid = None
         try:
             software = self.software.version()
-        except NefException as error:
-            LOG.error('Failed to get software version for '
-                      'host %(host)s: %(error)s',
-                      {'host': self.host, 'error': error})
+        except Exception:
+            pass
         if software and 'version' in software:
             version = software['version']
             if version:
@@ -1030,32 +1024,17 @@ class NefProxy(object):
             self.version = '.'.join(map(str, compound))
             LOG.info('Software version for host %(host)s: %(version)s',
                      {'host': self.host, 'version': self.version})
-        else:
-            self.version = None
-            LOG.error('Software version not found for host %(host)s: '
-                      '%(software)s',
-                      {'host': self.host, 'software': software})
         try:
             settings = self.settings.get('system.guid')
-        except NefException as error:
-            LOG.error('Failed to get system settings for host '
-                      '%(host)s: %(error)s',
-                      {'host': self.host, 'error': error})
+        except Exception:
+            pass
         if settings and 'value' in settings:
             guid = settings['value']
-            LOG.debug('System guid for host %(host)s: %(guid)s',
-                      {'host': self.host, 'guid': guid})
-        else:
-            LOG.error('System guid not found for host %(host)s: '
-                      '%(settings)s',
-                      {'host': self.host, 'settings': settings})
         payload = {'fields': 'nodes'}
         try:
             clusters = self.rsf.list(payload)
-        except NefException as error:
-            LOG.error('Failed to get HA cluster settings '
-                      'for host %(host)s: %(error)s',
-                      {'host': self.host, 'error': error})
+        except Exception:
+            pass
         for cluster in clusters:
             if 'nodes' not in cluster:
                 continue
@@ -1067,16 +1046,14 @@ class NefProxy(object):
                         guids.append(hostid)
         if guid and guids and guid in guids:
             guid = ':'.join(map(str, sorted(guids)))
-            LOG.debug('HA cluster guid for host %(host)s: %(guid)s',
-                      {'host': self.host, 'guid': guid})
         if not guid:
             guid = ':'.join(map(str, sorted(self.hosts)))
         lock = '%s:%s' % (guid, self.path)
         if isinstance(lock, six.text_type):
             lock = lock.encode('utf-8')
         self.lock = hashlib.md5(lock).hexdigest()
-        LOG.debug('Coordination lock for host %(host)s: %(lock)s',
-                  {'host': self.host, 'lock': self.lock})
+        LOG.info('Coordination lock for host %(host)s: %(lock)s',
+                 {'host': self.host, 'lock': self.lock})
 
     def url(self, path=None):
         if not path:
