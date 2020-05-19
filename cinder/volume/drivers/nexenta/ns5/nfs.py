@@ -2391,10 +2391,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         return vendor_properties, namespace
 
     def _get_volume_type_specs(self, volume, volume_type=None):
-        if volume_type:
+        if volume_type and 'id' in volume_type:
             type_id = volume_type['id']
-        else:
+        elif 'volume_type_id' in volume:
             type_id = volume['volume_type_id']
+        else:
+            type_id = None
         if type_id:
             return volume_types.get_volume_type_extra_specs(type_id)
         return {}
