@@ -86,8 +86,12 @@ class NefRequest(object):
         }
 
     def __call__(self, path, payload=None):
-        LOG.debug('Start NEF request: %(method)s %(path)s %(payload)s',
-                  {'method': self.method, 'path': path, 'payload': payload})
+        info = '%(method)s %(url)s %(payload)s' % {
+            'method': self.method,
+            'url': self.proxy.url(path)
+            'payload': payload
+        }
+        LOG.debug('Start NEF request: %(info)s', {'info': info})
         self.path = path
         self.payload = payload
         for attempt in range(self.attempts):
@@ -96,11 +100,12 @@ class NefRequest(object):
                 self.delay(attempt)
                 if not self.find_host():
                     continue
-                LOG.debug('Retry NEF request: %(method)s %(path)s %(payload)s '
-                          '[%(attempt)s/%(attempts)s], reason: %(error)s',
-                          {'method': self.method, 'path': path,
-                           'payload': payload, 'attempt': attempt,
-                           'attempts': self.attempts, 'error': self.error})
+                LOG.debug('Retry NEF request: %(info)s '
+                          '[%(attempt)s/%(attempts)s], '
+                          'reason: %(error)s',
+                          {'info': info, 'attempt': attempt,
+                           'attempts': self.attempts,
+                           'error': self.error})
             try:
                 response = self.request(self.method, self.path, self.payload)
             except Exception as error:
@@ -110,18 +115,15 @@ class NefRequest(object):
                     message = six.text_type(error)
                     self.error = NefException(message=message)
                 continue
-            LOG.debug('Finish NEF request: %(method)s %(path)s %(payload)s, '
+            count = sum(self.stat.values())
+            LOG.debug('Finish NEF request: %(info)s, '
                       'total response time: %(time)s seconds, '
                       'total wait time: %(wait)s seconds, '
                       'total requests count: %(count)s, '
                       'requests statistics: %(stat)s, '
                       'response content: %(content)s',
-                      {'method': self.method,
-                       'path': self.path,
-                       'payload': self.payload,
-                       'time': self.time,
-                       'wait': self.wait,
-                       'count': sum(self.stat.values()),
+                      {'info': info, 'time': self.time,
+                       'wait': self.wait, 'count': count,
                        'stat': self.stat,
                        'content': response.content})
             if response.ok and not response.content:
@@ -133,19 +135,19 @@ class NefRequest(object):
                 return None
             content = json.loads(response.content)
             if not response.ok:
-                LOG.error('Failed NEF request: %(method)s %(path)s '
-                          '%(payload)s, response content: %(content)s',
-                          {'method': self.method, 'path': path,
-                           'payload': payload, 'content': content})
+                LOG.error('Failed NEF request: %(info)s, '
+                          'response content: %(content)s',
+                          {'info': self.info,
+                           'content': content})
                 raise NefException(content)
             if isinstance(content, dict) and 'data' in content:
                 return self.data
             return content
-        LOG.error('Failed NEF request: %(method)s %(path)s '
-                  '%(payload)s, request reached maximum retry '
-                  'attempts: %(attempts)s, reason: %(error)s',
-                  {'method': self.method, 'path': path,
-                   'payload': payload, 'attempts': self.attempts,
+        LOG.error('Failed NEF request: %(info)s, '
+                  'reached maximum retry attempts: '
+                  '%(attempts)s, reason: %(error)s',
+                  {'info': self.info,
+                   'attempts': self.attempts,
                    'error': self.error})
         raise self.error
 
@@ -172,14 +174,14 @@ class NefRequest(object):
         return self.proxy.session.request(method, url, **kwargs)
 
     def hook(self, response, **kwargs):
-        text = (_('session request %(method)s %(url)s %(body)s '
+        info = (_('session request %(method)s %(url)s %(body)s '
                   'and session response %(code)s %(content)s')
                 % {'method': response.request.method,
                    'url': response.request.url,
                    'body': response.request.body,
                    'code': response.status_code,
                    'content': response.content})
-        LOG.debug('Start request hook on %(text)s', {'text': text})
+        LOG.debug('Start request hook on %(info)s', {'info': info})
         if response.status_code not in self.stat:
             self.stat[response.status_code] = 0
         self.stat[response.status_code] += 1
@@ -191,16 +193,16 @@ class NefRequest(object):
         try:
             content = json.loads(response.content)
         except (TypeError, ValueError) as error:
-            message = (_('Failed request hook on %(text)s: '
+            message = (_('Failed request hook on %(info)s: '
                          'JSON parser error: %(error)s')
-                       % {'text': text, 'error': error})
+                       % {'info': info, 'error': error})
             raise NefException(code='EINVAL', message=message)
         if response.ok and content is None:
             return response
         if not isinstance(content, dict):
-            message = (_('Failed request hook on %(text)s: '
+            message = (_('Failed request hook on %(info)s: '
                          'no valid content found')
-                       % {'text': text})
+                       % {'info': info})
             raise NefException(code='EINVAL', message=message)
         if attempt > limit and not response.ok:
             return response
@@ -224,28 +226,29 @@ class NefRequest(object):
         elif response.status_code == requests.codes.accepted:
             path, payload = self.parse(content, 'monitor')
             if not path:
-                message = (_('Failed request hook on %(text)s: '
+                message = (_('Failed request hook on %(info)s: '
                              'monitor path not found')
-                           % {'text': text})
+                           % {'info': info})
                 raise NefException(code='ENODATA', message=message)
             self.delay(attempt)
             return self.request(method, path, payload)
         elif response.status_code == requests.codes.ok:
             if 'data' not in content or not content['data']:
-                LOG.debug('Finish request hook on %(text)s: '
+                LOG.debug('Finish request hook on %(info)s: '
                           'non-paginated content',
-                          {'text': text})
+                          {'info': info})
                 return response
             data = content['data']
-            LOG.debug('Continue request hook on %(text)s: '
+            count = len(data)
+            LOG.debug('Continue request hook on %(info)s: '
                       'add %(count)s data items to response',
-                      {'text': text, 'count': len(data)})
+                      {'info': info, 'count': count})
             self.data += data
             path, payload = self.parse(content, 'next')
             if not path:
-                LOG.debug('Finish request hook on %(text)s: '
+                LOG.debug('Finish request hook on %(info)s: '
                           'no next page found',
-                          {'text': text})
+                          {'info': info})
                 return response
             if self.payload:
                 payload.update(self.payload)
@@ -254,8 +257,8 @@ class NefRequest(object):
                       {'method': method, 'path': path,
                        'payload': payload})
             return self.request(method, path, payload)
-        LOG.debug('Finish request hook on %(text)s',
-                  {'text': text})
+        LOG.debug('Finish request hook on %(info)s',
+                  {'info': info})
         return response
 
     def auth(self):
@@ -1075,7 +1078,9 @@ class NefProxy(object):
         LOG.debug('Coordination lock for host %(host)s: %(lock)s',
                   {'host': self.host, 'lock': self.lock})
 
-    def url(self, path=''):
+    def url(self, path=None):
+        if not path:
+            path = ''
         netloc = '%s:%d' % (self.host, self.port)
         components = (self.scheme, netloc, path, None, None)
         url = six.moves.urllib.parse.urlunsplit(components)
