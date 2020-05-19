@@ -137,8 +137,7 @@ class NefRequest(object):
             if not response.ok:
                 LOG.error('Failed NEF request: %(info)s, '
                           'response content: %(content)s',
-                          {'info': self.info,
-                           'content': content})
+                          {'info': info, 'content': content})
                 raise NefException(content)
             if isinstance(content, dict) and 'data' in content:
                 return self.data
