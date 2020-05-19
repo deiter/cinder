@@ -413,7 +413,7 @@ class NefSoftware(NefSettings, NefCollections):
         return NotImplemented
 
     def version(self):
-        name = 'current1'
+        name = 'current'
         LOG.debug('Get %(name)s %(subj)s version',
                   {'name': name, 'subj': self.subj})
         path = self.path(name)
