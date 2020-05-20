@@ -193,7 +193,7 @@ class NefRequest(object):
         try:
             content = json.loads(response.content)
         except (TypeError, ValueError) as error:
-            code='EINVAL'
+            code = 'EINVAL'
             message = (_('Failed request hook on %(info)s: '
                          'JSON parser error: %(error)s')
                        % {'info': info, 'error': error})
@@ -201,7 +201,7 @@ class NefRequest(object):
         if response.ok and content is None:
             return response
         if not isinstance(content, dict):
-            code='EINVAL'
+            code = 'EINVAL'
             message = (_('Failed request hook on %(info)s: '
                          'no valid content found')
                        % {'info': info})
@@ -228,7 +228,7 @@ class NefRequest(object):
         elif response.status_code == requests.codes.accepted:
             path, payload = self.parse(content, 'monitor')
             if not path:
-                code='ENODATA'
+                code = 'ENODATA'
                 message = (_('Failed request hook on %(info)s: '
                              'monitor path not found')
                            % {'info': info})
@@ -956,7 +956,7 @@ class NefProxy(object):
         elif proto == NFS and conf.nas_host:
             self.hosts.append(conf.nas_host)
         else:
-            code='EINVAL'
+            code = 'EINVAL'
             message = (_('NexentaStor Rest API address is not defined, '
                          'please check the Cinder configuration file for '
                          'NexentaStor backend and nexenta_rest_address, '
