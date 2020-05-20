@@ -382,9 +382,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         file_size = volume['size'] * units.Gi
         file_format = specs['format']
         file_sparse = specs['sparse']
-        image = image.Image(self, volume, specs)
-        image.reload(file_size=True, file_format=True)
-        image.change(file_size=file_size, file_format=file_format)
+        volume_image = image.VolumeImage(self, volume, specs)
+        volume_image.reload(file_size=True, file_format=True)
+        volume_image.change(file_size=file_size, file_format=file_format)
         if file_sparse:
             file_size = 0
         if reservation != file_size:
@@ -526,8 +526,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 payload['mode'] = '660'
             self.nef.vsolutions.create(volume_path, image.FILE_NAME, payload)
         else:
-            image = image.Image(self, volume, specs)
-            image.create()
+            volume_image = image.VolumeImage(self, volume, specs)
+            volume_image.create()
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def copy_image_to_volume(self, ctxt, volume, image_service, image_id):
@@ -535,8 +535,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Copy image %(image)s to %(format)s volume %(volume)s',
                   {'image': image_id, 'format': specs['format'],
                    'volume': volume['name']})
-        image = image.Image(self, volume, specs)
-        image.download(ctxt, image_service, image_id)
+        volume_image = image.VolumeImage(self, volume, specs)
+        volume_image.download(ctxt, image_service, image_id)
 
     @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
     def copy_volume_to_image(self, ctxt, volume, image_service, image_meta):
@@ -544,9 +544,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Copy %(format)s volume %(volume)s to image %(image)s',
                   {'format': specs['format'], 'volume': volume['name'],
                    'image': image_meta['id']})
-        image = image.Image(self, volume, specs)
-        image.reload(file_format=True)
-        image.upload(ctxt, image_service, image_meta)
+        volume_image = image.VolumeImage(self, volume, specs)
+        volume_image.reload(file_format=True)
+        volume_image.upload(ctxt, image_service, image_meta)
 
     @coordination.synchronized('{self.nef.lock}-{cache_name}')
     def _delete_cache(self, cache_name, cache_path, snapshot_path):
@@ -617,11 +617,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
         cache['size'] = 0
         cache_path = self._create_volume(cache)
         specs = self._get_image_specs(cache)
-        image = image.Image(self, cache, specs)
-        image.fetch(ctxt, image_service, image_id)
-        payload = {'referencedReservationSize': image.file_size}
+        volume_image = image.VolumeImage(self, cache, specs)
+        volume_image.fetch(ctxt, image_service, image_id)
+        payload = {'referencedReservationSize': volume_image.file_size}
         self.nef.filesystems.set(cache_path, payload)
-        cache['size'] = image.volume_size
+        cache['size'] = volume_image.volume_size
         snapshot['volume_size'] = cache['size']
         self.create_snapshot(snapshot)
         return snapshot
@@ -1045,12 +1045,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'volume': volume['name'],
                    'connector': connector})
         specs = self._get_image_specs(volume)
-        image = image.Image(self, volume, specs)
-        image.reload(file_format=True)
+        volume_image = image.VolumeImage(self, volume, specs)
+        volume_image.reload(file_format=True)
         data = {
-            'export': image.share,
-            'format': image.file_format,
-            'name': image.file_name
+            'export': volume_image.share,
+            'format': volume_image.file_format,
+            'name': volume_image.file_name
         }
         if self.mount_options:
             data['options'] = '-o %s' % self.mount_options
@@ -1161,11 +1161,11 @@ class NexentaNfsDriver(nfs.NfsDriver):
         specs = self._get_image_specs(volume)
         file_sparse = specs['sparse']
         file_vsolution = specs['vsolution']
-        image = image.Image(self, volume, specs)
-        image.reload(file_size=True, file_format=True)
+        volume_image = image.VolumeImage(self, volume, specs)
+        volume_image.reload(file_size=True, file_format=True)
         file_size = new_size * units.Gi
-        file_format = image.file_format
-        file_name = image.file_name
+        file_format = volume_image.file_format
+        file_name = volume_image.file_name
         if not file_sparse:
             self._set_volume_reservation(volume, file_size, file_format)
         LOG.info('Extend %(format)s %(volume)s file %(name)s to %(size)s',
@@ -1176,7 +1176,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             payload = {'size': file_size}
             self.nef.vsolutions.resize(volume_path, file_name, payload)
         else:
-            image.change(file_size=file_size)
+            volume_image.change(file_size=file_size)
 
     def create_snapshot(self, snapshot):
         """Creates a snapshot.
@@ -1783,9 +1783,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
         existing_volume = self._get_existing_volume(existing_ref)
         self._set_volume_acl(existing_volume)
         specs = self._get_image_specs(existing_volume)
-        image = image.Image(self, existing_volume, specs)
-        image.reload(file_size=True)
-        return image.volume_size
+        volume_image = image.VolumeImage(self, existing_volume, specs)
+        volume_image.reload(file_size=True)
+        return volume_image.volume_size
 
     def get_manageable_volumes(self, cinder_volumes, marker, limit, offset,
                                sort_keys, sort_dirs):
@@ -2150,7 +2150,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._detach_volume(ctxt, attach_info, dst_volume,
                             connector_properties, force=True)
         src_specs = self._get_image_specs(src_volume)
-        src_image = image.Image(self, src_volume, src_specs)
+        src_image = image.VolumeImage(self, src_volume, src_specs)
         src_image.reload(file_format=True)
         if src_image.file_format != dst_image.file_format:
             src_image.change(file_format=dst_image.file_format)

@@ -32,7 +32,7 @@ FORMAT_QED = 'qed'
 RESIZABLE_FORMATS = [FORMAT_RAW, FORMAT_QCOW2]
 
 
-class Image(object):
+class VolumeImage(object):
     def __init__(self, driver, volume, specs):
         self.driver = driver
         self.root = driver._execute_as_root
