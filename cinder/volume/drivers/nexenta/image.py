@@ -29,7 +29,6 @@ FORMAT_VHDX = 'vhdx'
 FORMAT_VMDK = 'vmdk'
 FORMAT_VPC = 'vpc'
 FORMAT_QED = 'qed'
-RESIZABLE_FORMATS = [FORMAT_RAW, FORMAT_QCOW2]
 
 
 class VolumeImage(object):
@@ -37,7 +36,7 @@ class VolumeImage(object):
         self.driver = driver
         self.root = driver._execute_as_root
         self.block_size = driver.configuration.volume_dd_blocksize
-        self.resizable_formats = RESIZABLE_FORMATS
+        self.resizable_formats = [FORMAT_RAW, FORMAT_QCOW2]
         self.file_name = FILE_NAME
         self.file_size = volume['size'] * units.Gi
         self.file_format = specs['format']
