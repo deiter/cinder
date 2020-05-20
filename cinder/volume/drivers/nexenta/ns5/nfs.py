@@ -1162,10 +1162,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         :param connector: a connector object
         :returns: dictionary of connection information
         """
-        LOG.debug('Terminate volume connection for %(volume)s',
-                  {'volume': volume['name']})
-        # TODO ? remove
-        # self._unmount_volume(volume)
+        pass
 
     def initialize_connection(self, volume, connector):
         """Terminate a connection to a volume.
@@ -1251,8 +1248,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 return
             raise
         volume_exist = True
-        # TODO: remove
-        # self._unmount_volume(volume)
         origin = props['originalSnapshot']
         payload = {'snapshots': True, 'force': True}
         while volume_exist:
