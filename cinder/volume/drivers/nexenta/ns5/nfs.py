@@ -1182,7 +1182,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         image = VolumeImage(self, volume, specs)
         image.reload(file_format=True)
         data = {
-            'export': image.nfs_share,
+            'export': image.share,
             'format': image.file_format,
             'name': image.file_name
         }
