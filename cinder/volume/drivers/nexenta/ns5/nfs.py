@@ -59,38 +59,35 @@ VOLUME_RESIZABLE_FORMATS = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
 class VolumeImage(object):
     def __init__(self, driver, volume, specs):
         self.driver = driver
-        self.volume = volume
         self.root = driver._execute_as_root
         self.block_size = driver.configuration.volume_dd_blocksize
         self.resizable_formats = VOLUME_RESIZABLE_FORMATS
+        self.file_name = VOLUME_FILE_NAME
+        self.file_size = volume['size'] * units.Gi
         self.file_format = specs['format']
         self.file_sparse = specs['sparse']
-        self.file_size = volume['size'] * units.Gi
-        self.file_name = VOLUME_FILE_NAME
-        self.file_path = None
-        self.nfs_share = None
-        self.mount_point = None
-        self.mount()
+        self.share = driver._get_volume_share(volume)
+        self.mountpoint = driver._mount_share(self.share)
+        self.file_path = os.path.join(self.mountpoint, self.file_name)
+
+    def __del__(self):
+        self.driver._unmount_share(self.share, self.mountpoint)
+
+    @property
+    def info(self):
+        return image_utils.qemu_img_info(
+            self.file_path,
+            force_share=True,
+            run_as_root=self.root)
 
     @property
     def volume_size(self):
         return nexenta_utils.roundgb(self.file_size)
 
-    def __del__(self):
-        self.unmount()
-
     def execute(self, *cmd, **kwargs):
         if 'run_as_root' not in kwargs:
             kwargs['run_as_root'] = self.root
         self.driver._execute(*cmd, **kwargs)
-
-    def mount(self):
-        # TODO
-        self.nfs_share, self.mount_point, self.file_path = self.driver._mount_volume(self.volume)
-
-    def unmount(self):
-        # TODO
-        self.driver._unmount_volume(self.volume, self.nfs_share, self.mount_point)
 
     def create(self):
         cmd = ['qemu-img', 'create', '-f']
@@ -165,14 +162,8 @@ class VolumeImage(object):
         self.execute('mv', file_path, self.file_path)
         self.file_format = file_format
 
-    def info(self):
-        return image_utils.qemu_img_info(
-            self.file_path,
-            force_share=True,
-            run_as_root=self.root)
-
     def reload(self, file_size=False, file_format=False):
-        info = self.info()
+        info = self.info
         if file_size:
             self.file_size = info.virtual_size
         if file_format:
@@ -834,39 +825,34 @@ class NexentaNfsDriver(nfs.NfsDriver):
             return None, False
         return None, True
 
-    def _mount_volume(self, volume):
-        """Ensure that volume is mounted on the host.
+    def _mount_share(self, share):
+        """Ensure that share is mounted on the host.
 
-        :param volume: volume reference
-        :returns: NFS share, mount point and local volume file path
+        :param share: nfs share
+        :returns: mount point
         """
-        nfs_share = self._get_volume_share(volume)
         attempts = max(1, self.configuration.nfs_mount_attempts)
         for attempt in range(1, attempts + 1):
             try:
-                self._remotefsclient.mount(nfs_share)
-            except OSError as error:
+                self._remotefsclient.mount(share)
+            except Exception as error:
                 if attempt == attempts:
-                    LOG.error('Failed to mount NFS share %(nfs_share)s '
+                    LOG.error('Failed to mount NFS share %(share)s '
                               'after %(attempts)s attempts: %(error)s',
-                              {'nfs_share': nfs_share,
-                               'attempts': attempts,
+                              {'share': share, 'attempts': attempts,
                                'error': error})
                     raise
                 LOG.debug('Mount attempt %(attempt)s failed: %(error)s, '
-                          'retrying mount NFS share %(nfs_share)s',
-                          {'attempt': attempt,
-                           'error': error,
-                           'nfs_share': nfs_share})
+                          'retrying mount NFS share %(share)s',
+                          {'attempt': attempt, 'error': error,
+                           'share': share})
                 self.nef.delay(attempt)
             else:
-                LOG.debug('NFS share %(nfs_share)s has '
-                          'been successfully mounted',
-                          {'nfs_share': nfs_share})
+                LOG.debug('NFS share %(share)s has been mounted',
+                          {'share': share})
                 break
-        mount_point = self._get_mount_point_for_share(nfs_share)
-        volume_file = os.path.join(mount_point, VOLUME_FILE_NAME)
-        return nfs_share, mount_point, volume_file
+        mountpoint = self._get_mount_point_for_share(share)
+        return mountpoint
 
     def _remount_volume(self, volume):
         """Workaround for NEX-16457."""
@@ -874,61 +860,41 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self.nef.filesystems.unmount(volume_path)
         self.nef.filesystems.mount(volume_path)
 
-    def _unmount_volume(self, volume, nfs_share=None, mount_point=None):
+    def _unmount_share(self, share, mountpoint):
         """Ensure that NFS share is unmounted on the host.
 
-        :param volume: volume reference
-        :param nfs_share: NFS share
-        :param mount_point: mount point
+        :param share: nfs share
+        :param mountpoint: mount point
         """
-        if nfs_share is None:
-            try:
-                nfs_share = self._get_volume_share(volume)
-            except jsonrpc.NefException:
-                nas_path = posixpath.join(
-                    self.nas_stat['mountPoint'],
-                    volume['name'])
-                nfs_share = '%(host)s:%(path)s' % {
-                    'host': self.nas_host,
-                    'path': nas_path
-                }
-        if mount_point is None:
-            mount_point = self._get_mount_point_for_share(nfs_share)
-        if mount_point not in self._remotefsclient._read_mounts():
-            LOG.debug('NFS share %(nfs_share)s is not mounted '
-                      'at mount point %(mount_point)s',
-                      {'nfs_share': nfs_share,
-                       'mount_point': mount_point})
+        if mountpoint not in self._remotefsclient._read_mounts():
+            LOG.debug('NFS share %(share)s is not mounted to '
+                      'mountpoint %(mountpoint)s',
+                      {'share': share, 'mountpoint': mountpoint})
             return
         attempts = max(1, self.configuration.nfs_mount_attempts)
         for attempt in range(1, attempts + 1):
             try:
-                fs.umount(mount_point)
+                fs.umount(mountpoint)
             except OSError as error:
                 if attempt == attempts:
-                    LOG.error('Failed to unmount NFS share %(nfs_share)s '
-                              'from mount point %(mount_point)s after '
+                    LOG.error('Failed to unmount NFS share %(share)s '
+                              'from mountpoint %(mountpoint)s after '
                               '%(attempts)s attempts: %(error)s',
-                              {'nfs_share': nfs_share,
-                               'mount_point': mount_point,
-                               'attempts': attempts,
-                               'error': error})
+                              {'share': share, 'mountpoint': mountpoint,
+                               'attempts': attempts, 'error': error})
                     raise
                 LOG.debug('Unmount attempt %(attempt)s failed: %(error)s, '
-                          'retrying unmount NFS share %(nfs_share)s from '
-                          'mount point %(mount_point)s',
-                          {'attempt': attempt,
-                           'error': error,
-                           'nfs_share': nfs_share,
-                           'mount_point': mount_point})
+                          'retrying unmount NFS share %(share)s from '
+                          'mountpoint %(mountpoint)s',
+                          {'attempt': attempt, 'error': error,
+                           'share': share, 'mountpoint': mountpoint})
                 self.nef.delay(attempt)
             else:
-                LOG.debug('NFS share %(nfs_share)s has been successfully '
-                          'unmounted from mount point %(mount_point)s',
-                          {'nfs_share': nfs_share,
-                           'mount_point': mount_point})
+                LOG.debug('NFS share %(share)s has been successfully '
+                          'unmounted from mountpoint %(mountpoint)s',
+                          {'share': share, 'mountpoint': mountpoint})
                 break
-        self._delete(mount_point)
+        self._delete(mountpoint)
 
     def _migrate_volume(self, volume, scheme, hosts, port, path):
         """Storage assisted volume migration."""
@@ -1198,7 +1164,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         LOG.debug('Terminate volume connection for %(volume)s',
                   {'volume': volume['name']})
-        self._unmount_volume(volume)
+        # TODO ? remove
+        # self._unmount_volume(volume)
 
     def initialize_connection(self, volume, connector):
         """Terminate a connection to a volume.
@@ -1284,7 +1251,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 return
             raise
         volume_exist = True
-        self._unmount_volume(volume)
+        # TODO: remove
+        # self._unmount_volume(volume)
         origin = props['originalSnapshot']
         payload = {'snapshots': True, 'force': True}
         while volume_exist:
@@ -1604,9 +1572,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
 
         :param volume: volume reference
         """
-        nfs_share = self._get_volume_share(volume)
-        mount_point = self._get_mount_point_for_share(nfs_share)
-        volume_file = os.path.join(mount_point, VOLUME_FILE_NAME)
+        share = self._get_volume_share(volume)
+        mountpoint = self._get_mount_point_for_share(share)
+        volume_file = os.path.join(mountpoint, VOLUME_FILE_NAME)
         return volume_file
 
     def _set_volume_acl(self, volume):
@@ -1649,9 +1617,9 @@ class NexentaNfsDriver(nfs.NfsDriver):
             props = self.nef.filesystems.get(volume_path, payload)
         if not props['isMounted']:
             self.nef.filesystems.mount(volume_path)
-        nfs_share = '%(host)s:%(mount_point)s' % {
+        nfs_share = '%(host)s:%(mountpoint)s' % {
             'host': self.nas_host,
-            'mount_point': props['mountPoint']
+            'mountpoint': props['mountPoint']
         }
         return nfs_share
 
