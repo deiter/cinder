@@ -12,12 +12,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import ipaddress
-import os
-import posixpath
-import sys
-import uuid
-
 from os_brick.remotefs import remotefs
 from oslo_concurrency import processutils
 from oslo_log import log as logging
