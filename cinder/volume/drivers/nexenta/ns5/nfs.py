@@ -32,140 +32,15 @@ from cinder import interface
 from cinder import objects
 from cinder.privsep import fs
 from cinder import utils as cinder_utils
+from cinder.volume.drivers.nexenta import image
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
-from cinder.volume.drivers.nexenta import utils as nexenta_utils
+from cinder.volume.drivers.nexenta import utils
 from cinder.volume.drivers import nfs
 from cinder.volume import volume_types
 from cinder.volume import volume_utils
 
 LOG = logging.getLogger(__name__)
-
-VOLUME_FILE_NAME = 'volume'
-VOLUME_FORMAT_RAW = 'raw'
-VOLUME_FORMAT_QCOW = 'qcow'
-VOLUME_FORMAT_QCOW2 = 'qcow2'
-VOLUME_FORMAT_PARALLELS = 'parallels'
-VOLUME_FORMAT_VDI = 'vdi'
-VOLUME_FORMAT_VHDX = 'vhdx'
-VOLUME_FORMAT_VMDK = 'vmdk'
-VOLUME_FORMAT_VPC = 'vpc'
-VOLUME_FORMAT_QED = 'qed'
-VOLUME_RESIZABLE_FORMATS = [VOLUME_FORMAT_RAW, VOLUME_FORMAT_QCOW2]
-
-
-class VolumeImage(object):
-    def __init__(self, driver, volume, specs):
-        self.driver = driver
-        self.root = driver._execute_as_root
-        self.block_size = driver.configuration.volume_dd_blocksize
-        self.resizable_formats = VOLUME_RESIZABLE_FORMATS
-        self.file_name = VOLUME_FILE_NAME
-        self.file_size = volume['size'] * units.Gi
-        self.file_format = specs['format']
-        self.file_sparse = specs['sparse']
-        self.share = driver._get_volume_share(volume)
-        self.mountpoint = driver._mount_share(self.share)
-        self.file_path = os.path.join(self.mountpoint, self.file_name)
-
-    def __del__(self):
-        self.driver._unmount_share(self.share, self.mountpoint)
-
-    @property
-    def info(self):
-        return image_utils.qemu_img_info(
-            self.file_path,
-            force_share=True,
-            run_as_root=self.root)
-
-    @property
-    def volume_size(self):
-        return nexenta_utils.roundgb(self.file_size)
-
-    def execute(self, *cmd, **kwargs):
-        if 'run_as_root' not in kwargs:
-            kwargs['run_as_root'] = self.root
-        self.driver._execute(*cmd, **kwargs)
-
-    def create(self):
-        cmd = ['qemu-img', 'create', '-f']
-        cmd.append(self.file_format)
-        if self.file_format == VOLUME_FORMAT_QCOW2:
-            cmd.append('-o preallocation=metadata')
-        cmd.append(self.file_path)
-        cmd.append(self.file_size)
-        self.execute(*cmd)
-
-    def resize(self, file_size):
-        cmd = ['qemu-img', 'resize', '-f']
-        cmd.append(self.file_format)
-        if self.file_format == VOLUME_FORMAT_QCOW2:
-            cmd.append('--preallocation=metadata')
-        cmd.append(self.file_path)
-        cmd.append(file_size)
-        self.execute(*cmd)
-        self.file_size = file_size
-
-    def change(self, file_size=None, file_format=None):
-        if not file_size:
-            file_size = self.file_size
-        if not file_format:
-            file_format = self.file_format
-        while (self.file_format != file_format
-               or self.file_size != file_size):
-            if self.file_size == file_size:
-                self.convert(file_format)
-            elif self.file_format in self.resizable_formats:
-                self.resize(file_size)
-            elif file_format in self.resizable_formats:
-                self.convert(file_format)
-            else:
-                self.convert(VOLUME_FORMAT_RAW)
-
-    def upload(self, ctxt, image_service, image_meta):
-        image_utils.upload_volume(
-            ctxt, image_service,
-            image_meta, self.file_path,
-            volume_format=self.file_format,
-            run_as_root=self.root)
-
-    def fetch(self, ctxt, image_service, image_id):
-        image_utils.fetch_to_volume_format(
-            ctxt, image_service,
-            image_id, self.file_path,
-            self.file_format,
-            self.block_size,
-            run_as_root=self.root)
-        self.reload(file_size=True)
-
-    def download(self, ctxt, image_service, image_id):
-        file_size = self.file_size
-        file_format = self.file_format
-        if self.file_format not in self.resizable_formats:
-            self.file_format = VOLUME_FORMAT_RAW
-        self.fetch(ctxt, image_service, image_id)
-        self.change(file_size=file_size, file_format=file_format)
-
-    def convert(self, file_format):
-        file_path = '%(path)s.%(format)s' % {
-            'path': self.file_path,
-            'format': file_format
-        }
-        image_utils.convert_image(
-            self.file_path,
-            file_path,
-            file_format,
-            src_format=self.file_format,
-            run_as_root=self.root)
-        self.execute('mv', file_path, self.file_path)
-        self.file_format = file_format
-
-    def reload(self, file_size=False, file_format=False):
-        info = self.info
-        if file_size:
-            self.file_size = info.virtual_size
-        if file_format:
-            self.file_format = info.file_format
 
 
 @interface.volumedriver
@@ -507,7 +382,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         file_size = volume['size'] * units.Gi
         file_format = specs['format']
         file_sparse = specs['sparse']
-        image = VolumeImage(self, volume, specs)
+        image = image.Image(self, volume, specs)
         image.reload(file_size=True, file_format=True)
         image.change(file_size=file_size, file_format=file_format)
         if file_sparse:
@@ -549,24 +424,23 @@ class NexentaNfsDriver(nfs.NfsDriver):
         numdb *= 1 << dn_max_indblkshift
         zfs_meta += numdb
 
-        if file_format == VOLUME_FORMAT_RAW:
+        if file_format == image.FORMAT_RAW:
             file_meta = 0
-        elif file_format == VOLUME_FORMAT_QCOW:
+        elif file_format == image.FORMAT_QCOW:
             file_meta = 48 + 4 * file_size // units.Mi
-        elif file_format == VOLUME_FORMAT_QCOW2:
+        elif file_format == image.FORMAT_QCOW2:
             cluster_size = 64 * units.Ki
             refcount_size = 4
             int_size = (sys.maxsize.bit_length() + 1) // 8
             file_meta = 0
-            aligned_file_size = nexenta_utils.roundup(file_size,
-                                                      cluster_size)
+            aligned_file_size = utils.roundup(file_size, cluster_size)
             file_meta += cluster_size
             blocks_per_table = cluster_size // int_size
             clusters = aligned_file_size // cluster_size
-            nl2e = nexenta_utils.roundup(clusters, blocks_per_table)
+            nl2e = utils.roundup(clusters, blocks_per_table)
             file_meta += nl2e * int_size
             clusters = nl2e * int_size // cluster_size
-            nl1e = nexenta_utils.roundup(clusters, blocks_per_table)
+            nl1e = utils.roundup(clusters, blocks_per_table)
             file_meta += nl1e * int_size
             clusters = (aligned_file_size + file_meta) // cluster_size
             refcounts_per_block = 8 * cluster_size // (1 << refcount_size)
@@ -575,21 +449,21 @@ class NexentaNfsDriver(nfs.NfsDriver):
             while first != last:
                 last = first
                 first = clusters + blocks + table
-                blocks = nexenta_utils.divup(first, refcounts_per_block)
-                table = nexenta_utils.divup(blocks, blocks_per_table)
+                blocks = utils.divup(first, refcounts_per_block)
+                table = utils.divup(blocks, blocks_per_table)
                 first = clusters + blocks + table
             file_meta += (blocks + table) * cluster_size
-        elif file_format == VOLUME_FORMAT_PARALLELS:
+        elif file_format == image.FORMAT_PARALLELS:
             file_meta = (1 + file_size // units.Gi // 256) * units.Mi
-        elif file_format == VOLUME_FORMAT_VDI:
+        elif file_format == image.FORMAT_VDI:
             file_meta = 512 + 4 * file_size // units.Mi
-        elif file_format == VOLUME_FORMAT_VHDX:
+        elif file_format == image.FORMAT_VHDX:
             file_meta = 8 * units.Mi
-        elif file_format == VOLUME_FORMAT_VMDK:
+        elif file_format == image.FORMAT_VMDK:
             file_meta = 192 * (units.Ki + file_size // units.Mi)
-        elif file_format == VOLUME_FORMAT_VPC:
+        elif file_format == image.FORMAT_VPC:
             file_meta = 512 + 2 * (units.Ki + file_size // units.Mi)
-        elif file_format == VOLUME_FORMAT_QED:
+        elif file_format == image.FORMAT_QED:
             file_meta = 320 * units.Ki
         else:
             code = 'EINVAL'
@@ -647,12 +521,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if not file_sparse:
             self._set_volume_reservation(volume, file_size, file_format)
         payload = {'size': file_size}
-        if file_vsolution and file_format == VOLUME_FORMAT_RAW:
+        if file_vsolution and file_format == image.FORMAT_RAW:
             if self.nas_secure_file_permissions:
                 payload['mode'] = '660'
-            self.nef.vsolutions.create(volume_path, VOLUME_FILE_NAME, payload)
+            self.nef.vsolutions.create(volume_path, image.FILE_NAME, payload)
         else:
-            image = VolumeImage(self, volume, specs)
+            image = image.Image(self, volume, specs)
             image.create()
 
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
@@ -661,7 +535,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Copy image %(image)s to %(format)s volume %(volume)s',
                   {'image': image_id, 'format': specs['format'],
                    'volume': volume['name']})
-        image = VolumeImage(self, volume, specs)
+        image = image.Image(self, volume, specs)
         image.download(ctxt, image_service, image_id)
 
     @coordination.synchronized('{self.nef.lock}-{image_meta[id]}')
@@ -670,7 +544,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.debug('Copy %(format)s volume %(volume)s to image %(image)s',
                   {'format': specs['format'], 'volume': volume['name'],
                    'image': image_meta['id']})
-        image = VolumeImage(self, volume, specs)
+        image = image.Image(self, volume, specs)
         image.reload(file_format=True)
         image.upload(ctxt, image_service, image_meta)
 
@@ -715,7 +589,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                 return cache, snapshot
             raise
         cache_size = props['referencedReservationSize']
-        cache['size'] = nexenta_utils.roundgb(cache_size)
+        cache['size'] = utils.roundgb(cache_size)
         snapshot_path = self._get_snapshot_path(snapshot)
         payload = {'fields': 'path'}
         try:
@@ -743,7 +617,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         cache['size'] = 0
         cache_path = self._create_volume(cache)
         specs = self._get_image_specs(cache)
-        image = VolumeImage(self, cache, specs)
+        image = image.Image(self, cache, specs)
         image.fetch(ctxt, image_service, image_id)
         payload = {'referencedReservationSize': image.file_size}
         self.nef.filesystems.set(cache_path, payload)
@@ -781,7 +655,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         }
         image_id = image_meta['id']
         namespace = uuid.UUID(image_id, version=4)
-        name = nexenta_utils.native_string(compound)
+        name = utils.native_string(compound)
         cache_uuid = uuid.uuid5(namespace, name)
         cache_id = six.text_type(cache_uuid)
         cache_name = self.cache_image_template % cache_id
@@ -1171,7 +1045,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                   {'volume': volume['name'],
                    'connector': connector})
         specs = self._get_image_specs(volume)
-        image = VolumeImage(self, volume, specs)
+        image = image.Image(self, volume, specs)
         image.reload(file_format=True)
         data = {
             'export': image.share,
@@ -1263,7 +1137,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             self.cache_image_template: origin_name
         }
         for item, name in templates.items():
-            if not nexenta_utils.match_template(item, name):
+            if not utils.match_template(item, name):
                 return
         self._delete_cache(origin_name, origin_path, origin)
 
@@ -1287,7 +1161,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         specs = self._get_image_specs(volume)
         file_sparse = specs['sparse']
         file_vsolution = specs['vsolution']
-        image = VolumeImage(self, volume, specs)
+        image = image.Image(self, volume, specs)
         image.reload(file_size=True, file_format=True)
         file_size = new_size * units.Gi
         file_format = image.file_format
@@ -1297,7 +1171,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         LOG.info('Extend %(format)s %(volume)s file %(name)s to %(size)s',
                  {'format': file_format, 'volume': volume['name'],
                   'name': file_name, 'size': file_size})
-        if file_vsolution and file_format == VOLUME_FORMAT_RAW:
+        if file_vsolution and file_format == image.FORMAT_RAW:
             volume_path = self._get_volume_path(volume)
             payload = {'size': file_size}
             self.nef.vsolutions.resize(volume_path, file_name, payload)
@@ -1568,7 +1442,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         """
         share = self._get_volume_share(volume)
         mountpoint = self._get_mount_point_for_share(share)
-        volume_file = os.path.join(mountpoint, VOLUME_FILE_NAME)
+        volume_file = os.path.join(mountpoint, image.FILE_NAME)
         return volume_file
 
     def _set_volume_acl(self, volume):
@@ -1763,7 +1637,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             volume_path = existing_volumes[0]['path']
             volume_name = posixpath.basename(volume_path)
             refsize = existing_volumes[0]['bytesReferenced']
-            volume_size = nexenta_utils.roundgb(refsize)
+            volume_size = utils.roundgb(refsize)
             existing_volume = {
                 'name': volume_name,
                 'path': volume_path,
@@ -1909,7 +1783,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         existing_volume = self._get_existing_volume(existing_ref)
         self._set_volume_acl(existing_volume)
         specs = self._get_image_specs(existing_volume)
-        image = VolumeImage(self, existing_volume, specs)
+        image = image.Image(self, existing_volume, specs)
         image.reload(file_size=True)
         return image.volume_size
 
@@ -1963,13 +1837,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
             guid = volume['guid']
             parent = volume['parent']
             refsize = volume['bytesReferenced']
-            size = nexenta_utils.roundgb(refsize)
+            size = utils.roundgb(refsize)
             name = posixpath.basename(path)
             if path == self.nas_path:
                 continue
             if parent != self.nas_path:
                 continue
-            if nexenta_utils.match_template(self.cache_image_template, name):
+            if utils.match_template(self.cache_image_template, name):
                 continue
             if name in cinder_volume_names:
                 cinder_id = cinder_volume_names[name]
@@ -2133,7 +2007,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           {'path': path, 'parent': parent})
                 continue
             for item, desc in temporary_snapshots.items():
-                if nexenta_utils.match_template(item, name):
+                if utils.match_template(item, name):
                     LOG.debug('Skip %(desc)s snapshot %(path)s',
                               {'desc': desc, 'path': path})
                     continue
@@ -2276,7 +2150,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._detach_volume(ctxt, attach_info, dst_volume,
                             connector_properties, force=True)
         src_specs = self._get_image_specs(src_volume)
-        src_image = VolumeImage(self, src_volume, src_specs)
+        src_image = image.Image(self, src_volume, src_specs)
         src_image.reload(file_format=True)
         if src_image.file_format != dst_image.file_format:
             src_image.change(file_format=dst_image.file_format)
