@@ -12,8 +12,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import copy
-import errno
 import ipaddress
 import os
 import posixpath
@@ -248,11 +246,12 @@ class NexentaNfsDriver(nfs.NfsDriver):
         self._remotefsclient = None
         super(NexentaNfsDriver, self).__init__(*args, **kwargs)
         if not self.configuration:
+            code = 'ENODATA'
             message = (_('%(product_name)s %(storage_protocol)s '
                          'backend configuration not found')
                        % {'product_name': self.product_name,
                           'storage_protocol': self.storage_protocol})
-            raise jsonrpc.NefException(code='ENODATA', message=message)
+            raise jsonrpc.NefException(code=code, message=message)
         self.configuration.append_config_values(options.NEXENTASTOR5_NFS_OPTS)
         root_helper = cinder_utils.get_root_helper()
         mount_point_base = self.configuration.nexenta_mount_point_base
@@ -339,13 +338,14 @@ class NexentaNfsDriver(nfs.NfsDriver):
         }
         for option_name, option_value in secure_options.items():
             if option_value not in ['auto', 'true', 'false']:
+                code = 'EINVAL'
                 message = (_('Invalid value %(option_value)s for '
                              'configuration option %(option_name)s '
                              'defined for backend %(backend_name)s')
                            % {'option_value': option_value,
                               'option_name': option_name,
                               'backend_name': self.backend_name})
-                raise jsonrpc.NefException(code='EINVAL', message=message)
+                raise jsonrpc.NefException(code=code, message=message)
         self.set_nas_security_options(self._is_voldb_empty_at_startup)
         retries = 0
         while not self._check_for_setup_error():
@@ -592,9 +592,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         elif file_format == VOLUME_FORMAT_QED:
             file_meta = 320 * units.Ki
         else:
+            code = 'EINVAL'
             message = (_('Volume format %(format)s is not supported')
                        % {'format': file_format})
-            raise jsonrpc.NefException(code='EINVAL', message=message)
+            raise jsonrpc.NefException(code=code, message=message)
         reservation = file_size + zfs_meta + file_meta
         LOG.debug('Reservation for %(format)s volume %(volume)s: '
                   '%(reservation)s, file size: %(file_size)s, '
@@ -1734,7 +1735,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
             'source-guid': 'guid'
         }
         if not any(key in types for key in existing_ref):
-            code='EINVAL'
+            code = 'EINVAL'
             keys = ', '.join(types.keys())
             message = (_('Manage existing volume failed '
                          'due to invalid backend reference. '
@@ -1768,9 +1769,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
             }
             vid = volume_utils.extract_id_from_volume_name(volume_name)
             if volume_utils.check_already_managed_volume(vid):
+                code = 'EEXIST'
                 message = (_('Volume %(name)s already managed')
                            % {'name': volume_name})
-                raise jsonrpc.NefException(code='EBUSY', message=message)
+                raise jsonrpc.NefException(code=code, message=message)
             return existing_volume
         elif not existing_volumes:
             code = 'ENOENT'
@@ -1805,12 +1807,13 @@ class NexentaNfsDriver(nfs.NfsDriver):
         }
         if not any(key in types for key in existing_ref):
             keys = ', '.join(types.keys())
+            code = 'EINVAL'
             message = (_('Manage existing snapshot failed '
                          'due to invalid backend reference. '
                          'Snapshot reference must contain '
                          'at least one valid key: %(keys)s')
                        % {'keys': keys})
-            raise jsonrpc.NefException(code='EINVAL', message=message)
+            raise jsonrpc.NefException(code=code, message=message)
         volume_name = snapshot['volume_name']
         volume_size = snapshot['volume_size']
         volume = {'name': volume_name}
@@ -1835,9 +1838,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
             }
             sid = volume_utils.extract_id_from_snapshot_name(name)
             if self._check_already_managed_snapshot(sid):
+                code = 'EEXIST'
                 message = (_('Snapshot %(name)s already managed')
                            % {'name': name})
-                raise jsonrpc.NefException(code='EBUSY', message=message)
+                raise jsonrpc.NefException(code=code, message=message)
             return existing_snapshot
         elif not existing_snapshots:
             code = 'ENOENT'
