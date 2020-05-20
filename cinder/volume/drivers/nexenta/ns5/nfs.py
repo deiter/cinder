@@ -1257,24 +1257,26 @@ class NexentaNfsDriver(nfs.NfsDriver):
         if not origin:
             return
         origin_path, snapshot_name = origin.split('@')
-        if not nexenta_utils.match_template(self.cache_snapshot_template,
-                                            snapshot_name):
-            return
         origin_name = posixpath.basename(origin_path)
-        if not nexenta_utils.match_template(self.cache_image_template,
-                                            origin_name):
-            return
+        templates = {
+            self.cache_snapshot_template: snapshot_name,
+            self.cache_image_template: origin_name
+        }
+        for item, name in templates.items():
+            if not nexenta_utils.match_template(item, name):
+                return
         self._delete_cache(origin_name, origin_path, origin)
 
-    def _delete(self, path):
+    def _delete(self, mountpoint):
         """Override parent method for safe remove mountpoint."""
         try:
-            self._execute('rm', '-d', path, run_as_root=self._execute_as_root)
-            LOG.debug('The mountpoint %(path)s has been successfully removed',
-                      {'path': path})
+            self._execute('rm', '-d -F', mountpoint,
+                          run_as_root=self._execute_as_root)
+            LOG.debug('The mountpoint %(mountpoint)s has been removed',
+                      {'mountpoint': mountpoint})
         except OSError as error:
-            LOG.error('Failed to remove mountpoint %(path)s: %(error)s',
-                      {'path': path, 'error': error.strerror})
+            LOG.error('Failed to remove mountpoint %(mountpoint)s: %(error)s',
+                      {'mountpoint': mountpoint, 'error': error.strerror})
 
     def extend_volume(self, volume, new_size):
         """Extend an existing volume.
