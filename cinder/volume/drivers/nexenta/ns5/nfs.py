@@ -854,12 +854,6 @@ class NexentaNfsDriver(nfs.NfsDriver):
         mountpoint = self._get_mount_point_for_share(share)
         return mountpoint
 
-    def _remount_volume(self, volume):
-        """Workaround for NEX-16457."""
-        volume_path = self._get_volume_path(volume)
-        self.nef.filesystems.unmount(volume_path)
-        self.nef.filesystems.mount(volume_path)
-
     def _unmount_share(self, share, mountpoint):
         """Ensure that NFS share is unmounted on the host.
 
@@ -1356,8 +1350,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_path = self._get_volume_path(volume)
         payload = {'targetPath': volume_path}
         self.nef.snapshots.clone(snapshot_path, payload)
+        # Workaround for NEX-16457
         if self.nef.version_less('5.2.0.17'):
-            self._remount_volume(volume)
+            self.nef.filesystems.unmount(volume_path)
+            self.nef.filesystems.mount(volume_path)
         self._update_volume_props(volume)
 
     def create_cloned_volume(self, volume, src_vref):
