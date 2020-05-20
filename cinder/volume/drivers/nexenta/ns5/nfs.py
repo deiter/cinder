@@ -2093,7 +2093,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
         manageable_snapshots = []
         cinder_volume_names = {}
         cinder_snapshot_names = {}
-        cinder_volumes = objects.VolumeList.get_all_by_host(self.ctxt, self.host)
+        cinder_volumes = objects.VolumeList.get_all_by_host(
+            self.ctxt, self.host)
         for cinder_volume in cinder_volumes:
             key = self._get_volume_path(cinder_volume)
             value = {
