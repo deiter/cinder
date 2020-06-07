@@ -24,7 +24,6 @@ from cinder.volume.drivers.nexenta.nexentaedge import jsonrpc
 from cinder.volume.drivers.nexenta import options
 from cinder.volume.drivers.nexenta import utils as nexenta_utils
 
-
 LOG = logging.getLogger(__name__)
 
 
