@@ -24,7 +24,6 @@ from oslo_utils import units
 from cinder import exception
 from cinder.i18n import _
 from cinder.image import image_utils
-from cinder import interface
 from cinder import utils as cinder_utils
 from cinder.volume import driver
 from cinder.volume.drivers.nexenta.nexentaedge import jsonrpc
@@ -35,7 +34,6 @@ from cinder.volume import utils as volutils
 LOG = logging.getLogger(__name__)
 
 
-@interface.volumedriver
 class NexentaEdgeNBDDriver(driver.VolumeDriver):
     """Executes commands relating to NBD Volumes.
 
@@ -172,11 +170,8 @@ class NexentaEdgeNBDDriver(driver.VolumeDriver):
         LOG.debug('Delete volume')
         number = self._get_nbd_number(volume)
         if number == -1:
-            LOG.info('Volume %(volume)s does not exist at %(path)s '
-                     'path' % {
-                'volume': volume['name'],
-                'path': self.bucket_path
-            })
+            LOG.info('Volume %(volume)s does not exist at %(path)s path',
+                     {'volume': volume['name'], 'path': self.bucket_path})
             return
         host = volutils.extract_host(volume['host'], 'host')
         try:
@@ -235,7 +230,8 @@ class NexentaEdgeNBDDriver(driver.VolumeDriver):
         return 'cinder-clone-snapshot-%(id)s' % volume
 
     def create_cloned_volume(self, volume, src_vref):
-        """
+        """TODO
+
         vol_url = (self.bucket_url + '/objects/' +
                    src_vref['name'] + '/clone')
         clone_body = {
@@ -270,15 +266,14 @@ class NexentaEdgeNBDDriver(driver.VolumeDriver):
         try:
             self.create_volume_from_snapshot(volume, snapshot)
         except exception.NexentaException:
-            LOG.error('Volume creation failed, deleting created snapshot '
-                      '%s', '@'.join(
-                [snapshot['volume_name'], snapshot['name']]))
+            LOG.error('Volume creation failed, deleting created snapshot %s',
+                      '@'.join([snapshot['volume_name'], snapshot['name']]))
             try:
                 self.delete_snapshot(snapshot)
             except (exception.NexentaException, exception.SnapshotIsBusy):
-                LOG.warning('Failed to delete zfs snapshot '
-                            '%s', '@'.join(
-                    [snapshot['volume_name'], snapshot['name']]))
+                LOG.warning('Failed to delete zfs snapshot %s',
+                            '@'.join([snapshot['volume_name'],
+                                     snapshot['name']]))
             raise
 
     def migrate_volume(self, ctxt, volume, host, thin=False, mirror_count=0):
