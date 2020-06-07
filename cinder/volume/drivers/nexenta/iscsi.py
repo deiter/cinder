@@ -1,4 +1,4 @@
-# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -1392,6 +1392,12 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                     stats[stat] = size // units.Gi
                     stats['total_capacity_gb'] += stats[stat]
                 except (KeyError, TypeError, ValueError) as error:
+                    LOG.error('Failed to convert backend statistics '
+                              'for host %(host)s and volume backend '
+                              '%(backend_name)s: %(error)s',
+                              {'host': self.host,
+                               'backend_name': self.backend_name,
+                               'error': error})
                     stats['total_capacity_gb'] = 'unknown'
         self._stats = stats
         LOG.debug('Updated volume backend statistics for host %(host)s '
