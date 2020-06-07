@@ -1,4 +1,4 @@
-# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -21,7 +21,7 @@ NEXENTASTOR_CONNECTION_OPTS = [
                                   'protocol should now be set using the '
                                   'common parameter nexenta_rest_protocol.',
                 help='Use HTTP secure protocol for NexentaStor '
-                     'management REST API connections.'),
+                     'management RESTful API connections.'),
     cfg.StrOpt('nexenta_rest_protocol',
                default='auto',
                choices=['http', 'https', 'auto'],
@@ -32,17 +32,19 @@ NEXENTASTOR_CONNECTION_OPTS = [
                     'equal zero, 8443 for HTTPS and 8080 for HTTP will '
                     'be used for NexentaStor5 and 8457 for NexentaStor4.'),
     cfg.StrOpt('nexenta_user',
+               required=True,
                default='admin',
                help='User name to connect to NexentaStor RESTful API '
                     'interface.'),
     cfg.StrOpt('nexenta_password',
-               default='nexenta',
+               required=True,
+               secret=True,
                help='User password to connect to NexentaStor RESTful API '
-                    'interface.',
-               secret=True),
-    cfg.StrOpt('nexenta_rest_address',
-               default='',
-               help='IP address of NexentaStor RESTful API interface.'),
+                    'interface.'),
+    cfg.ListOpt('nexenta_rest_address',
+                default=[],
+                help='One or more comma delimited IP addresses for management '
+                     'communication with NexentaStor RESTful API interface.'),
     cfg.FloatOpt('nexenta_rest_connect_timeout',
                  default=30,
                  help='Specifies the time limit (in seconds), within '
@@ -127,6 +129,9 @@ NEXENTAEDGE_ISCSI_OPTS = [
                default='',
                help='NexentaEdge iSCSI service name.'),
     cfg.StrOpt('nexenta_client_address',
+               deprecated_for_removal=True,
+               deprecated_reason='iSCSI target address should now be set using'
+                                 ' the common param target_ip_address.',
                default='',
                help='NexentaEdge iSCSI Gateway client '
                'address for non-VIP service'),
@@ -160,7 +165,7 @@ NEXENTASTOR5_ISCSI_OPTS = [
                default='iscsi',
                help='NexentaStor volume group name that holds all volumes.'),
     cfg.ListOpt('nexenta_iscsi_target_portals',
-                default='',
+                default=[],
                 help='Comma separated list of portals for NexentaStor, in '
                      'format of IP:port,IP:port. Port number is optional, '
                      'default value is 3260.'),
@@ -170,6 +175,12 @@ NEXENTASTOR5_ISCSI_OPTS = [
                                  'used: nexenta_blocksize.',
                default=32,
                help='Block size for datasets.')
+]
+
+NEXENTASTOR5_NFS_OPTS = [
+    cfg.BoolOpt('nexenta_vsolution',
+                default=False,
+                help='Enables NexentaStor vSolution API.')
 ]
 
 NEXENTA_NFS_OPTS = [
@@ -328,7 +339,7 @@ NEXENTASTOR4_NFS_OPTS = (
     NEXENTASTOR4_RRMGR_OPTS
 )
 
-NEXENTASTOR5_NFS_OPTS = (
+NEXENTASTOR5_NFS_OPTS += (
     NEXENTASTOR_CONNECTION_OPTS +
     NEXENTASTOR_DATASET_OPTS +
     NEXENTA_NFS_OPTS
