@@ -1,4 +1,4 @@
-# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -13,9 +13,9 @@
 #    under the License.
 
 import json
-import requests
 
 from oslo_log import log as logging
+import requests
 
 from cinder import exception
 from cinder.i18n import _
