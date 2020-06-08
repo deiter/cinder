@@ -1,4 +1,4 @@
-# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -24,6 +24,8 @@ from oslo_utils import timeutils
 from oslo_utils import units
 import six
 
+from cinder import context
+from cinder import db
 from cinder.i18n import _
 from cinder.openstack.common import log as logging
 from cinder.volume import driver
@@ -1287,6 +1289,16 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor appliance."""
+        provisioned_capacity_gb = total_volumes = total_snapshots = 0
+        ctxt = context.get_admin_context()
+        volumes = db.volume_get_all_by_host(ctxt, self.host)
+        for volume in volumes:
+            provisioned_capacity_gb += volume['size']
+            total_volumes += 1
+        snapshots = db.snapshot_get_all(ctxt)
+        for snapshot in snapshots:
+            provisioned_capacity_gb += snapshot['volume_size']
+            total_snapshots += 1
         description = (
             self.configuration.safe_get('nexenta_dataset_description'))
         if not description:
@@ -1337,6 +1349,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'total_capacity_gb': 'unknown',
             'allocated_capacity_gb': 'unknown',
             'free_capacity_gb': 'unknown',
+            'provisioned_capacity_gb': provisioned_capacity_gb,
+            'total_volumes': total_volumes,
+            'total_snapshots': total_snapshots,
             'reserved_percentage': reserved_percentage,
             'dedup': dedup,
             'compression': compression,
@@ -1366,6 +1381,12 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                     stats[stat] = size // units.Gi
                     stats['total_capacity_gb'] += stats[stat]
                 except (KeyError, TypeError, ValueError) as error:
+                    LOG.error('Failed to convert backend statistics '
+                              'for host %(host)s and volume backend '
+                              '%(backend_name)s: %(error)s',
+                              {'host': self.host,
+                               'backend_name': self.backend_name,
+                               'error': error})
                     stats['total_capacity_gb'] = 'unknown'
         self._stats = stats
         LOG.debug('Updated volume backend statistics for host %(host)s '

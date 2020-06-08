@@ -1,4 +1,4 @@
-# Copyright 2019 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -21,13 +21,13 @@ from oslo_utils import strutils
 from oslo_utils import units
 import six
 
-from cinder import context
+from cinder import db
 from cinder.i18n import _
 from cinder.openstack.common import log as logging
 from cinder.volume import driver
 from cinder.volume.drivers.nexenta.ns5 import jsonrpc
 from cinder.volume.drivers.nexenta import options
-from cinder.volume.drivers.nexenta import utils as nexenta_utils
+from cinder.volume.drivers.nexenta import utils
 from cinder.volume import volume_types
 
 LOG = logging.getLogger(__name__)
@@ -85,9 +85,11 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
               - Allow retype volume to another provisioning type.
         1.5.0 - Added flag backend_state to report backend status.
               - Added retry on driver initialization failure.
+        1.5.1 - Support for location header.
+        1.5.3 - Fixed concurrency issues.
     """
 
-    VERSION = '1.5.0'
+    VERSION = '1.5.3'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -98,33 +100,35 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
     def __init__(self, *args, **kwargs):
         super(NexentaISCSIDriver, self).__init__(*args, **kwargs)
         if not self.configuration:
+            code = 'ENODATA'
             message = (_('%(product_name)s %(storage_protocol)s '
                          'backend configuration not found')
                        % {'product_name': self.product_name,
                           'storage_protocol': self.storage_protocol})
-            raise jsonrpc.NefException(code='ENODATA', message=message)
+            raise jsonrpc.NefException(code=code, message=message)
         self.configuration.append_config_values(
             options.NEXENTASTOR5_ISCSI_OPTS)
         self.nef = None
+        self.ctxt = None
+        self.san_host = None
+        self.san_port = None
         self.san_stat = None
+        self.san_portals = []
         self.backend_name = self._get_backend_name()
         self.san_driver = self.__class__.__name__
         self.image_cache = self.configuration.nexenta_image_cache
         self.target_prefix = self.configuration.nexenta_target_prefix
-        self.target_group_prefix = (
+        self.targetgroup_prefix = (
             self.configuration.nexenta_target_group_prefix)
         self.block_size = self.configuration.nexenta_blocksize
         self.host_group_prefix = self.configuration.nexenta_host_group_prefix
         self.luns_per_target = self.configuration.nexenta_luns_per_target
         self.lu_writebackcache_disabled = (
             self.configuration.nexenta_lu_writebackcache_disabled)
-        self.san_host = self.configuration.nexenta_host
-        self.san_port = self.configuration.nexenta_iscsi_target_portal_port
         self.san_path = posixpath.join(
             self.configuration.nexenta_volume,
             self.configuration.nexenta_volume_group)
         self.san_pool = self.configuration.nexenta_volume
-        self.portals = self.configuration.nexenta_iscsi_target_portals
         self.group_snapshot_template = (
             self.configuration.nexenta_group_snapshot_template)
         self.origin_snapshot_template = (
@@ -139,6 +143,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             self.configuration.nexenta_migration_throttle)
 
     def do_setup(self, ctxt):
+        self.ctxt = ctxt
         retries = 0
         while not self._do_setup():
             retries += 1
@@ -146,20 +151,68 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
     def _do_setup(self):
         try:
-            self.nef = jsonrpc.NefProxy(self.driver_volume_type,
-                                        self.san_pool,
-                                        self.san_path,
-                                        self.configuration)
+            self.nef = jsonrpc.NefProxy(
+                self.driver_volume_type,
+                self.san_pool,
+                self.san_path,
+                self.backend_name,
+                self.configuration)
         except jsonrpc.NefException as error:
             LOG.error('Failed to initialize RESTful API for backend '
                       '%(backend_name)s on host %(host)s: %(error)s',
                       {'backend_name': self.backend_name,
-                       'host': self.host,
-                       'error': error})
+                       'host': self.host, 'error': error})
             return False
         return True
 
     def check_for_setup_error(self):
+        host = self.configuration.nexenta_host
+        port = self.configuration.nexenta_iscsi_target_portal_port
+        if host:
+            if not port:
+                port = DEFAULT_ISCSI_PORT
+            portal = {'address': host, 'port': port}
+            self.san_portals.append(portal)
+            self.san_host = host
+            self.san_port = port
+        items = self.configuration.nexenta_iscsi_target_portals
+        for item in items:
+            if not item:
+                continue
+            hostport = item.split(':')
+            host = hostport[0]
+            port = DEFAULT_ISCSI_PORT
+            if len(hostport) == 2:
+                try:
+                    port = int(hostport[1])
+                except (TypeError, ValueError) as error:
+                    LOG.error('Invalid port of %(storage_protocol)s '
+                              'portal for backend %(backend_name)s '
+                              'on host %(host)s: %(error)s',
+                              {'storage_protocol': self.storage_protocol,
+                               'backend_name': self.backend_name,
+                               'host': self.host, 'error': error})
+                    raise
+            portal = {'address': host, 'port': port}
+            if portal not in self.san_portals:
+                self.san_portals.append(portal)
+            if not self.san_host:
+                self.san_host = host
+            if not self.san_port:
+                self.san_port = port
+        if not self.san_portals:
+            code = 'ENODATA'
+            message = (_('%(product_name)s %(storage_protocol)s '
+                         'host is not defined on host %(host)s, '
+                         'please check the Cinder configuration '
+                         'file for backend %(backend_name)s and '
+                         'nexenta_iscsi_target_portals and/or '
+                         'nexenta_host configuration options')
+                       % {'product_name': self.product_name,
+                          'storage_protocol': self.storage_protocol,
+                          'host': self.host,
+                          'backend_name': self.backend_name})
+            raise jsonrpc.NefException(code=code, message=message)
         retries = 0
         while not self._check_for_setup_error():
             retries += 1
@@ -174,9 +227,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             LOG.error('Failed to get stat of SAN pool %(san_pool)s: %(error)s',
                       {'san_pool': self.san_pool, 'error': error})
             return False
-        specs = self.nef.volumes.properties
-        names = [spec['api'] for spec in specs if 'api' in spec]
-        names.remove('sparseVolume')
+        items = self.nef.volumegroups.properties
+        names = [item['api'] for item in items if 'api' in item]
         fields = ','.join(names)
         payload = {'fields': fields}
         try:
@@ -189,6 +241,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             return False
         if not self.san_stat:
             return False
+        payload = {'fields': 'state'}
         try:
             service = self.nef.services.get('iscsit')
         except jsonrpc.NefException as error:
@@ -212,133 +265,74 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             LOG.error('Failed to create SAN path %(san_path)s: %(error)s',
                       {'san_path': self.san_path, 'error': error})
 
-    def _get_volume_reservation(self, volume):
-        """Calculates the correct reservation size for given volume size.
-
-        Its purpose is to reserve additional space for volume metadata
-        so volume don't unexpectedly run out of room. This function is
-        a copy of the volsize_to_reservation function in libzfs_dataset.c
-
-        :param volume: volume reference
-        :returns: reservation size
-        """
-        volume_path = self._get_volume_path(volume)
-        payload = {'fields': 'volumeBlockSize,volumeSize,dataCopies'}
-        volume_specs = self.nef.volumes.get(volume_path, payload)
-        block_size = volume_specs['volumeBlockSize']
-        volume_size = volume_specs['volumeSize']
-        data_copies = volume_specs['dataCopies']
-        reservation = volume_size
-        numdb = 7
-        dn_max_indblkshift = 17
-        spa_blkptrshift = 7
-        spa_dvas_per_bp = 3
-        dnodes_per_level_shift = dn_max_indblkshift - spa_blkptrshift
-        dnodes_per_level = 1 << dnodes_per_level_shift
-        nblocks = reservation // block_size
-        while nblocks > 1:
-            nblocks += dnodes_per_level - 1
-            nblocks //= dnodes_per_level
-            numdb += nblocks
-        numdb *= min(spa_dvas_per_bp, data_copies + 1)
-        reservation *= data_copies
-        numdb *= 1 << dn_max_indblkshift
-        reservation += numdb
-        volume_meta = reservation - volume_size
-        LOG.debug('Reservation size for raw volume %(volume)s: '
-                  '%(reservation)s, volume data size: %(volume_size)s '
-                  'and volume metadata size: %(volume_meta)s',
-                  {'volume': volume['name'], 'reservation': reservation,
-                   'volume_size': volume_size, 'volume_meta': volume_meta})
-        return reservation
-
-    def _set_volume_reservation(self, volume, reservation=None):
-        if reservation is None:
-            reservation = self._get_volume_reservation(volume)
-        volume_path = self._get_volume_path(volume)
-        payload = {'fields': 'referencedReservationSize,volumeSize'}
-        volume_specs = self.nef.volumes.get(volume_path, payload)
-        volume_reservation = volume_specs['referencedReservationSize']
-        volume_size = volume_specs['volumeSize']
-        if volume_reservation == reservation:
-            return
-        if not reservation:
-            payload = {'referencedReservationSize': reservation}
-            try:
-                self.nef.volumes.set(volume_path, payload)
-            except jsonrpc.NefException as error:
-                LOG.error('Failed to reset volume reservation size from '
-                          '%(volume_reservation)s to %(reservation)s '
-                          'for volume %(volume)s: %(error)s',
-                          {'volume_reservation': volume_reservation,
-                           'reservation': reservation,
-                           'volume': volume['name'],
-                           'error': error})
-                raise
-            return
-        # Workaround for NEX-21586
-        connectors = self._get_volume_connectors(volume)
-        if connectors:
-            code = 'EINVAL'
-            message = (_('Volume provisioning type cannot be changed '
-                         'for attached volume %(volume)s, volume '
-                         'connectors are: %(connectors)s')
-                       % {'volume': volume['name'],
-                          'connectors': connectors})
-            raise jsonrpc.NefException(code=code, message=message)
-        temporay_size = nexenta_utils.roundup(reservation, units.Gi)
-        payload = {'volumeSize': temporay_size}
-        try:
-            self.nef.volumes.set(volume_path, payload)
-        except jsonrpc.NefException as error:
-            LOG.error('Failed to temporarily change volume size from '
-                      '%(volume_size)s to %(temporay_size)s for volume '
-                      '%(volume)s: %(error)s',
-                      {'volume_size': volume_size,
-                       'temporay_size': temporay_size,
-                       'volume': volume['name'],
-                       'error': error})
-            raise
-        payload = {'referencedReservationSize': reservation}
-        try:
-            self.nef.volumes.set(volume_path, payload)
-        except jsonrpc.NefException as error:
-            LOG.error('Failed to change volume reservation size from '
-                      '%(volume_reservation)s to %(reservation)s '
-                      'for volume %(volume)s: %(error)s',
-                      {'volume_reservation': volume_reservation,
-                       'reservation': reservation,
-                       'volume': volume['name'],
-                       'error': error})
-            raise
-        payload = {'volumeSize': volume_size}
-        try:
-            self.nef.volumes.set(volume_path, payload)
-        except jsonrpc.NefException as error:
-            LOG.error('Failed to restore original volume size from '
-                      '%(temporay_size)s to %(volume_size)s for volume '
-                      '%(volume)s: %(error)s',
-                      {'temporay_size': temporay_size,
-                       'volume_size': volume_size,
-                       'volume': volume['name'],
-                       'error': error})
-            raise
-
-    def _update_volume_properties(self, volume):
+    def _update_volume_props(self, volume, volume_type=None):
         """Updates the existing volume properties.
 
         :param volume: volume reference
+        :param volume_type: new volume type
         """
-        if not volume['volume_type_id']:
-            return
-        ctxt = context.get_admin_context()
-        volume_type_id = volume['volume_type_id']
-        volume_type = volume_types.get_volume_type(ctxt, volume_type_id)
-        diff = {}
-        host = volume['host']
-        self.retype(ctxt, volume, volume_type, diff, host)
+        volume_path = self._get_volume_path(volume)
+        volume_size = volume['size'] * units.Gi
+        items = self.nef.volumes.properties
+        names = [item['api'] for item in items if 'api' in item]
+        # Workaround for NEX-21595
+        names += ['source', 'volumeSize', 'referencedReservationSize']
+        fields = ','.join(names)
+        payload = {'fields': fields, 'source': True}
+        props = self.nef.volumes.get(volume_path, payload)
+        src = props['source']
+        specs = self._get_volume_specs(volume, volume_type)
+        payload = {}
+        for item in items:
+            if 'api' not in item:
+                continue
+            api = item['api']
+            if api in specs:
+                value = specs[api]
+                if props[api] == value:
+                    continue
+                if 'change' in item:
+                    code = 'EINVAL'
+                    message = (_('Unable to change property %(name)s '
+                                 'for volume %(volume)s. %(reason)s')
+                               % {'name': item['name'],
+                                  'volume': volume['name'],
+                                  'reason': item['change']})
+                    raise jsonrpc.NefException(code=code, message=message)
+                payload[api] = value
+            elif src[api] in ['local', 'received']:
+                if props[api] == item['default']:
+                    continue
+                if 'inherit' in item:
+                    LOG.debug('Unable to inherit property %(name)s '
+                              'for volume %(volume)s. %(reason)s',
+                              {'name': item['name'],
+                               'volume': volume['name'],
+                               'reason': item['inherit']})
+                    continue
+                payload[api] = None
+        if props['volumeSize'] < volume_size:
+            payload['volumeSize'] = volume_size
+            if 0 < props['referencedReservationSize'] <= props['volumeSize']:
+                payload['referencedReservationSize'] = volume_size
+        if 'sparseVolume' in payload:
+            sparse_volume = payload.pop('sparseVolume')
+            if sparse_volume:
+                payload['referencedReservationSize'] = 0
+            else:
+                payload['referencedReservationSize'] = volume_size
+        if payload:
+            self.nef.volumes.set(volume_path, payload)
+        payload = {
+            'volume': volume_path,
+            'fields': 'guid'
+        }
+        logicalunits = self.nef.logicalunits.list(payload)
+        payload = self._get_lu_specs(volume)
+        for logicalunit in logicalunits:
+            guid = logicalunit['guid']
+            self.nef.logicalunits.set(guid, payload)
 
-    @jsonrpc.synchronized_operation
     def create_volume(self, volume):
         """Create a zfs volume on appliance.
 
@@ -347,15 +341,54 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """
         volume_path = self._get_volume_path(volume)
         volume_size = volume['size'] * units.Gi
-        properties = self.nef.volumes.properties
-        payload = self._get_vendor_properties(properties, volume)
-        payload.update({
-            'path': volume_path,
-            'volumeSize': volume_size
-        })
+        payload = self._get_volume_specs(volume)
+        payload['path'] = volume_path
+        payload['volumeSize'] = volume_size
         self.nef.volumes.create(payload)
 
-    @jsonrpc.synchronized_operation
+    def _demote_volume(self, volume, volume_origin):
+        """Demote a volume.
+
+        :param volume: volume reference
+        :param volume_origin: volume origin path
+        """
+        volume_path = self._get_volume_path(volume)
+        payload = {'parent': volume_path, 'fields': 'path'}
+        try:
+            snapshots = self.nef.snapshots.list(payload)
+        except jsonrpc.NefException as error:
+            if error.code == 'ENOENT':
+                return volume_origin
+            raise
+        origin_txg = 0
+        origin_path = None
+        clone_path = None
+        for snapshot in snapshots:
+            snapshot_path = snapshot['path']
+            payload = {'fields': 'clones,creationTxg'}
+            try:
+                props = self.nef.snapshots.get(snapshot_path, payload)
+            except jsonrpc.NefException as error:
+                if error.code == 'ENOENT':
+                    continue
+                raise
+            snapshot_clones = props['clones']
+            # Workaround for NEX-22763
+            snapshot_txg = int(props['creationTxg'])
+            if snapshot_clones and snapshot_txg > origin_txg:
+                clone_path = snapshot_clones[0]
+                origin_txg = snapshot_txg
+                origin_path = snapshot_path
+        if clone_path:
+            try:
+                self.nef.volumes.promote(clone_path)
+            except jsonrpc.NefException as error:
+                if error.code in ['ENOENT', 'EBADARG']:
+                    return volume_origin
+                raise
+            return origin_path
+        return volume_origin
+
     def delete_volume(self, volume):
         """Deletes a volume.
 
@@ -364,56 +397,23 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         volume_path = self._get_volume_path(volume)
         payload = {'fields': 'originalSnapshot'}
         try:
-            volume_spec = self.nef.volumes.get(volume_path, payload)
+            props = self.nef.volumes.get(volume_path, payload)
         except jsonrpc.NefException as error:
             if error.code == 'ENOENT':
                 return
             raise
-        volume_origin = volume_spec['originalSnapshot']
+        volume_exist = True
+        origin = props['originalSnapshot']
         payload = {'snapshots': True}
-        try:
-            self.nef.volumes.delete(volume_path, payload)
-        except jsonrpc.NefException as error:
-            if error.code != 'EEXIST':
+        while volume_exist:
+            try:
+                self.nef.volumes.delete(volume_path, payload)
+            except jsonrpc.NefException as error:
+                if error.code == 'EEXIST':
+                    origin = self._demote_volume(volume, origin)
+                    continue
                 raise
-            snapshot_tree = {}
-            payload = {'parent': volume_path, 'fields': 'path'}
-            snapshots = self.nef.snapshots.list(payload)
-            for snapshot in snapshots:
-                snapshot_path = snapshot['path']
-                payload = {'fields': 'clones,creationTxg'}
-                snapshot_spec = self.nef.snapshots.get(snapshot_path, payload)
-                if snapshot_spec['clones']:
-                    snapshot_txg = snapshot_spec['creationTxg']
-                    snapshot_clones = snapshot_spec['clones']
-                    first_clone = snapshot_clones[0]
-                    snapshot_tree[snapshot_txg] = first_clone
-            if snapshot_tree:
-                latest_txg = max(snapshot_tree)
-                clone_path = snapshot_tree[latest_txg]
-                self.nef.volumes.promote(clone_path)
-            payload = {'snapshots': True}
-            self.nef.volumes.delete(volume_path, payload)
-        if not volume_origin:
-            return
-        origin_path, snapshot_name = volume_origin.split('@')
-        origin_name = posixpath.basename(origin_path)
-        if nexenta_utils.match_template(self.origin_snapshot_template,
-                                        snapshot_name):
-            payload = {'defer': True}
-            try:
-                self.nef.snapshots.delete(volume_origin, payload)
-            except Exception:
-                pass
-        elif (nexenta_utils.match_template(self.cache_snapshot_template,
-                                           snapshot_name) and
-              nexenta_utils.match_template(self.cache_image_template,
-                                           origin_name)):
-            payload = {'snapshots': True}
-            try:
-                self.nef.volumes.delete(origin_path, payload)
-            except Exception:
-                pass
+            volume_exist = False
 
     def extend_volume(self, volume, new_size):
         """Extend an existing volume.
@@ -423,11 +423,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         """
         volume_path = self._get_volume_path(volume)
         volume_size = new_size * units.Gi
+        payload = {'fields': 'referencedReservationSize,volumeSize'}
+        props = self.nef.volumes.get(volume_path, payload)
         payload = {'volumeSize': volume_size}
+        if props['referencedReservationSize'] == props['volumeSize']:
+            payload['referencedReservationSize'] = volume_size
         self.nef.volumes.set(volume_path, payload)
-        self._set_volume_reservation(volume)
 
-    @jsonrpc.synchronized_operation
     def create_snapshot(self, snapshot):
         """Creates a snapshot.
 
@@ -437,7 +439,6 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         payload = {'path': snapshot_path}
         self.nef.snapshots.create(payload)
 
-    @jsonrpc.synchronized_operation
     def delete_snapshot(self, snapshot):
         """Deletes a snapshot.
 
@@ -447,23 +448,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         payload = {'defer': True}
         self.nef.snapshots.delete(snapshot_path, payload)
 
-    @jsonrpc.synchronized_operation
     def create_volume_from_snapshot(self, volume, snapshot):
         """Create new volume from other's snapshot on appliance.
 
         :param volume: reference of volume to be created
         :param snapshot: reference of source snapshot
         """
-        LOG.debug('Create volume %(volume)s from snapshot %(snapshot)s',
-                  {'volume': volume['name'], 'snapshot': snapshot['name']})
         volume_path = self._get_volume_path(volume)
         snapshot_path = self._get_snapshot_path(snapshot)
         payload = {'targetPath': volume_path}
-        if volume['size'] > snapshot['volume_size']:
-            volume_size = volume['size'] * units.Gi
-            payload['volumeSize'] = volume_size
         self.nef.snapshots.clone(snapshot_path, payload)
-        self._update_volume_properties(volume)
+        self._update_volume_props(volume)
 
     def create_cloned_volume(self, volume, src_vref):
         """Creates a clone of the specified volume.
@@ -480,22 +475,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.create_snapshot(snapshot)
         try:
             self.create_volume_from_snapshot(volume, snapshot)
-        except jsonrpc.NefException as error:
-            LOG.error('Failed to create clone %(clone)s '
-                      'from volume %(volume)s: %(error)s',
-                      {'clone': volume['name'],
-                       'volume': src_vref['name'],
-                       'error': error})
-            raise
         finally:
-            try:
-                self.delete_snapshot(snapshot)
-            except jsonrpc.NefException as error:
-                LOG.error('Failed to delete temporary snapshot '
-                          '%(volume)s@%(snapshot)s: %(error)s',
-                          {'volume': src_vref['name'],
-                           'snapshot': snapshot['name'],
-                           'error': error})
+            self.delete_snapshot(snapshot)
 
     def create_export(self, ctxt, volume):
         """Driver entry point to get the export info for a new volume."""
@@ -517,7 +498,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :returns: dictionary of connection information
         """
         info = {'driver_volume_type': self.driver_volume_type, 'data': {}}
-        host_iqn = None
+        initiator = None
         host_groups = []
         volume_path = self._get_volume_path(volume)
         if isinstance(connector, dict) and 'initiator' in connector:
@@ -531,15 +512,15 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                           'host_ip': connector.get('ip', 'unknown'),
                           'volume': volume['name']})
                 return True
-            host_iqn = connector['initiator']
+            initiator = connector['initiator']
             host_groups.append(DEFAULT_HOST_GROUP)
-            host_group = self._get_host_group(host_iqn)
+            host_group = self._get_hostgroup(initiator)
             if host_group is not None:
                 host_groups.append(host_group)
             LOG.debug('Terminate connection for volume %(volume)s '
                       'and initiator %(initiator)s',
                       {'volume': volume['name'],
-                       'initiator': host_iqn})
+                       'initiator': initiator})
         else:
             LOG.debug('Terminate all connections for volume %(volume)s',
                       {'volume': volume['name']})
@@ -554,12 +535,12 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             mapping_id = mapping.get('id')
             mapping_tg = mapping.get('targetGroup')
             mapping_hg = mapping.get('hostGroup')
-            if host_iqn is None or mapping_hg in host_groups:
+            if initiator is None or mapping_hg in host_groups:
                 LOG.debug('Delete LUN mapping %(id)s for volume %(volume)s, '
                           'target group %(tg)s and host group %(hg)s',
                           {'id': mapping_id, 'volume': volume['name'],
                            'tg': mapping_tg, 'hg': mapping_hg})
-                self._delete_lun_mapping(mapping_id)
+                self.nef.mappings.delete(mapping_id)
             else:
                 LOG.debug('Skip LUN mapping %(id)s for volume %(volume)s, '
                           'target group %(tg)s and host group %(hg)s',
@@ -578,6 +559,15 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
     def _update_volume_stats(self):
         """Retrieve stats info for NexentaStor appliance."""
+        provisioned_capacity_gb = total_volumes = total_snapshots = 0
+        volumes = db.volume_get_all_by_host(self.ctxt, self.host)
+        for volume in volumes:
+            provisioned_capacity_gb += volume['size']
+            total_volumes += 1
+        snapshots = db.snapshot_get_all(self.ctxt)
+        for snapshot in snapshots:
+            provisioned_capacity_gb += snapshot['volume_size']
+            total_snapshots += 1
         description = (
             self.configuration.safe_get('nexenta_dataset_description'))
         if not description:
@@ -620,6 +610,9 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             'total_capacity_gb': 'unknown',
             'allocated_capacity_gb': 'unknown',
             'free_capacity_gb': 'unknown',
+            'provisioned_capacity_gb': provisioned_capacity_gb,
+            'total_volumes': total_volumes,
+            'total_snapshots': total_snapshots,
             'reserved_percentage': reserved_percentage,
             'nef_scheme': self.nef.scheme,
             'nef_hosts': ','.join(self.nef.hosts),
@@ -677,126 +670,95 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         volume_name = snapshot['volume_name']
         snapshot_name = snapshot['name']
         volume_path = posixpath.join(self.san_path, volume_name)
-        snapshot_path = '%s@%s' % (volume_path, snapshot_name)
+        snapshot_path = '%(volume_path)s@%(snapshot_name)s' % {
+            'volume_path': volume_path,
+            'snapshot_name': snapshot_name
+        }
         return snapshot_path
 
-    def _get_target_group_name(self, target_name):
-        """Return Nexenta iSCSI target group name for volume."""
-        return target_name.replace(
-            self.configuration.nexenta_target_prefix,
-            self.configuration.nexenta_target_group_prefix
-        )
-
-    def _get_target_name(self, target_group_name):
-        """Return Nexenta iSCSI target name for volume."""
-        return target_group_name.replace(
-            self.configuration.nexenta_target_group_prefix,
-            self.configuration.nexenta_target_prefix
-        )
-
-    def _get_host_addresses(self):
+    def _get_addrs(self):
         """Returns NexentaStor IP addresses list."""
-        addresses = []
-        netaddrs = self.nef.netaddrs.list()
-        for netaddr in netaddrs:
-            cidr = six.text_type(netaddr['address'])
-            ip = cidr.split('/')[0]
-            instance = ipaddress.ip_address(ip)
-            if not instance.is_loopback:
-                addresses.append(instance.exploded)
-        LOG.debug('Configured IP addresses: %(addresses)s',
-                  {'addresses': addresses})
-        return addresses
-
-    def _get_host_portals(self):
-        """Return configured iSCSI portals list."""
-        host_portals = []
-        host_addresses = self._get_host_addresses()
-        if self.san_host:
-            if self.san_host in host_addresses:
-                if self.san_port:
-                    san_port = self.san_port
-                else:
-                    san_port = DEFAULT_ISCSI_PORT
-                host_portal = '%s:%s' % (self.san_host, san_port)
-                host_portals.append(host_portal)
-            else:
-                LOG.debug('Skip not a local IP address %(san_host)s',
-                          {'san_host': self.san_host})
-        else:
-            LOG.debug('Configuration parameter nexenta_host is not defined')
-        for portal in self.portals:
-            if not portal:
+        addrs = []
+        payload = {'fields': 'address,state'}
+        items = self.nef.netaddrs.list(payload)
+        for item in items:
+            if item['state'] != 'ok':
                 continue
-            host_port = portal.split(':')
-            portal_host = host_port[0]
-            if portal_host in host_addresses:
-                if len(host_port) == 2:
-                    portal_port = int(host_port[1])
-                else:
-                    portal_port = DEFAULT_ISCSI_PORT
-                host_portal = '%s:%s' % (portal_host, portal_port)
-                if host_portal not in host_portals:
-                    host_portals.append(host_portal)
-            else:
-                LOG.debug('Skip not a local portal IP address %(portal)s',
-                          {'portal': portal_host})
-        LOG.debug('Configured iSCSI portals: %(portals)s',
-                  {'portals': host_portals})
-        return host_portals
+            ip_mask = six.text_type(item['address'])
+            ip = ip_mask.split('/')[0]
+            addr = ipaddress.ip_address(ip)
+            if not addr.is_loopback:
+                addrs.append(addr.exploded)
+        LOG.debug('Configured IP addresses: %(addrs)s',
+                  {'addrs': addrs})
+        return addrs
 
-    def _target_group_props(self, group_name, host_portals):
-        """Check and update an existing targets/portals for given target group.
+    def _get_portals(self, addrs):
+        """Return configured iSCSI portals list."""
+        portals = []
+        items = self.san_portals
+        for item in items:
+            if item['address'] in addrs:
+                portals.append(item)
+        return portals
 
-        :param group_name: target group name
-        :param host_portals: configured host portals list
-        :returns: dictionary of portals per target
-        """
-        if not group_name.startswith(self.target_group_prefix):
-            LOG.debug('Skip not a cinder target group %(group)s',
-                      {'group': group_name})
-            return {}
-        group_props = {}
-        payload = {'name': group_name}
-        data = self.nef.targetgroups.list(payload)
-        if not data:
-            LOG.debug('Skip target group %(group)s: group not found',
-                      {'group': group_name})
-            return {}
-        target_names = data[0]['members']
-        if not target_names:
-            target_name = self._get_target_name(group_name)
-            self._create_target(target_name, host_portals)
-            self._update_target_group(group_name, [target_name])
-            group_props[target_name] = host_portals
-            return group_props
-        for target_name in target_names:
-            group_props[target_name] = []
-            payload = {'name': target_name}
-            data = self.nef.targets.list(payload)
-            if not data:
-                LOG.debug('Skip target group %(group)s: '
-                          'group member %(target)s not found',
-                          {'group': group_name, 'target': target_name})
-                return {}
-            target_portals = data[0]['portals']
-            if not target_portals:
-                LOG.debug('Skip target group %(group)s: '
-                          'group member %(target)s has no portals',
-                          {'group': group_name, 'target': target_name})
-                return {}
-            for item in target_portals:
-                target_portal = '%s:%s' % (item['address'], item['port'])
-                if target_portal not in host_portals:
-                    LOG.debug('Skip target group %(group)s: '
-                              'group member %(target)s bind to a '
-                              'non local portal address %(portal)s',
-                              {'group': group_name,
-                               'target': target_name,
-                               'portal': target_portal})
-                    return {}
-                group_props[target_name].append(target_portal)
-        return group_props
+    def _get_targets(self, hosts):
+        """Return configured iSCSI targets dictionary."""
+        targets = {}
+        payload = {'fields': 'name,state,portals'}
+        items = self.nef.targets.list(payload)
+        for item in items:
+            name = item['name']
+            state = item['state']
+            portals = item['portals']
+            if state != 'online':
+                LOG.debug('Skip iSCSI target %(name)s: %(state)s',
+                          {'name': name, 'state': state})
+                continue
+            if not name.startswith(self.target_prefix):
+                LOG.debug('Skip iSCSI target %(name)s: target name '
+                          'do not match configured prefix %(prefix)s',
+                          {'name': name, 'prefix': self.target_prefix})
+                continue
+            if not portals:
+                LOG.debug('Skip iSCSI target %(name)s: no target portals',
+                          {'name': name})
+                continue
+            if not all(portal in hosts for portal in portals):
+                LOG.debug('Skip iSCSI target %(name)s: target portals '
+                          '%(portals)s do not match host portals %(hosts)s',
+                          {'name': name, 'portals': portals, 'hosts': hosts})
+                continue
+            targets[name] = utils.prt2tpg(portals)
+        return targets
+
+    def _get_targetgroups(self, targets):
+        """Return configured target groups dictionary."""
+        dist = {}
+        payload = {'fields': 'name,members'}
+        items = self.nef.targetgroups.list(payload)
+        for item in items:
+            name = item['name']
+            members = item['members']
+            if not name.startswith(self.targetgroup_prefix):
+                LOG.debug('Skip targetgroup %(name)s: group name '
+                          'do not match configured prefix %(prefix)s',
+                          {'name': name, 'prefix': self.targetgroup_prefix})
+                continue
+            if not members:
+                LOG.debug('Skip targetgroup %(name)s: no members found',
+                          {'name': name})
+                continue
+            if not all(member in targets for member in members):
+                LOG.debug('Skip targetgroup %(name)s: group members '
+                          '%(members)s do not match host targets %(targets)s',
+                          {'name': name, 'members': members,
+                           'targets': targets})
+                continue
+            member = members[0]
+            portals = targets[member]
+            dist[name] = {'iqn': member, 'portals': portals}
+        return dist
 
     def initialize_connection(self, volume, connector):
         """Do all steps to get zfs volume exported at separate target.
@@ -805,253 +767,177 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         :param connector: connector reference
         :returns: dictionary of connection information
         """
+        initiator = connector.get('initiator', None)
+        multipath = connector.get('multipath', False)
+        LOG.debug('Initialize connection for volume %(volume)s and '
+                  'initiator %(initiator)s, multipath: %(multipath)s',
+                  {'volume': volume['name'], 'initiator': initiator,
+                   'multipath': multipath})
+        hostgroup = DEFAULT_HOST_GROUP
+        if initiator:
+            hostgroup = self._get_hostgroup(initiator)
+            if not hostgroup:
+                hostgroup = self._create_hostgroup(initiator)
+        addrs = self._get_addrs()
+        portals = self._get_portals(addrs)
+        targets = self._get_targets(portals)
+        dist = self._get_targetgroups(targets)
+        stat = {}
         volume_path = self._get_volume_path(volume)
-        host_iqn = connector.get('initiator')
-        LOG.debug('Initialize connection for volume: %(volume)s '
-                  'and initiator: %(initiator)s',
-                  {'volume': volume_path, 'initiator': host_iqn})
-
-        host_groups = [DEFAULT_HOST_GROUP]
-        host_group = self._get_host_group(host_iqn)
-        if host_group:
-            host_groups.append(host_group)
-
-        host_portals = self._get_host_portals()
-        props_portals = []
-        props_iqns = []
-        props_luns = []
-        payload = {'volume': volume_path}
+        payload = {
+            'fields': 'id,lun,hostGroup,targetGroup,volume'
+        }
         mappings = self.nef.mappings.list(payload)
         for mapping in mappings:
-            mapping_id = mapping['id']
-            mapping_lu = mapping['lun']
-            mapping_hg = mapping['hostGroup']
-            mapping_tg = mapping['targetGroup']
-            if mapping_tg == DEFAULT_TARGET_GROUP:
-                LOG.debug('Delete LUN mapping %(id)s for target group %(tg)s',
-                          {'id': mapping_id, 'tg': mapping_tg})
-                self._delete_lun_mapping(mapping_id)
+            uid = mapping['id']
+            lun = mapping['lun']
+            targetgroup = mapping['targetGroup']
+            if targetgroup == DEFAULT_TARGET_GROUP:
+                self.nef.mappings.delete(uid)
                 continue
-            if mapping_hg not in host_groups:
-                LOG.debug('Skip LUN mapping %(id)s for host group %(hg)s',
-                          {'id': mapping_id, 'hg': mapping_hg})
+            if targetgroup not in dist:
                 continue
-            group_props = self._target_group_props(mapping_tg, host_portals)
-            if not group_props:
-                LOG.debug('Skip LUN mapping %(id)s for target group %(tg)s',
-                          {'id': mapping_id, 'tg': mapping_tg})
+            if targetgroup not in stat:
+                stat[targetgroup] = 0
+            stat[targetgroup] += 1
+            if mapping['hostGroup'] != hostgroup:
                 continue
-            for target_iqn in group_props:
-                target_portals = group_props[target_iqn]
-                props_portals += target_portals
-                props_iqns += [target_iqn] * len(target_portals)
-                props_luns += [mapping_lu] * len(target_portals)
-
-        props = {}
-        props['discard'] = True
-        props['target_discovered'] = False
-        props['encrypted'] = False
-        props['qos_specs'] = None
-        props['volume_id'] = volume['id']
-        props['access_mode'] = 'rw'
-        multipath = connector.get('multipath', False)
-
-        if props_luns:
-            if multipath:
-                props['target_portals'] = props_portals
-                props['target_iqns'] = props_iqns
-                props['target_luns'] = props_luns
-            else:
-                index = random.randrange(len(props_luns))
-                props['target_portal'] = props_portals[index]
-                props['target_iqn'] = props_iqns[index]
-                props['target_lun'] = props_luns[index]
-            LOG.debug('Use existing LUN mapping(s) %(props)s',
-                      {'props': props})
-            return {'driver_volume_type': self.driver_volume_type,
-                    'data': props}
-
-        if host_group is None:
-            host_group = '%s-%s' % (self.host_group_prefix, uuid.uuid4().hex)
-            self._create_host_group(host_group, [host_iqn])
-
-        mappings_spread = {}
-        targets_spread = {}
-        data = self.nef.targetgroups.list()
-        for item in data:
-            target_group = item['name']
-            group_props = self._target_group_props(target_group, host_portals)
-            members = len(group_props)
-            if members == 0:
-                LOG.debug('Skip unsuitable target group %(tg)s',
-                          {'tg': target_group})
+            if mapping['volume'] != volume_path:
                 continue
-            payload = {'targetGroup': target_group}
-            data = self.nef.mappings.list(payload)
-            mappings = len(data)
-            if not mappings < self.luns_per_target:
-                LOG.debug('Skip target group %(tg)s: '
-                          'group members limit reached: %(limit)s',
-                          {'tg': target_group, 'limit': mappings})
-                continue
-            targets_spread[target_group] = group_props
-            mappings_spread[target_group] = mappings
-            LOG.debug('Found target group %(tg)s with %(members)s '
-                      'members and %(mappings)s LUNs',
-                      {'tg': target_group, 'members': members,
-                       'mappings': mappings})
-
-        if not mappings_spread:
-            target = '%s-%s' % (self.target_prefix, uuid.uuid4().hex)
-            target_group = self._get_target_group_name(target)
-            self._create_target(target, host_portals)
-            self._create_target_group(target_group, [target])
-            props_portals += host_portals
-            props_iqns += [target] * len(host_portals)
-        else:
-            target_group = min(mappings_spread, key=mappings_spread.get)
-            targets = targets_spread[target_group]
-            members = targets.keys()
-            mappings = mappings_spread[target_group]
-            LOG.debug('Using existing target group %(tg)s '
-                      'with members %(members)s and %(mappings)s LUNs',
-                      {'tg': target_group, 'members': members,
-                       'mappings': mappings})
-            for target in targets:
-                portals = targets[target]
-                props_portals += portals
-                props_iqns += [target] * len(portals)
-
+            target = dist[targetgroup]
+            return self._get_connection_info(volume, multipath, target, lun)
+        targetgroup = None
+        if stat:
+            key = min(stat, key=stat.get)
+            if stat[key] < self.luns_per_target:
+                targetgroup = key
+                target = dist[targetgroup]
+        if not targetgroup and dist:
+            targetgroup = random.choice(list(dist))
+            target = dist[targetgroup]
+        if not targetgroup:
+            suffix = uuid.uuid4().hex
+            iqn = self._create_target(suffix, portals)
+            targetgroup = self._create_targetgroup(suffix, iqn)
+            target = {
+                'iqn': iqn,
+                'portals': utils.prt2tpg(portals)
+            }
         payload = {
             'volume': volume_path,
-            'targetGroup': target_group,
-            'hostGroup': host_group
+            'targetGroup': targetgroup,
+            'hostGroup': hostgroup
         }
-        self.nef.mappings.create(payload)
-        mappings = {}
+        uid = self.nef.mappings.create(payload)
+        payload = {'fields': 'lun'}
         for attempt in range(1, self.nef.retries + 1):
-            mappings = self.nef.mappings.list(payload)
-            if mappings:
+            try:
+                mapping = self.nef.mappings.get(uid, payload)
+            except jsonrpc.NefException:
+                if attempt == self.nef.retries:
+                    raise
+                self.nef.delay(attempt)
+            else:
+                lun = mapping['lun']
                 break
-            self.nef.delay(attempt)
-        if not mappings:
-            message = (_('LUN mapping %(payload)s created for '
-                         'volume %(volume)s was not found')
-                       % {'payload': payload,
-                          'volume': volume['name']})
-            raise jsonrpc.NefException(code='ENOTBLK', message=message)
-        lun = mappings[0]['lun']
-        props_luns = [lun] * len(props_iqns)
-
-        if multipath:
-            props['target_portals'] = props_portals
-            props['target_iqns'] = props_iqns
-            props['target_luns'] = props_luns
-        else:
-            index = random.randrange(len(props_luns))
-            props['target_portal'] = props_portals[index]
-            props['target_iqn'] = props_iqns[index]
-            props['target_lun'] = props_luns[index]
-
-        payload = {
-            'volume': volume_path,
-            'fields': 'guid'
-        }
+        payload = {'volume': volume_path, 'fields': 'guid'}
         logicalunits = self.nef.logicalunits.list(payload)
-        guid = logicalunits[0]['guid']
-        properties = self.nef.logicalunits.properties
-        payload = self._get_vendor_properties(properties, volume)
+        if not logicalunits:
+            code = 'ENODATA'
+            message = (_('Unable to find logical unit for volume %(volume)s')
+                       % {'volume': volume['name']})
+            raise jsonrpc.NefException(code=code, message=message)
+        logicalunit = logicalunits[0]
+        guid = logicalunit['guid']
+        payload = self._get_lu_specs(volume)
         self.nef.logicalunits.set(guid, payload)
+        return self._get_connection_info(volume, multipath, target, lun)
 
-        LOG.debug('Created new LUN mapping: %(props)s',
-                  {'props': props})
-        return {'driver_volume_type': self.driver_volume_type,
-                'data': props}
+    def _get_connection_info(self, volume, multipath, target, lun):
+        data = {
+            'encrypted': False,
+            'discard': True,
+            'target_discovered': False,
+            'volume_id': volume['id']
+        }
+        portals = target['portals']
+        iqn = target['iqn']
+        count = len(portals)
+        index = random.randrange(count)
+        data.update({
+            'target_lun': lun,
+            'target_iqn': iqn,
+            'target_portal': portals[index]
+        })
+        if multipath:
+            data.update({
+                'target_luns': [lun] * count,
+                'target_iqns': [iqn] * count,
+                'target_portals': portals
+            })
+        return {
+            'driver_volume_type': self.driver_volume_type,
+            'data': data
+        }
 
-    def _create_target_group(self, name, members):
-        """Create a new target group with members.
-
-        :param name: group name
-        :param members: group members list
-        """
-        payload = {'name': name, 'members': members}
-        self.nef.targetgroups.create(payload)
-
-    def _update_target_group(self, name, members):
-        """Update a existing target group with new members.
-
-        :param name: group name
-        :param members: group members list
-        """
-        payload = {'members': members}
-        self.nef.targetgroups.set(name, payload)
-
-    def _delete_lun_mapping(self, name):
-        """Delete an existing LUN mapping.
-
-        :param name: LUN mapping ID
-        """
-        self.nef.mappings.delete(name)
-
-    def _create_target(self, name, portals):
+    def _create_target(self, suffix, portals):
         """Create a new target with portals.
 
-        :param name: target name
+        :param suffix: target name suffix
         :param portals: target portals list
         """
-        payload = {'name': name,
-                   'portals': self._s2d(portals)}
-        self.nef.targets.create(payload)
+        name = '%(prefix)s-%(suffix)s' % {
+            'prefix': self.target_prefix,
+            'suffix': suffix
+        }
+        payload = {'name': name, 'portals': portals}
+        return self.nef.targets.create(payload)
 
-    def _get_host_group(self, member):
-        """Find existing host group by group member.
+    def _create_targetgroup(self, suffix, target):
+        """Create a new target group with target.
 
-        :param member: host group member
-        :returns: host group name
+        :param suffix: group name siffix
+        :param target: group member
         """
-        host_groups = self.nef.hostgroups.list()
-        for host_group in host_groups:
-            members = host_group['members']
+        name = '%(prefix)s-%(suffix)s' % {
+            'prefix': self.targetgroup_prefix,
+            'suffix': suffix
+        }
+        members = [target]
+        payload = {'name': name, 'members': members}
+        return self.nef.targetgroups.create(payload)
+
+    def _get_hostgroup(self, member):
+        """Find existing hostgroup by group member.
+
+        :param member: hostgroup member
+        :returns: hostgroup name
+        """
+        payload = {'fields': 'members,name'}
+        hostgroups = self.nef.hostgroups.list(payload)
+        for hostgroup in hostgroups:
+            members = hostgroup['members']
             if member in members:
-                name = host_group['name']
-                LOG.debug('Found host group %(name)s for member %(member)s',
+                name = hostgroup['name']
+                LOG.debug('Found hostgroup %(name)s by member %(member)s',
                           {'name': name, 'member': member})
                 return name
         return None
 
-    def _create_host_group(self, name, members):
+    def _create_hostgroup(self, member):
         """Create a new host group.
 
-        :param name: host group name
-        :param members: host group members list
+        :param member: hostgroup member
+        :returns: hostgroup name
         """
+        name = '%(prefix)s-%(suffix)s' % {
+            'prefix': self.host_group_prefix,
+            'suffix': uuid.uuid4().hex
+        }
+        members = [member]
         payload = {'name': name, 'members': members}
         self.nef.hostgroups.create(payload)
-
-    @staticmethod
-    def _s2d(css):
-        """Parse list of colon-separated address and port to dictionary.
-
-        :param css: list of colon-separated address and port
-        :returns: dictionary
-        """
-        result = []
-        for key_val in css:
-            key, val = key_val.split(':')
-            result.append({'address': key, 'port': int(val)})
-        return result
-
-    @staticmethod
-    def _d2s(kvp):
-        """Parse dictionary to list of colon-separated address and port.
-
-        :param kvp: dictionary
-        :returns: list of colon-separated address and port
-        """
-        result = []
-        for key_val in kvp:
-            result.append('%s:%s' % (key_val['address'], key_val['port']))
-        return result
+        return name
 
     def create_consistencygroup(self, ctxt, group):
         """Creates a consistency group.
@@ -1244,12 +1130,13 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         }
         if not any(key in types for key in existing_ref):
             keys = ', '.join(types.keys())
+            code = 'EINVAL'
             message = (_('Manage existing volume failed '
                          'due to invalid backend reference. '
                          'Volume reference must contain '
                          'at least one valid key: %(keys)s')
                        % {'keys': keys})
-            raise jsonrpc.NefException(code='EINVAL', message=message)
+            raise jsonrpc.NefException(code=code, message=message)
         payload = {
             'parent': self.san_path,
             'fields': 'name,path,volumeSize'
@@ -1261,7 +1148,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         if len(existing_volumes) == 1:
             volume_path = existing_volumes[0]['path']
             volume_name = existing_volumes[0]['name']
-            volume_size = existing_volumes[0]['volumeSize'] // units.Gi
+            refsize = existing_volumes[0]['volumeSize']
+            volume_size = utils.roundgb(refsize)
             existing_volume = {
                 'name': volume_name,
                 'path': volume_path,
@@ -1279,7 +1167,6 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                    % {'reference': existing_ref, 'reason': reason})
         raise jsonrpc.NefException(code=code, message=message)
 
-    @jsonrpc.synchronized_operation
     def manage_existing(self, volume, existing_ref):
         """Brings an existing backend storage object under Cinder management.
 
@@ -1317,16 +1204,17 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         payload = {'volume': existing_volume_path}
         mappings = self.nef.mappings.list(payload)
         if mappings:
-            message = (_('Failed to manage existing volume %(path)s '
+            code = 'EEXIST'
+            message = (_('Unable to manage existing volume %(name)s '
                          'due to existing LUN mappings: %(mappings)s')
-                       % {'path': existing_volume_path,
+                       % {'name': existing_volume['name'],
                           'mappings': mappings})
-            raise jsonrpc.NefException(code='EEXIST', message=message)
+            raise jsonrpc.NefException(code=code, message=message)
         if existing_volume['name'] != volume['name']:
             volume_path = self._get_volume_path(volume)
             payload = {'newPath': volume_path}
             self.nef.volumes.rename(existing_volume_path, payload)
-        self._update_volume_properties(volume)
+        self._update_volume_props(volume)
 
     def manage_existing_get_size(self, volume, existing_ref):
         """Return size of volume to be managed by manage_existing.
@@ -1361,7 +1249,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
 
     def _migrate_volume(self, volume, scheme, hosts, port, path):
         """Storage assisted volume migration."""
-        src_hosts = self._get_host_addresses()
+        src_hosts = self._get_addrs()
         src_path = self._get_volume_path(volume)
         dst_path = posixpath.join(path, volume['name'])
         for dst_host in hosts:
@@ -1685,67 +1573,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                   'and volume type %(type)s with diff %(diff)s',
                   {'volume': volume['name'], 'host': host,
                    'type': new_type['name'], 'diff': diff})
-        volume_path = self._get_volume_path(volume)
-        vendor_specs = self.nef.volumes.properties
-        names = [_['api'] for _ in vendor_specs if 'api' in _]
-        names.append('source')
-        fields = ','.join(names)
-        payload = {'fields': fields, 'source': True}
-        volume_specs = self.nef.volumes.get(volume_path, payload)
-        volume_type_specs = self._get_vendor_properties(vendor_specs,
-                                                        volume,
-                                                        new_type)
-        sparse_volume = volume_type_specs['sparseVolume']
-        payload = {}
-        for vendor_spec in vendor_specs:
-            api = vendor_spec['api']
-            if api in volume_type_specs:
-                value = volume_type_specs[api]
-                if api in volume_specs:
-                    if volume_specs[api] == value:
-                        continue
-                if 'retype' in vendor_spec:
-                    code = 'EINVAL'
-                    message = (_('Failed to retype volume %(volume)s '
-                                 'to host %(host)s and volume type '
-                                 '%(type)s. %(reason)s')
-                               % {'volume': volume['name'],
-                                  'host': host,
-                                  'type': new_type['name'],
-                                  'reason': vendor_spec['retype']})
-                    raise jsonrpc.NefException(code=code, message=message)
-                payload[api] = value
-            elif (api in volume_specs and 'source' in volume_specs and
-                  api in volume_specs['source'] and
-                  volume_specs['source'][api] in ['local', 'received']):
-                if volume_specs[api] == vendor_spec['default']:
-                    continue
-                if 'inherit' in vendor_spec:
-                    LOG.debug('Unable to inherit property %(name)s '
-                              'from volume type %(type)s for volume '
-                              '%(volume)s. %(reason)s',
-                              {'name': api,
-                               'type': new_type['name'],
-                               'volume': volume['name'],
-                               'reason': vendor_spec['inherit']})
-                    continue
-                payload[api] = None
-        if 'sparseVolume' in payload:
-            sparse_volume = payload.pop('sparseVolume')
-        try:
-            self.nef.volumes.set(volume_path, payload)
-        except jsonrpc.NefException as error:
-            LOG.error('Failed to retype volume %(volume)s to '
-                      'host %(host)s and volume type %(type)s '
-                      'with payload %(payload)s: %(error)s',
-                      {'volume': volume['name'],
-                       'host': host,
-                       'type': new_type['name'],
-                       'payload': payload,
-                       'error': error})
-            raise
-        reservation = 0 if sparse_volume else None
-        self._set_volume_reservation(volume, reservation)
+        self._update_volume_props(volume, new_type)
         return True, None
 
     def _init_vendor_properties(self):
@@ -1777,67 +1605,92 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         : return dictionary of vendor unique properties
         : return vendor name
         """
-        properties = {}
-        vendor_properties = []
+        vendor_properties = {}
         namespace = self.nef.volumes.namespace
+        items = self.nef.volumes.properties + self.nef.logicalunits.properties
         keys = ['enum', 'default', 'minimum', 'maximum']
-        vendor_properties += self.nef.volumes.properties
-        vendor_properties += self.nef.logicalunits.properties
-        for vendor_spec in vendor_properties:
-            property_spec = {}
+        for item in items:
+            spec = {}
             for key in keys:
-                if key in vendor_spec:
-                    value = vendor_spec[key]
-                    property_spec[key] = value
-            api = vendor_spec['api']
-            if 'cfg' in vendor_spec:
-                key = vendor_spec['cfg']
+                if key in item:
+                    spec[key] = item[key]
+            if 'cfg' in item:
+                key = item['cfg']
                 value = self.configuration.safe_get(key)
                 if value not in [None, '']:
-                    property_spec['default'] = value
-            elif api in self.san_stat:
-                value = self.san_stat[api]
-                property_spec['default'] = value
-            property_name = vendor_spec['name']
-            property_title = vendor_spec['title']
-            property_description = vendor_spec['description']
-            property_type = vendor_spec['type']
-            LOG.debug('Set %(product_name)s %(storage_protocol)s backend '
-                      '%(property_type)s property %(property_name)s: '
-                      '%(property_spec)s',
-                      {'product_name': self.product_name,
-                       'storage_protocol': self.storage_protocol,
-                       'property_type': property_type,
-                       'property_name': property_name,
-                       'property_spec': property_spec})
+                    spec['default'] = value
+            elif 'api' in item:
+                api = item['api']
+                if api in self.san_stat:
+                    value = self.san_stat[api]
+                    spec['default'] = value
+            LOG.debug('Initialize vendor capabilities for '
+                      '%(product)s %(protocol)s backend: '
+                      '%(type)s %(name)s property %(spec)s',
+                      {'product': self.product_name,
+                       'protocol': self.storage_protocol,
+                       'type': item['type'],
+                       'name': item['name'],
+                       'spec': spec})
             self._set_property(
-                properties,
-                property_name,
-                property_title,
-                property_description,
-                property_type,
-                **property_spec
+                vendor_properties,
+                item['name'],
+                item['title'],
+                item['description'],
+                item['type'],
+                **spec
             )
-        return properties, namespace
+        return vendor_properties, namespace
 
-    def _get_vendor_properties(self, vendor_specs, volume, volume_type=None):
-        properties = {}
-        extra_specs = {}
-        if volume_type:
-            volume_type_id = volume_type['id']
+    def _get_volume_type_specs(self, volume, volume_type=None):
+        if volume_type and 'id' in volume_type:
+            type_id = volume_type['id']
+        elif 'volume_type_id' in volume:
+            type_id = volume['volume_type_id']
         else:
-            volume_type_id = volume['volume_type_id']
-        if volume_type_id:
-            extra_specs = volume_types.get_volume_type_extra_specs(
-                volume_type_id)
-        for vendor_spec in vendor_specs:
-            api = vendor_spec['api']
-            name = vendor_spec['name']
-            if name in extra_specs:
-                extra_spec = extra_specs[name]
-                value = self._get_vendor_value(extra_spec, vendor_spec)
-            elif 'cfg' in vendor_spec:
-                key = vendor_spec['cfg']
+            type_id = None
+        if type_id:
+            return volume_types.get_volume_type_extra_specs(type_id)
+        return {}
+
+    def _get_lu_specs(self, volume, volume_type=None):
+        payload = {}
+        items = self.nef.logicalunits.properties
+        specs = self._get_volume_type_specs(volume, volume_type)
+        for item in items:
+            if 'api' not in item:
+                continue
+            api = item['api']
+            name = item['name']
+            if name in specs:
+                spec = specs[name]
+                value = self._check_volume_spec(spec, item)
+            elif 'cfg' in item:
+                key = item['cfg']
+                value = self.configuration.safe_get(key)
+                if value in [None, '']:
+                    continue
+            else:
+                continue
+            payload[api] = value
+        LOG.debug('LU properties for %(volume)s: %(payload)s',
+                  {'volume': volume['name'], 'payload': payload})
+        return payload
+
+    def _get_volume_specs(self, volume, volume_type=None):
+        payload = {}
+        items = self.nef.volumes.properties
+        specs = self._get_volume_type_specs(volume, volume_type)
+        for item in items:
+            if 'api' not in item:
+                continue
+            api = item['api']
+            name = item['name']
+            if name in specs:
+                spec = specs[name]
+                value = self._check_volume_spec(spec, item)
+            elif 'cfg' in item:
+                key = item['cfg']
                 value = self.configuration.safe_get(key)
                 if value in [None, '']:
                     continue
@@ -1845,30 +1698,24 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                 value = self.san_stat[api]
             else:
                 continue
-            properties[api] = value
-            LOG.debug('Get vendor property name %(name)s with '
-                      'API name %(api)s and %(type)s value '
-                      '%(value)s for volume %(volume)s',
-                      {'name': name,
-                       'api': api,
-                       'type': type(value).__name__,
-                       'value': value,
-                       'volume': volume['name']})
-        return properties
+            payload[api] = value
+        LOG.debug('Volume properties for %(volume)s: %(payload)s',
+                  {'volume': volume['name'], 'payload': payload})
+        return payload
 
-    def _get_vendor_value(self, value, vendor_spec):
-        name = vendor_spec['name']
+    def _check_volume_spec(self, value, prop):
+        name = prop['name']
         code = 'EINVAL'
-        if vendor_spec['type'] == 'integer':
+        if prop['type'] == 'integer':
             try:
                 value = int(value)
-            except ValueError:
+            except (TypeError, ValueError):
                 message = (_('Invalid non-integer value %(value)s for '
                              'vendor property name %(name)s')
                            % {'value': value, 'name': name})
                 raise jsonrpc.NefException(code=code, message=message)
-            if 'minimum' in vendor_spec:
-                minimum = vendor_spec['minimum']
+            if 'minimum' in prop:
+                minimum = prop['minimum']
                 if value < minimum:
                     message = (_('Integer value %(value)s is less than '
                                  'allowed minimum %(minimum)s for vendor '
@@ -1876,8 +1723,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                                % {'value': value, 'minimum': minimum,
                                   'name': name})
                     raise jsonrpc.NefException(code=code, message=message)
-            if 'maximum' in vendor_spec:
-                maximum = vendor_spec['maximum']
+            if 'maximum' in prop:
+                maximum = prop['maximum']
                 if value > maximum:
                     message = (_('Integer value %(value)s is greater than '
                                  'allowed maximum %(maximum)s for vendor '
@@ -1885,7 +1732,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                                % {'value': value, 'maximum': maximum,
                                   'name': name})
                     raise jsonrpc.NefException(code=code, message=message)
-        elif vendor_spec['type'] == 'string':
+        elif prop['type'] == 'string':
             try:
                 value = str(value)
             except UnicodeEncodeError:
@@ -1893,7 +1740,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                              'property name %(name)s')
                            % {'value': value, 'name': name})
                 raise jsonrpc.NefException(code=code, message=message)
-        elif vendor_spec['type'] == 'boolean':
+        elif prop['type'] == 'boolean':
             words = value.split()
             if len(words) == 2 and words[0] == '<is>':
                 value = words[1]
@@ -1904,8 +1751,8 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
                              'property name %(name)s')
                            % {'value': value, 'name': name})
                 raise jsonrpc.NefException(code=code, message=message)
-        if 'enum' in vendor_spec:
-            enum = vendor_spec['enum']
+        if 'enum' in prop:
+            enum = prop['enum']
             if value not in enum:
                 message = (_('Value %(value)s is out of allowed enumeration '
                              '%(enum)s for vendor property name %(name)s')
