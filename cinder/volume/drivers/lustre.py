@@ -52,6 +52,18 @@ CONF = cfg.CONF
 CONF.register_opts(volume_opts)
 
 
+class LustreException(exception.RemoteFSException):
+    message = _("Unknown Lustre exception")
+
+
+class LustreNoSuitableShareFound(exception.RemoteFSNoSuitableShareFound):
+    message = _("There is no share which can host %(volume_size)sG")
+
+
+class LustreNoSharesMounted(exception.RemoteFSNoSharesMounted):
+    message = _("No mounted Lustre shares found")
+
+
 @interface.volumedriver
 class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
     """Lustre based cinder driver.
@@ -95,8 +107,7 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
             self._execute('mount.lustre', check_exit_code=False)
         except OSError as exc:
             if exc.errno == errno.ENOENT:
-                raise exception.LustreException(
-                    _('mount.lustre is not installed'))
+                raise LustreException(_('mount.lustre is not installed'))
             else:
                 raise
 
@@ -401,7 +412,7 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         """
 
         if not self._mounted_shares:
-            raise exception.LustreNoSharesMounted()
+            raise LustreNoSharesMounted()
 
         greatest_size = 0
         greatest_share = None
@@ -413,8 +424,7 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
                 greatest_size = capacity
 
         if volume_size_for * units.Gi > greatest_size:
-            raise exception.LustreNoSuitableShareFound(
-                volume_size=volume_size_for)
+            raise LustreNoSuitableShareFound(volume_size=volume_size_for)
         return greatest_share
 
     def _mount_lustre(self, lustre_share):
