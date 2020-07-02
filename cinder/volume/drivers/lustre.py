@@ -29,6 +29,7 @@ from cinder import exception
 from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import interface
+from cinder.privsep import fs
 from cinder import utils
 from cinder.volume.drivers import remotefs as remotefs_drv
 
@@ -111,9 +112,8 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
 
     def _do_umount(self, ignore_not_mounted, share):
         mount_path = self._get_mount_point_for_share(share)
-        command = ['umount', mount_path]
         try:
-            self._execute(*command, run_as_root=True)
+            fs.umount(mount_path)
         except processutils.ProcessExecutionError as exc:
             if ignore_not_mounted and 'not mounted' in exc.stderr:
                 LOG.info("%s is already umounted", share)
