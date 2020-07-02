@@ -30,7 +30,6 @@ from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import interface
 from cinder import utils
-from cinder.volume import driver
 from cinder.volume.drivers import remotefs as remotefs_drv
 
 LOG = logging.getLogger(__name__)
@@ -53,8 +52,7 @@ CONF.register_opts(volume_opts)
 
 
 @interface.volumedriver
-class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed,
-                   driver.ExtendVD):
+class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
     """Lustre based cinder driver.
 
     Creates file on Lustre share for using it as block device on hypervisor.
