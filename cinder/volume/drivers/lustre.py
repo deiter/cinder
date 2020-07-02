@@ -393,8 +393,6 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
             cmd = ['chmod', 'g+w', mount_path]
             self._execute(*cmd, run_as_root=True)
 
-        self._ensure_share_writable(mount_path)
-
     def _find_share(self, volume_size_for):
         """Choose Lustre share among available ones for given volume size.
 
