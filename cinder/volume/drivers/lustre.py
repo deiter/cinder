@@ -209,7 +209,9 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
 
         return {'provider_location': volume.provider_location}
 
-    def _copy_volume_from_snapshot(self, snapshot, volume, volume_size):
+    def _copy_volume_from_snapshot(self, snapshot, volume, volume_size,
+                                   src_encryption_key_id=None,
+                                   new_encryption_key_id=None):
         # """Copy data from snapshot to destination volume.
 
         # This is done with a qemu-img convert to raw/qcow2 from the snapshot
