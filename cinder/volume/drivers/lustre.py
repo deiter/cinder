@@ -201,7 +201,7 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
 
         self._ensure_shares_mounted()
 
-        volume.provider_location = self._find_share(volume.size)
+        volume.provider_location = self._find_share(volume)
 
         LOG.info('casted to %s', volume.provider_location)
 
@@ -412,28 +412,36 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
             cmd = ['chmod', 'g+w', mount_path]
             self._execute(*cmd, run_as_root=True)
 
-    def _find_share(self, volume_size_for):
+    def _find_share(self, volume):
         """Choose Lustre share among available ones for given volume size.
 
-        Current implementation looks for greatest capacity.
-        :param volume_size_for: int size in GB
+        For instances with more than one share that meets the criteria,
+        the share with the max "available" space will be selected.
+
+        :param volume: the volume to be created.
         """
 
         if not self._mounted_shares:
             raise LustreNoSharesMounted()
 
-        greatest_size = 0
-        greatest_share = None
+        target_share = None
+        target_available = 0
 
-        for lustre_share in self._mounted_shares:
-            capacity = self._get_available_capacity(lustre_share)[0]
-            if capacity > greatest_size:
-                greatest_share = lustre_share
-                greatest_size = capacity
+        for share in self._mounted_shares:
+            available = self._get_available_capacity(share)[0]
+            if available > target_available:
+                target_share = share
+                target_available = available
 
-        if volume_size_for * units.Gi > greatest_size:
-            raise LustreNoSuitableShareFound(volume_size=volume_size_for)
-        return greatest_share
+        if volume.size * units.Gi > target_available:
+            raise LustreNoSuitableShareFound(volume_size=volume.size)
+
+        LOG.debug('Selected %(share)s as target Lustre '
+                  'share to create volume %(volume)s.',
+                  {'share': target_share,
+                   'volume': volume.name})
+
+        return target_share
 
     def _mount_lustre(self, lustre_share):
         """Mount Lustre share to mount path."""
