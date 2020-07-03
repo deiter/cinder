@@ -46,6 +46,9 @@ volume_opts = [
     cfg.StrOpt('lustre_mount_point_base',
                default='$state_path/mnt',
                help='Base dir containing mount points for lustre shares.'),
+    cfg.StrOpt('lustre_mount_options',
+               default='flock',
+               help='Comma-separated string of Lustre mount options.')
 ]
 
 CONF = cfg.CONF
@@ -95,6 +98,11 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         self.base = getattr(self.configuration,
                             'lustre_mount_point_base',
                             CONF.lustre_mount_point_base)
+        mount_options = getattr(self.configuration,
+                                'lustre_mount_options',
+                                CONF.lustre_mount_options)
+        if mount_options:
+            self.configuration.nas_mount_options = '-o %s' % mount_options
 
     def do_setup(self, context):
         """Any initialization the volume driver does while starting."""
