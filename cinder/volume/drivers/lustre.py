@@ -155,7 +155,7 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
 
     def _qemu_img_info(self, path, volume_name):
         return super(LustreDriver, self)._qemu_img_info_base(
-            path, volume_name, self.configuration.lustre_mount_point_base)
+            path, volume_name, self.base, force_share=True)
 
     def check_for_setup_error(self):
         """Just to override parent behavior."""
@@ -163,8 +163,7 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
 
     def _local_volume_dir(self, volume):
         hashed = self._get_hash_str(volume.provider_location)
-        path = '%s/%s' % (self.configuration.lustre_mount_point_base,
-                          hashed)
+        path = '%s/%s' % (self.base, hashed)
         return path
 
     def _active_volume_path(self, volume):
@@ -301,7 +300,7 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
 
         # Find active qcow2 file
         active_file = self.get_active_image_from_info(volume)
-        path = '%s/%s/%s' % (self.configuration.lustre_mount_point_base,
+        path = '%s/%s/%s' % (self.base,
                              self._get_hash_str(volume.provider_location),
                              active_file)
 
