@@ -13,15 +13,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import binascii
 import errno
 import os
 import stat
+import tempfile
 
+from castellan import key_manager
 from os_brick.remotefs import remotefs as remotefs_brick
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_log import log as logging
-from oslo_utils import fileutils
 from oslo_utils import units
 
 from cinder import coordination
@@ -31,28 +33,40 @@ from cinder.image import image_utils
 from cinder import interface
 from cinder.privsep import fs
 from cinder import utils
-from cinder.volume.drivers import remotefs as remotefs_drv
+from cinder.volume.drivers import remotefs
+from cinder.volume import volume_utils
 
 LOG = logging.getLogger(__name__)
 
 
-volume_opts = [
+lustre_opts = [
     cfg.StrOpt('lustre_share_host',
                default='',
-               help='IP/hostname of lustre system, like 1.2.3.4@tcp'),
+               help='MGS NID of Lustre system, like "1.2.3.4@tcp".'),
     cfg.StrOpt('lustre_share_path',
                default='',
-               help='fsname/subdirectory path for Lustre'),
+               help='Path to the Lustre filesystem/subdirectory.'),
+    cfg.StrOpt('lustre_shares_config',
+               default='/etc/cinder/lustre_shares',
+               help='File with the list of available Lustre shares.'),
     cfg.StrOpt('lustre_mount_point_base',
                default='$state_path/mnt',
-               help='Base dir containing mount points for lustre shares.'),
+               help='Base dir containing mount points for Lustre shares.'),
     cfg.StrOpt('lustre_mount_options',
                default='flock',
-               help='Comma-separated string of Lustre mount options.')
+               help='Comma-separated string of Lustre mount options.'),
+    cfg.BoolOpt('lustre_sparsed_volumes',
+                default=True,
+                help='Create volumes as sparsed files which take no space. '
+                     'If set to False volume is created as regular file. '
+                     'In such case volume creation takes a lot of time.'),
+    cfg.BoolOpt('lustre_qcow2_volumes',
+                default=False,
+                help='Create volumes as QCOW2 files rather than raw files.')
 ]
 
 CONF = cfg.CONF
-CONF.register_opts(volume_opts)
+CONF.register_opts(lustre_opts)
 
 
 class LustreException(exception.RemoteFSException):
@@ -68,7 +82,7 @@ class LustreNoSharesMounted(exception.RemoteFSNoSharesMounted):
 
 
 @interface.volumedriver
-class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
+class LustreDriver(remotefs.RemoteFSSnapDriverDistributed):
     """Lustre based cinder driver.
 
     Creates file on Lustre share for using it as block device on hypervisor.
@@ -86,9 +100,11 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = "Lustre_CI"
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, execute=processutils.execute, *args, **kwargs):
+        self._remotefsclient = None
         super(LustreDriver, self).__init__(*args, **kwargs)
-        self.configuration.append_config_values(volume_opts)
+        self.configuration.append_config_values(lustre_opts)
+        root_helper = utils.get_root_helper()
         self.configuration.nas_host = getattr(self.configuration,
                                               'lustre_share_host',
                                               CONF.lustre_share_host)
@@ -98,52 +114,47 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         self.base = getattr(self.configuration,
                             'lustre_mount_point_base',
                             CONF.lustre_mount_point_base)
-        mount_options = getattr(self.configuration,
-                                'lustre_mount_options',
-                                CONF.lustre_mount_options)
-        if mount_options:
-            self.configuration.nas_mount_options = '-o %s' % mount_options
+        self.base = os.path.realpath(self.base)
+        lustre_mount_options = getattr(self.configuration,
+                                       'lustre_mount_options',
+                                       CONF.lustre_mount_options)
 
-    def do_setup(self, context):
-        """Any initialization the volume driver does while starting."""
-        super(LustreDriver, self).do_setup(context)
-        root_helper = utils.get_root_helper()
         self._remotefsclient = remotefs_brick.RemoteFsClient(
-            'lustre', root_helper, processutils.execute,
-            lustre_mount_point_base=self.base)
+            self.driver_volume_type, root_helper, execute=execute,
+            lustre_mount_point_base=self.base,
+            lustre_mount_options=lustre_mount_options)
+        self._sparse_copy_volume_data = True
+        self._supports_encryption = True
+
+    def check_for_setup_error(self):
+        package = 'mount.lustre'
         try:
-            self._execute('mount.lustre', check_exit_code=False)
+            self._execute(package, check_exit_code=False)
         except OSError as exc:
             if exc.errno == errno.ENOENT:
-                raise LustreException(_('mount.lustre is not installed'))
-            else:
-                raise
-
+                msg = _('Package %s is not installed') % package
+                raise LustreException(msg)
+            raise
         self._refresh_mounts()
 
     def _unmount_shares(self):
         self._load_shares_config()
-        for share in self.shares.keys():
+        for share in self.shares:
             try:
                 self._do_umount(True, share)
             except Exception as exc:
                 LOG.warning('Exception during unmounting %s', exc)
 
+    @coordination.synchronized('{self.driver_prefix}-{share}')
     def _do_umount(self, ignore_not_mounted, share):
-        mount_path = self._get_mount_point_for_share(share)
+        mntpoints = self._remotefsclient._read_mounts()
+        mntpoint = self._get_mount_point_for_share(share)
+        if mntpoint not in mntpoints:
+            LOG.debug('Lustre share %(share)s is not mounted at %(mntpoint)s',
+                      {'share': share, 'mntpoint': mntpoint})
+            return
         try:
-            fs.umount(mount_path)
-        except processutils.ProcessExecutionError as exc:
-            if ignore_not_mounted and 'not mounted' in exc.stderr:
-                LOG.info("%s is already umounted", share)
-            else:
-                LOG.error("Failed to umount %(share)s, reason=%(stderr)s",
-                          {'share': share, 'stderr': exc.stderr})
-                raise
-
-    def _refresh_mounts(self):
-        try:
-            self._unmount_shares()
+            fs.umount(mntpoint)
         except processutils.ProcessExecutionError as exc:
             if 'target is busy' in exc.stderr:
                 LOG.warning("Failed to refresh mounts, reason=%s",
@@ -151,26 +162,14 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
             else:
                 raise
 
+    def _refresh_mounts(self):
+        self._unmount_shares()
         self._ensure_shares_mounted()
 
     def _qemu_img_info(self, path, volume_name):
         return super(LustreDriver, self)._qemu_img_info_base(
-            path, volume_name, self.base, force_share=True)
-
-    def check_for_setup_error(self):
-        """Just to override parent behavior."""
-        pass
-
-    def _local_volume_dir(self, volume):
-        hashed = self._get_hash_str(volume.provider_location)
-        path = '%s/%s' % (self.base, hashed)
-        return path
-
-    def _active_volume_path(self, volume):
-        volume_dir = self._local_volume_dir(volume)
-        path = os.path.join(volume_dir,
-                            self.get_active_image_from_info(volume))
-        return path
+            path, volume_name, self.base, force_share=True,
+            run_as_root=self._execute_as_root)
 
     def _update_volume_stats(self):
         """Retrieve stats info from volume group."""
@@ -191,34 +190,21 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
             self.configuration.max_over_subscription_ratio)
         data['thin_provisioning_support'] = thin_enabled
         data['thick_provisioning_support'] = not thin_enabled
+        data['multiattach'] = not self.configuration.lustre_qcow2_volumes
 
         self._stats = data
-
-    @coordination.synchronized('{self.driver_prefix}-{volume[id]}')
-    def create_volume(self, volume):
-        """Creates a volume."""
-
-        self._ensure_shares_mounted()
-
-        volume.provider_location = self._find_share(volume)
-
-        LOG.info('casted to %s', volume.provider_location)
-
-        self._do_create_volume(volume)
-
-        return {'provider_location': volume.provider_location}
 
     def _copy_volume_from_snapshot(self, snapshot, volume, volume_size,
                                    src_encryption_key_id=None,
                                    new_encryption_key_id=None):
-        # """Copy data from snapshot to destination volume.
+        """Copy data from snapshot to destination volume.
 
-        # This is done with a qemu-img convert to raw/qcow2 from the snapshot
-        # qcow2.
-        # """
+        This is done with a qemu-img convert to raw/qcow2 from the snapshot
+        qcow2.
+        """
 
-        LOG.debug("snapshot: %(snap)s, volume: %(vol)s, "
-                  "volume_size: %(size)s",
+        LOG.debug("Copying snapshot: %(snap)s -> volume: %(vol)s, "
+                  "volume_size: %(size)s GB",
                   {'snap': snapshot.id,
                    'vol': volume.id,
                    'size': volume_size})
@@ -231,51 +217,61 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
 
         # Find the file which backs this file, which represents the point
         # when this snapshot was created.
-        img_info = self._qemu_img_info(forward_path,
-                                       snapshot.volume.name)
+        img_info = self._qemu_img_info(forward_path, snapshot.volume.name)
         path_to_snap_img = os.path.join(vol_path, img_info.backing_file)
 
         path_to_new_vol = self._local_path_volume(volume)
 
         LOG.debug("will copy from snapshot at %s", path_to_snap_img)
 
-        if self.configuration.nas_volume_prov_type == 'thin':
+        if self.configuration.lustre_qcow2_volumes:
             out_format = 'qcow2'
         else:
             out_format = 'raw'
 
-        image_utils.convert_image(path_to_snap_img,
-                                  path_to_new_vol,
-                                  out_format)
+        if new_encryption_key_id is not None:
+            if src_encryption_key_id is None:
+                message = _("Can't create an encrypted volume %(format)s "
+                            "from an unencrypted source."
+                            ) % {'format': out_format}
+                LOG.error(message)
+                # TODO(enriquetaso): handle unencrypted snap->encrypted vol
+                raise exception.NfsException(message)
+            keymgr = key_manager.API(CONF)
+            new_key = keymgr.get(volume.obj_context, new_encryption_key_id)
+            new_passphrase = \
+                binascii.hexlify(new_key.get_encoded()).decode('utf-8')
+
+            # volume.obj_context is the owner of this request
+            src_key = keymgr.get(volume.obj_context, src_encryption_key_id)
+            src_passphrase = \
+                binascii.hexlify(src_key.get_encoded()).decode('utf-8')
+
+            tmp_dir = volume_utils.image_conversion_dir()
+            with tempfile.NamedTemporaryFile(prefix='luks_',
+                                             dir=tmp_dir) as src_pass_file:
+                with open(src_pass_file.name, 'w') as f:
+                    f.write(src_passphrase)
+
+                with tempfile.NamedTemporaryFile(prefix='luks_',
+                                                 dir=tmp_dir) as new_pass_file:
+                    with open(new_pass_file.name, 'w') as f:
+                        f.write(new_passphrase)
+
+                    image_utils.convert_image(
+                        path_to_snap_img,
+                        path_to_new_vol,
+                        'luks',
+                        passphrase_file=new_pass_file.name,
+                        src_passphrase_file=src_pass_file.name,
+                        run_as_root=self._execute_as_root)
+        else:
+            image_utils.convert_image(path_to_snap_img,
+                                      path_to_new_vol,
+                                      out_format,
+                                      run_as_root=self._execute_as_root)
 
         self._set_rw_permissions_for_all(path_to_new_vol)
-
-    @coordination.synchronized('{self.driver_prefix}-{volume[id]}')
-    def delete_volume(self, volume):
-        """Deletes a logical volume."""
-
-        if not volume.provider_location:
-            LOG.warning('Vol %s does not have provider_location, skip',
-                        volume.name)
-            return
-
-        self._ensure_share_mounted(volume.provider_location)
-
-        mounted_path = self._active_volume_path(volume)
-
-        self._execute('rm', '-f', mounted_path, run_as_root=True)
-
-        # If an exception (e.g. timeout) occurred during delete_snapshot, the
-        # base volume may linger around, so just delete it if it exists
-        base_volume_path = self._local_path_volume(volume)
-        fileutils.delete_if_exists(base_volume_path)
-
-        info_path = self._local_path_volume_info(volume)
-        fileutils.delete_if_exists(info_path)
-
-    def _get_matching_backing_file(self, backing_chain, snapshot_file):
-        return next(f for f in backing_chain
-                    if f.get('backing-filename', '') == snapshot_file)
 
     def ensure_export(self, ctx, volume):
         """Synchronously recreates an export for a logical volume."""
@@ -317,7 +313,7 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
             raise exception.InvalidVolume(msg)
 
         return {
-            'driver_volume_type': 'lustre',
+            'driver_volume_type': self.driver_volume_type,
             'data': data,
             'mount_point_base': self._get_mount_point_base()
         }
@@ -326,80 +322,30 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
         """Disallow connection from connector."""
         pass
 
-    @coordination.synchronized('{self.driver_prefix}-{volume[id]}')
-    def extend_volume(self, volume, size_gb):
-        volume_path = self._active_volume_path(volume)
+    def extend_volume(self, volume, new_size):
+        """Extend an existing volume to the new size."""
 
-        info = self._qemu_img_info(volume_path, volume.name)
-        backing_fmt = info.file_format
+        LOG.info('Extending volume %(volume)s to %(size)sG.',
+                 {'volume': volume.name, 'size': new_size})
+        path = self.local_path(volume)
+        image_utils.resize_image(path, new_size,
+                                 run_as_root=self._execute_as_root)
+        info = self._qemu_img_info(path, volume.name)
+        size = info.virtual_size / units.Gi
+        if size != new_size:
+            raise exception.ExtendVolumeError(
+                reason='Resizing image file failed.')
 
-        if backing_fmt not in ['raw', 'qcow2']:
-            msg = _('Unrecognized backing format: %s')
-            raise exception.InvalidVolume(msg % backing_fmt)
-
-        # qemu-img can resize both raw and qcow2 files
-        image_utils.resize_image(volume_path, size_gb)
-
-    def _fallocate(self, path, size):
-        """Creates a raw file of given size in GiB using fallocate."""
-        self._execute('fallocate', '--length=%sG' % size,
-                      path, run_as_root=True)
-
-    def _do_create_volume(self, volume):
-        """Create a volume on given lustre_share.
-
-        :param volume: volume reference
-        """
-
-        volume_path = self.local_path(volume)
-        volume_size = volume.size
-
-        LOG.debug("creating new volume at %s", volume_path)
-
-        if os.path.exists(volume_path):
-            msg = _('file already exists at %s') % volume_path
-            LOG.error(msg)
-            raise exception.InvalidVolume(reason=msg)
-
-        if self.configuration.nas_volume_prov_type == 'thin':
-            self._create_qcow2_file(volume_path, volume_size)
-        else:
-            try:
-                self._fallocate(volume_path, volume_size)
-            except processutils.ProcessExecutionError as exc:
-                if 'Operation not supported' in exc.stderr:
-                    LOG.warning('Fallocate unsupported, fall back to dd')
-                    self._create_regular_file(volume_path, volume_size)
-                else:
-                    fileutils.delete_if_exists(volume_path)
-                    raise
-
-        self._set_rw_permissions_for_all(volume_path)
-
-    def _ensure_shares_mounted(self):
-        """Mount all configured Lustre shares."""
-
-        self._mounted_shares = []
-
-        self._load_shares_config()
-
-        for share in self.shares.keys():
-            try:
-                self._ensure_share_mounted(share)
-                self._mounted_shares.append(share)
-            except Exception as exc:
-                LOG.error('Exception during mounting %s', exc)
-
-        LOG.debug('Available shares: %s', self._mounted_shares)
-
-    def _ensure_share_mounted(self, lustre_share):
+    @coordination.synchronized('{self.driver_prefix}-{share}')
+    def _ensure_share_mounted(self, share):
         """Mount Lustre share.
 
-        :param lustre_share: string
+        :param share: string
         """
-        mount_path = self._get_mount_point_for_share(lustre_share)
-        self._mount_lustre(lustre_share)
+        mount_path = self._get_mount_point_for_share(share)
+        self._mount_lustre(share)
 
+        # TODO(deiter): secure NAS/mount_attempts
         # Ensure we can write to this share
         group_id = os.getegid()
         current_group_id = utils.get_file_gid(mount_path)
@@ -455,40 +401,3 @@ class LustreDriver(remotefs_drv.RemoteFSSnapDriverDistributed):
             LOG.error("Mount failure for %(share)s.",
                       {'share': lustre_share})
             raise
-
-    def backup_volume(self, context, backup, backup_service):
-        """Create a new backup from an existing volume.
-
-        Allow a backup to occur only if no snapshots exist.
-        Check both Cinder and the file on-disk.  The latter is only
-        a safety mechanism to prevent further damage if the snapshot
-        information is already inconsistent.
-        """
-
-        snapshots = self.db.snapshot_get_all_for_volume(context,
-                                                        backup['volume_id'])
-        snap_error_msg = _('Backup is not supported for Lustre '
-                           'volumes with snapshots.')
-        if len(snapshots) > 0:
-            raise exception.InvalidVolume(snap_error_msg)
-
-        volume = self.db.volume_get(context, backup['volume_id'])
-
-        active_file_path = self._active_volume_path(volume)
-
-        info = self._qemu_img_info(active_file_path, volume.name)
-
-        if info.backing_file is not None:
-            LOG.error('No snapshots found in database, but '
-                      '%(path)s has backing file %(backing_file)s!',
-                      {'path': active_file_path,
-                       'backing_file': info.backing_file})
-            raise exception.InvalidVolume(snap_error_msg)
-
-        if info.file_format != 'raw':
-            msg = _('Backup is only supported for raw-formatted '
-                    'Lustre volumes.')
-            raise exception.InvalidVolume(msg)
-
-        return super(LustreDriver, self).backup_volume(
-            context, backup, backup_service)
