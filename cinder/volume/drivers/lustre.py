@@ -401,3 +401,176 @@ class LustreDriver(remotefs.RemoteFSSnapDriverDistributed):
             LOG.error("Mount failure for %(share)s.",
                       {'share': lustre_share})
             raise
+
+    # Workaround for ES-32
+    def _create_volume_from_snapshot(self, volume, snapshot):
+        """Creates a volume from a snapshot.
+
+        Snapshot must not be the active snapshot. (offline)
+        """
+
+        LOG.debug('Creating volume %(vol)s from snapshot %(snap)s',
+                  {'vol': volume.id, 'snap': snapshot.id})
+
+        if snapshot.status not in ['available', 'backing-up']:
+            msg = (_('Snapshot status must be "available" or '
+                     '"backing-up" to clone. But is: %(status)s')
+                   % {'status': snapshot.status})
+
+            raise exception.InvalidSnapshot(msg)
+
+        self._ensure_shares_mounted()
+
+        volume.provider_location = self._find_share(volume)
+
+        self._do_create_volume(volume)
+
+        self._copy_volume_from_snapshot(snapshot,
+                                        volume,
+                                        volume.size,
+                                        snapshot.volume.encryption_key_id,
+                                        volume.encryption_key_id)
+
+        return {'provider_location': volume.provider_location}
+
+    # Workaround for ES-15
+    def _create_snapshot(self, snapshot):
+        """Create a snapshot.
+
+        If volume is attached, call to Nova to create snapshot, providing a
+        qcow2 file. Cinder creates and deletes qcow2 files, but Nova is
+        responsible for transitioning the VM between them and handling live
+        transfers of data between files as required.
+
+        If volume is detached, create locally with qemu-img. Cinder handles
+        manipulation of qcow2 files.
+
+        A file named volume-<uuid>.info is stored with the volume
+        data and is a JSON table which contains a mapping between
+        Cinder snapshot UUIDs and filenames, as these associations
+        will change as snapshots are deleted.
+
+
+        Basic snapshot operation:
+
+        1. Initial volume file:
+            volume-1234
+
+        2. Snapshot created:
+            volume-1234  <- volume-1234.aaaa
+
+            volume-1234.aaaa becomes the new "active" disk image.
+            If the volume is not attached, this filename will be used to
+            attach the volume to a VM at volume-attach time.
+            If the volume is attached, the VM will switch to this file as
+            part of the snapshot process.
+
+            Note that volume-1234.aaaa represents changes after snapshot
+            'aaaa' was created.  So the data for snapshot 'aaaa' is actually
+            in the backing file(s) of volume-1234.aaaa.
+
+            This file has a qcow2 header recording the fact that volume-1234 is
+            its backing file.  Delta changes since the snapshot was created are
+            stored in this file, and the backing file (volume-1234) does not
+            change.
+
+            info file: { 'active': 'volume-1234.aaaa',
+                         'aaaa':   'volume-1234.aaaa' }
+
+        3. Second snapshot created:
+            volume-1234 <- volume-1234.aaaa <- volume-1234.bbbb
+
+            volume-1234.bbbb now becomes the "active" disk image, recording
+            changes made to the volume.
+
+            info file: { 'active': 'volume-1234.bbbb',  (* changed!)
+                         'aaaa':   'volume-1234.aaaa',
+                         'bbbb':   'volume-1234.bbbb' } (* added!)
+
+        4. Snapshot deletion when volume is attached ('in-use' state):
+
+            * When first snapshot is deleted, Cinder calls Nova for online
+              snapshot deletion. Nova deletes snapshot with id "aaaa" and
+              makes snapshot with id "bbbb" point to the base image.
+              Snapshot with id "bbbb" is the active image.
+
+              volume-1234 <- volume-1234.bbbb
+
+              info file: { 'active': 'volume-1234.bbbb',
+                           'bbbb':   'volume-1234.bbbb'
+                         }
+
+             * When second snapshot is deleted, Cinder calls Nova for online
+               snapshot deletion. Nova deletes snapshot with id "bbbb" by
+               pulling volume-1234's data into volume-1234.bbbb. This
+               (logically) removes snapshot with id "bbbb" and the active
+               file remains the same.
+
+               volume-1234.bbbb
+
+               info file: { 'active': 'volume-1234.bbbb' }
+
+           TODO (deepakcs): Change this once Nova supports blockCommit for
+                            in-use volumes.
+
+        5. Snapshot deletion when volume is detached ('available' state):
+
+            * When first snapshot is deleted, Cinder does the snapshot
+              deletion. volume-1234.aaaa is removed from the snapshot chain.
+              The data from it is merged into its parent.
+
+              volume-1234.bbbb is rebased, having volume-1234 as its new
+              parent.
+
+              volume-1234 <- volume-1234.bbbb
+
+              info file: { 'active': 'volume-1234.bbbb',
+                           'bbbb':   'volume-1234.bbbb'
+                         }
+
+            * When second snapshot is deleted, Cinder does the snapshot
+              deletion. volume-1234.aaaa is removed from the snapshot chain.
+              The base image, volume-1234 becomes the active image for this
+              volume again.
+
+              volume-1234
+
+              info file: { 'active': 'volume-1234' }  (* changed!)
+        """
+
+        LOG.debug('Creating %(type)s snapshot %(snap)s of volume %(vol)s',
+                  {'snap': snapshot.id, 'vol': snapshot.volume.id,
+                   'type': ('online'
+                            if self._is_volume_attached(snapshot.volume)
+                            else 'offline')})
+
+        status = snapshot.volume.status
+
+        acceptable_states = ['available', 'in-use', 'backing-up']
+        if (snapshot.display_name and
+                snapshot.display_name.startswith('tmp-snap-')):
+            # This is an internal volume snapshot. In order to support
+            # image caching, we'll allow creating/deleting such snapshots
+            # while having volumes in 'downloading' state.
+            acceptable_states.append('downloading')
+
+        self._validate_state(status, acceptable_states)
+
+        info_path = self._local_path_volume_info(snapshot.volume)
+        snap_info = self._read_info_file(info_path, empty_if_missing=True)
+        backing_filename = self.get_active_image_from_info(
+            snapshot.volume)
+        new_snap_path = self._get_new_snap_path(snapshot)
+
+        if self._is_volume_attached(snapshot.volume):
+            self._create_snapshot_online(snapshot,
+                                         backing_filename,
+                                         new_snap_path)
+        else:
+            self._do_create_snapshot(snapshot,
+                                     backing_filename,
+                                     new_snap_path)
+
+        snap_info['active'] = os.path.basename(new_snap_path)
+        snap_info[snapshot.id] = os.path.basename(new_snap_path)
+        self._write_info_file(info_path, snap_info)
