@@ -329,6 +329,29 @@ class LustreDriver(remotefs.RemoteFSSnapDriverDistributed):
         """Disallow connection from connector."""
         pass
 
+    def delete_volume(self, volume):
+        """Deletes a logical volume."""
+
+        LOG.debug('Deleting volume %(vol)s, provider_location: %(loc)s',
+                  {'vol': volume.id, 'loc': volume.provider_location})
+
+        if not volume.provider_location:
+            LOG.warning('Volume %s does not have provider_location '
+                        'specified, skipping', volume.name)
+            return
+
+        info_path = self._local_path_volume_info(volume)
+        info = self._read_info_file(info_path, empty_if_missing=True)
+
+        if info:
+            base_volume_path = os.path.join(self._local_volume_dir(volume),
+                                            info['active'])
+            self._delete(info_path)
+        else:
+            base_volume_path = self._local_path_volume(volume)
+
+        self._delete(base_volume_path)
+
     def extend_volume(self, volume, new_size):
         """Extend an existing volume to the new size."""
 
