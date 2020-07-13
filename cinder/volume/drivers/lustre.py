@@ -125,6 +125,12 @@ class LustreDriver(remotefs.RemoteFSSnapDriverDistributed):
             lustre_mount_options=lustre_mount_options)
         self._sparse_copy_volume_data = True
         self._supports_encryption = True
+        self.reserved_percentage = self.configuration.reserved_percentage
+        supports_auto_mosr = kwargs.get('supports_auto_mosr', False)
+        self.max_over_subscription_ratio = (
+            volume_utils.get_max_over_subscription_ratio(
+                self.configuration.max_over_subscription_ratio,
+                supports_auto=supports_auto_mosr))
 
     def check_for_setup_error(self):
         package = 'mount.lustre'
@@ -179,7 +185,7 @@ class LustreDriver(remotefs.RemoteFSSnapDriverDistributed):
         global_capacity = data['total_capacity_gb']
         global_free = data['free_capacity_gb']
 
-        thin_enabled = self.configuration.nas_volume_prov_type == 'thin'
+        thin_enabled = self.configuration.lustre_sparsed_volumes
         if thin_enabled:
             provisioned_capacity = self._get_provisioned_capacity()
         else:
@@ -188,6 +194,7 @@ class LustreDriver(remotefs.RemoteFSSnapDriverDistributed):
         data['provisioned_capacity_gb'] = provisioned_capacity
         data['max_over_subscription_ratio'] = (
             self.configuration.max_over_subscription_ratio)
+        data['reserved_percentage'] = self.reserved_percentage
         data['thin_provisioning_support'] = thin_enabled
         data['thick_provisioning_support'] = not thin_enabled
         data['multiattach'] = not self.configuration.lustre_qcow2_volumes
