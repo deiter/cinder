@@ -45,7 +45,7 @@ CONF.register_opts(lustrebackup_service_opts)
 class LustreBackupDriver(posix.PosixBackupDriver):
     """Provides backup, restore and delete using Lustre repository."""
 
-    def __init__(self, context, db_driver=None):
+    def __init__(self, context, db=None):
         self._check_configuration()
         self.backup_mount_point_base = CONF.lustre_backup_mount_point
         self.backup_share = CONF.lustre_backup_share
