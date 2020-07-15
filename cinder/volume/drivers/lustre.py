@@ -83,6 +83,7 @@ class LustreNoSharesMounted(exception.RemoteFSNoSharesMounted):
 
 @interface.volumedriver
 class LustreDriver(remotefs.RevertToSnapshotMixin,
+                   remotefs.RemoteFSManageableVolumesMixin,
                    remotefs.RemoteFSSnapDriverDistributed):
     """Lustre based cinder driver.
 
