@@ -134,6 +134,10 @@ class LustreDriver(remotefs.RevertToSnapshotMixin,
                 self.configuration.max_over_subscription_ratio,
                 supports_auto=supports_auto_mosr))
 
+    @staticmethod
+    def get_driver_options():
+        return lustre_opts
+
     def check_for_setup_error(self):
         package = 'mount.lustre'
         try:
@@ -200,6 +204,7 @@ class LustreDriver(remotefs.RevertToSnapshotMixin,
         data['thin_provisioning_support'] = thin_enabled
         data['thick_provisioning_support'] = not thin_enabled
         data['multiattach'] = not self.configuration.lustre_qcow2_volumes
+        data['sparse_copy_volume'] = True
 
         self._stats = data
 
