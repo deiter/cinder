@@ -82,7 +82,8 @@ class LustreNoSharesMounted(exception.RemoteFSNoSharesMounted):
 
 
 @interface.volumedriver
-class LustreDriver(remotefs.RemoteFSSnapDriverDistributed):
+class LustreDriver(remotefs.RevertToSnapshotMixin,
+                   remotefs.RemoteFSSnapDriverDistributed):
     """Lustre based cinder driver.
 
     Creates file on Lustre share for using it as block device on hypervisor.
