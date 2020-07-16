@@ -36,6 +36,7 @@ from cinder.backup import driver as cinder_backup_driver
 from cinder.backup.drivers import ceph as cinder_backup_drivers_ceph
 from cinder.backup.drivers import gcs as cinder_backup_drivers_gcs
 from cinder.backup.drivers import glusterfs as cinder_backup_drivers_glusterfs
+from cinder.backup.drivers import lustre as cinder_backup_drivers_lustre
 from cinder.backup.drivers import nfs as cinder_backup_drivers_nfs
 from cinder.backup.drivers import posix as cinder_backup_drivers_posix
 from cinder.backup.drivers import swift as cinder_backup_drivers_swift
@@ -122,6 +123,7 @@ from cinder.volume.drivers.lenovo import lenovo_common as \
     cinder_volume_drivers_lenovo_lenovocommon
 from cinder.volume.drivers import linstordrv as \
     cinder_volume_drivers_linstordrv
+from cinder.volume.drivers import lustre as cinder_volume_drivers_lustre
 from cinder.volume.drivers import lvm as cinder_volume_drivers_lvm
 from cinder.volume.drivers.macrosan import driver as \
     cinder_volume_drivers_macrosan_driver
@@ -205,6 +207,7 @@ def list_opts():
                 cinder_backup_drivers_ceph.service_opts,
                 cinder_backup_drivers_gcs.gcsbackup_service_opts,
                 cinder_backup_drivers_glusterfs.glusterfsbackup_service_opts,
+                cinder_backup_drivers_lustre.lustrebackup_service_opts,
                 cinder_backup_drivers_nfs.nfsbackup_service_opts,
                 cinder_backup_drivers_posix.posixbackup_service_opts,
                 cinder_backup_drivers_swift.swiftbackup_service_opts,
@@ -260,6 +263,7 @@ def list_opts():
                 instorage_mcs_opts,
                 cinder_volume_drivers_inspur_instorage_instorageiscsi.
                 instorage_mcs_iscsi_opts,
+                cinder_volume_drivers_lustre.lustre_opts,
                 cinder_volume_drivers_sandstone_sdsdriver.sds_opts,
                 cinder_volume_drivers_veritas_access_veritasiscsi.VA_VOL_OPTS,
                 cinder_volume_manager.volume_manager_opts,

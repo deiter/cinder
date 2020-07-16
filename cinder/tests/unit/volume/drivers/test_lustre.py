@@ -16,16 +16,16 @@
 
 import errno
 import os
-import six
 import tempfile
 import time
 import traceback
+from unittest import mock
 
-import mock
 import os_brick
 from oslo_concurrency import processutils as putils
 from oslo_utils import imageutils
 from oslo_utils import units
+import six
 
 from cinder import compute
 from cinder import context
@@ -40,7 +40,6 @@ from cinder import utils
 from cinder.volume import driver as base_driver
 from cinder.volume.drivers import lustre
 from cinder.volume.drivers import remotefs as remotefs_drv
-from os_brick.remotefs import remotefs as remotefs_brick
 
 
 class FakeDb(object):
@@ -97,7 +96,7 @@ class LustreDriverTestCase(test.TestCase):
                                 db=FakeDb())
         self._driver.shares = {}
         root_helper = utils.get_root_helper()
-        self._driver._remotefsclient = remotefs_brick.RemoteFsClient(
+        self._driver._remotefsclient = os_brick.remotefs.RemoteFsClient(
             'lustre', root_helper, putils.execute,
             lustre_mount_point_base=self.TEST_MNT_POINT_BASE)
         compute.API = mock.MagicMock()
@@ -568,7 +567,8 @@ class LustreDriverTestCase(test.TestCase):
                 mock_ensure_share_mounted,\
                 mock.patch.object(self._driver, '_local_volume_dir') as \
                 mock_local_volume_dir,\
-                mock.patch.object(self._driver, 'get_active_image_from_info') as \
+                mock.patch.object(self._driver,
+                                  'get_active_image_from_info') as \
                 mock_active_image_from_info,\
                 mock.patch.object(self._driver, '_execute') as \
                 mock_execute,\
@@ -976,9 +976,11 @@ class LustreDriverTestCase(test.TestCase):
         snap_path = '%s.%s' % (volume_path, self.SNAP_UUID)
         snap_file = '%s.%s' % (volume_file, self.SNAP_UUID)
 
-        with mock.patch.object(drv, '_do_create_snapshot') as mock_do_create_snapshot,\
-                mock.patch.object(db, 'snapshot_get') as mock_snapshot_get,\
-                mock.patch.object(drv, '_nova') as mock_nova,\
+        with mock.patch.object(drv, '_do_create_snapshot') as \
+                mock_do_create_snapshot, \
+                mock.patch.object(db, 'snapshot_get') as \
+                mock_snapshot_get, \
+                mock.patch.object(drv, '_nova') as mock_nova, \
                 mock.patch.object(time, 'sleep') as mock_sleep:
 
             mock_snapshot_get.side_effect = SideEffectList(
