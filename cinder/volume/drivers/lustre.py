@@ -206,6 +206,7 @@ class LustreDriver(remotefs.RevertToSnapshotMixin,
         data['thick_provisioning_support'] = not thin_enabled
         data['multiattach'] = not self.configuration.lustre_qcow2_volumes
         data['sparse_copy_volume'] = True
+        data['vendor_name'] = self.vendor_name
         self._stats = data
 
     def _copy_volume_from_snapshot(self, snapshot, volume, volume_size,
