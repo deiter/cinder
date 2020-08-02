@@ -94,11 +94,12 @@ class LustreDriver(remotefs.RevertToSnapshotMixin,
     or the snapshot .info file simultaneously.
     """
 
+    vendor_name = 'DDN'
     driver_volume_type = 'lustre'
     driver_prefix = 'lustre'
     volume_backend_name = 'Lustre'
     VERSION = '1.0.0'
-    CI_WIKI_NAME = "Lustre_CI"
+    CI_WIKI_NAME = "DDN_CI"
 
     def __init__(self, execute=processutils.execute, *args, **kwargs):
         self._remotefsclient = None
