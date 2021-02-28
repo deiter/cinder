@@ -1,4 +1,4 @@
-# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2021 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -2158,7 +2158,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         This method will be called before _copy_volume_data during volume
         migration
         """
-        connector_properties = cinder_utils.brick_get_connector_properties()
+        connector_properties = volume_utils.brick_get_connector_properties()
         attach_info, dst_volume = self._attach_volume(
             ctxt, dst_volume, connector_properties, remote=True)
         dst_file_path = attach_info['device']['path']
