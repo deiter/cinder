@@ -98,7 +98,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
     """
 
     VERSION = '1.5.3'
-    CI_WIKI_NAME = "Nexenta_CI"
+    CI_WIKI_NAME = 'Nexenta_CI'
 
     vendor_name = 'Nexenta'
     product_name = 'NexentaStor5'

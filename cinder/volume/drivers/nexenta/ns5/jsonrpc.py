@@ -1,4 +1,4 @@
-# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2021 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -1036,6 +1036,13 @@ class NefProxy(object):
                      {'backend': self.backend, 'version': self.version})
         else:
             self.version = None
+        if software and 'apiVersion' in software:
+            api = software['apiVersion']
+            self.headers['Accept-Version'] = api
+            LOG.info('NEF API version for group %(backend)s: %(api)s',
+                     {'backend': self.backend, 'api': api})
+        else if 'Accept-Version' in self.headers:
+            del self.headers['Accept-Version']
         try:
             settings = self.settings.get('system.guid')
         except Exception:

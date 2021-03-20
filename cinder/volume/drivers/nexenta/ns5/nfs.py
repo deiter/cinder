@@ -113,7 +113,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
     """
 
     VERSION = '1.9.5'
-    CI_WIKI_NAME = "Nexenta_CI"
+    CI_WIKI_NAME = 'Nexenta_CI'
 
     vendor_name = 'Nexenta'
     product_name = 'NexentaStor5'
