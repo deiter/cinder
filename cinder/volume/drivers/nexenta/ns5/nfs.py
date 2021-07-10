@@ -1,4 +1,4 @@
-# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2021 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -109,9 +109,10 @@ class NexentaNfsDriver(nfs.NfsDriver):
         1.9.4 - Added support for nohide NFS option.
               - Fixed concurrency issues.
         1.9.5 - Fixed issue with retries when mounting an NFS share.
+        1.9.6 - Fixed unmount issue after volume backup/retype.
     """
 
-    VERSION = '1.9.5'
+    VERSION = '1.9.6'
     CI_WIKI_NAME = "Nexenta_CI"
 
     vendor_name = 'Nexenta'
@@ -760,22 +761,30 @@ class NexentaNfsDriver(nfs.NfsDriver):
             LOG.debug('NFS share %(share)s is not mounted at %(mntpoint)s',
                       {'share': share, 'mntpoint': mntpoint})
             return
+        can_unmount = False
+        if hasattr(self._remotefsclient, 'unmount'):
+            unmount = getattr(self._remotefsclient, 'unmount')
+            if callable(unmount):
+                can_unmount = True
         attempts = max(1, self.configuration.nfs_mount_attempts)
         for attempt in range(1, attempts + 1):
             try:
-                self._execute('umount', mntpoint, run_as_root=True)
+                if can_unmount:
+                    self._remotefsclient.unmount(share)
+                else:
+                    self._execute('umount', mntpoint, run_as_root=True)
             except processutils.ProcessExecutionError as error:
                 LOG.debug('Unmount attempt %(attempt)s failed: %(error)s, '
                           'retrying unmount NFS share %(share)s mounted '
                           'at %(mntpoint)s',
-                          {'attempt': attempt, 'error': error,
+                          {'attempt': attempt, 'error': error.stderr,
                            'share': share, 'mntpoint': mntpoint})
                 if attempt == attempts:
                     LOG.error('Failed to unmount NFS share %(share)s '
                               'mounted at %(mntpoint)s after %(attempts)s '
                               'attempts: %(error)s',
                               {'share': share, 'mntpoint': mntpoint,
-                               'attempts': attempts, 'error': error})
+                               'attempts': attempts, 'error': error.stderr})
                     raise
                 self.nef.delay(attempt)
             else:
@@ -784,7 +793,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           {'share': share, 'mntpoint': mntpoint,
                            'attempt': attempt})
                 break
-        self._delete(mntpoint)
+        if not can_unmount:
+            self._delete(mntpoint)
 
     def _migrate_volume(self, volume, scheme, hosts, port, path):
         """Storage assisted volume migration."""
@@ -1044,9 +1054,8 @@ class NexentaNfsDriver(nfs.NfsDriver):
     @coordination.synchronized('{self.nef.lock}-{volume[id]}')
     def remove_export(self, ctxt, volume):
         """Driver entry point to remove an export for a volume."""
-        if not self.nas_nohide:
-            share = os.path.join(self.nas_share, volume['name'])
-            self._unmount_share(share)
+        share = os.path.join(self.nas_share, volume['name'])
+        self._unmount_share(share)
 
     def terminate_connection(self, volume, connector, **kwargs):
         """Terminate a connection to a volume.
@@ -1073,6 +1082,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
         volume_image = image.VolumeImage(self, volume, specs)
         volume_image.reload(file_format=True)
         data = {
+            'unmount': True,
             'export': volume_image.share,
             'format': volume_image.file_format,
             'name': volume_image.file_name
@@ -1174,7 +1184,7 @@ class NexentaNfsDriver(nfs.NfsDriver):
                           run_as_root=self._execute_as_root)
         except processutils.ProcessExecutionError as error:
             LOG.error('Failed to remove mountpoint %(mntpoint)s: %(error)s',
-                      {'mntpoint': mntpoint, 'error': error})
+                      {'mntpoint': mntpoint, 'error': error.stderr})
         else:
             LOG.debug('The mount point %(mntpoint)s has been removed',
                       {'mntpoint': mntpoint})

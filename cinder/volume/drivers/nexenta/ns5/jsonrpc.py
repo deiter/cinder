@@ -1,4 +1,4 @@
-# Copyright 2020 Nexenta by DDN, Inc. All rights reserved.
+# Copyright 2021 Nexenta by DDN, Inc. All rights reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -132,8 +132,10 @@ class NefRequest(object):
                        'content': response.content})
             content = None
             if response.content:
-                content = json.loads(response.content)
+                content = response.json()
             if not response.ok:
+                if not content:
+                    content = 'Unknown error'
                 LOG.error('Failed request %(info)s, '
                           'response content: %(content)s',
                           {'info': info, 'content': content})
@@ -195,7 +197,7 @@ class NefRequest(object):
         if response.ok and not response.content:
             return response
         try:
-            content = json.loads(response.content)
+            content = response.json()
         except (TypeError, ValueError) as error:
             code = 'EINVAL'
             message = (_('Failed request hook on %(info)s: '
@@ -278,7 +280,7 @@ class NefRequest(object):
         }
         self.proxy.delete_bearer()
         response = self.request(method, path, payload)
-        content = json.loads(response.content)
+        content = response.json()
         if 'token' in content:
             token = content['token']
             if token:
@@ -299,7 +301,7 @@ class NefRequest(object):
             response = self.request(method, self.proxy.root, payload)
         except Exception:
             return False
-        content = json.loads(response.content)
+        content = response.json()
         if 'data' not in content or not content['data']:
             LOG.error('Pool %(pool)s not found on host %(host)s',
                       {'pool': self.proxy.pool,
